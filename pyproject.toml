@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "brainsurgery"
+version = "0.0.1"
+authors = [
+  { name = "Peter Schneider-Kamp" }
+]
+
+description = "swiss army knife of scripts for performing brain surgery on artificial brains."
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    'numpy',
+    'pyaml',
+    'safetensors',
+    'torch',
+    'typer'
+]
+
+[project.optional-dependencies]
+dev = ["build", "twine"]
+
+[project.urls]
+"Homepage" = "https://github.com/schneiderkamplab/brainsurgery"
+"Bug Tracker" = "https://github.com/schneiderkamplab/brainsurgery/issues"
+
+[tool.hatch.build]
+include = [
+    'brainsurgery',
+    'LICENSE',
+    'README.md',
+]
+
+[project.scripts]
+brainsurgery = "brainsurgery.cli:app"
