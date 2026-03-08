@@ -19,6 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
+    'omegaconf',
     'pyaml',
     'safetensors',
     'torch',
