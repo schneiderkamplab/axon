@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "brainsurgery"
-version = "0.0.2"
+version = "0.0.3"
 authors = [
   { name = "Peter Schneider-Kamp" }
 ]
@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["build", "twine"]
+dev = ["build", "pytest", "twine"]
 
 [project.urls]
 "Homepage" = "https://github.com/schneiderkamplab/brainsurgery"
@@ -42,3 +42,6 @@ include = [
 
 [project.scripts]
 brainsurgery = "brainsurgery.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
