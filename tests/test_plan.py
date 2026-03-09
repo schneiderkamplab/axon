@@ -27,6 +27,12 @@ def test_compile_plan_allows_empty_inputs_list() -> None:
     assert len(plan.transforms) == 1
 
 
+def test_compile_plan_allows_missing_transforms() -> None:
+    plan = compile_plan({"inputs": ["model::/tmp/model.safetensors"]})
+    assert plan.inputs == {"model": Path("/tmp/model.safetensors")}
+    assert plan.transforms == []
+
+
 def test_compile_plan_rejects_non_basic_transform_without_inputs() -> None:
     with pytest.raises(PlanLoaderError, match="missing model alias in reference"):
         compile_plan(
