@@ -197,6 +197,47 @@ def test_value_context_short_prefix_keeps_reference_candidates() -> None:
     assert "b, to: " not in matches
 
 
+def test_reference_value_completion_prefers_aliases_when_multiple_aliases_exist() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: ",
+        begidx=len("copy: { from: "),
+        payload_candidates=[
+            "base",
+            "base::",
+            "scratch",
+            "scratch::",
+            "ln_f.weight",
+            "base::ln_f.weight",
+            "scratch::ln_f.weight",
+            "from: ",
+        ],
+        active_transform="copy",
+        model_aliases=["base", "scratch"],
+    )
+    assert matches == ["base::", "scratch::"]
+
+
+def test_reference_value_prefix_with_multiple_aliases_filters_to_aliases() -> None:
+    matches = _match_payload_candidates(
+        text="s",
+        line_buffer="copy: { from: s",
+        begidx=len("copy: { from: s"),
+        payload_candidates=[
+            "base",
+            "base::",
+            "scratch",
+            "scratch::",
+            "scratch::ln_f.weight",
+            "shared.weight",
+            "from: ",
+        ],
+        active_transform="copy",
+        model_aliases=["base", "scratch"],
+    )
+    assert matches == ["scratch::"]
+
+
 def test_reference_completion_adds_copy_to_continuation_snippet() -> None:
     matches = _match_payload_candidates(
         text="base::ln_f.weight",
@@ -206,6 +247,40 @@ def test_reference_completion_adds_copy_to_continuation_snippet() -> None:
         active_transform="copy",
     )
     assert matches == ["base::ln_f.weight", "base::ln_f.weight, to: "]
+
+
+def test_reference_completion_does_not_add_continuation_for_bare_alias() -> None:
+    matches = _match_payload_candidates(
+        text="base::",
+        line_buffer="copy: { from: base::",
+        begidx=len("copy: { from: base::"),
+        payload_candidates=["base::", "base::ln_f.weight"],
+        active_transform="copy",
+        model_aliases=["base"],
+    )
+    assert matches == ["base::", "base::ln_f.weight"]
+
+
+def test_reference_completion_adds_assign_to_continuation_snippet() -> None:
+    matches = _match_payload_candidates(
+        text="base::ln_f.weight",
+        line_buffer="assign: { from: base::ln_f.weight",
+        begidx=len("assign: { from: base::ln_f.weight"),
+        payload_candidates=["base::", "base::ln_f.weight"],
+        active_transform="assign",
+    )
+    assert matches == ["base::ln_f.weight", "base::ln_f.weight, to: "]
+
+
+def test_reference_completion_adds_ternary_next_reference_key() -> None:
+    matches = _match_payload_candidates(
+        text="base::a.weight",
+        line_buffer="add: { from_a: base::a.weight",
+        begidx=len("add: { from_a: base::a.weight"),
+        payload_candidates=["base::", "base::a.weight"],
+        active_transform="add",
+    )
+    assert matches == ["base::a.weight", "base::a.weight, from_b: "]
 
 
 def test_copy_after_both_keys_only_suggests_close_brace() -> None:
@@ -264,6 +339,30 @@ def test_help_value_completion_suggests_commands() -> None:
     )
     assert "copy" in matches
     assert "exit" in matches
+
+
+def test_assert_value_completion_suggests_assert_expressions() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="assert: ",
+        begidx=len("assert: "),
+        payload_candidates=["{ ", "}"],
+        active_transform="assert",
+    )
+    assert "equal" in matches
+    assert "exists" in matches
+
+
+def test_assert_mapping_key_completion_suggests_assert_expressions() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="assert: { ",
+        begidx=len("assert: { "),
+        payload_candidates=["{ ", "}"],
+        active_transform="assert",
+    )
+    assert "equal: " in matches
+    assert "exists: " in matches
 
 
 def test_help_mapping_key_completion_suggests_command_keys() -> None:
@@ -349,6 +448,18 @@ def test_prefixes_alias_value_completion_uses_aliases() -> None:
     assert "scratch" in matches
     assert "source" in matches
     assert "base" not in matches
+
+
+def test_prefixes_rename_from_value_completion_uses_aliases_not_tensor_refs() -> None:
+    matches = _match_payload_candidates(
+        text="s",
+        line_buffer="prefixes: { mode: rename, from: s",
+        begidx=len("prefixes: { mode: rename, from: s"),
+        payload_candidates=["scratch", "scratch::", "source", "source::", "mode: ", "from: ", "to: "],
+        active_transform="prefixes",
+        model_aliases=["scratch", "source", "base"],
+    )
+    assert matches == ["scratch", "source"]
 
 
 def test_render_completion_preview_compacts_and_limits() -> None:
