@@ -8,6 +8,7 @@ import pytest
 from brainsurgery.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
+    _configure_readline_completion_bindings,
     _infer_active_transform,
     _is_transform_payload_start,
     _match_payload_candidates,
@@ -515,3 +516,29 @@ def test_prefixes_rename_from_value_completion_uses_aliases_not_tensor_refs() ->
 def test_render_completion_preview_compacts_and_limits() -> None:
     preview = _render_completion_preview(["a", "b", "c"], limit=2)
     assert preview == "a  b (+1 more)"
+
+
+class _FakeReadline:
+    def __init__(self) -> None:
+        self.bound_commands: list[str] = []
+
+    def parse_and_bind(self, command: str) -> None:
+        self.bound_commands.append(command)
+
+def test_configure_readline_completion_bindings_uses_zsh_style_view_then_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeReadline()
+    monkeypatch.setattr("brainsurgery.interactive.readline", fake)
+
+    _configure_readline_completion_bindings()
+
+    assert fake.bound_commands == [
+        "set show-all-if-ambiguous on",
+        "set show-all-if-unmodified on",
+        "set completion-query-items 200",
+        "set page-completions off",
+        "set menu-complete-display-prefix on",
+        "tab: menu-complete",
+        '"\\e[Z": menu-complete-backward',
+    ]
