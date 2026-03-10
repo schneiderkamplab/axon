@@ -8,6 +8,10 @@ from brainsurgery.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
     _infer_active_transform,
+    _is_transform_payload_start,
+    _match_payload_candidates,
+    _payload_context,
+    _render_completion_preview,
     _is_top_level_completion_position,
     parse_transform_block,
 )
@@ -26,7 +30,7 @@ def test_parse_transform_block_rejects_help_shorthand() -> None:
 def test_collect_completion_candidates_includes_commands_keys_and_refs() -> None:
     candidates = _collect_completion_candidates(None)
 
-    assert "copy:" in candidates
+    assert "copy: " in candidates
     assert "- copy:" not in candidates
     assert "from:" not in candidates
     assert "base::" not in candidates
@@ -35,10 +39,12 @@ def test_collect_completion_candidates_includes_commands_keys_and_refs() -> None
 
 def test_collect_completion_candidates_without_provider() -> None:
     candidates = _collect_completion_candidates(None)
-    assert "help" in candidates
+    assert "help: " in candidates
     assert "exit" in candidates
-    assert "help:" not in candidates
+    assert "prefixes" in candidates
+    assert "help" not in candidates
     assert "exit:" not in candidates
+    assert "prefixes: " not in candidates
 
 
 def test_is_top_level_completion_position() -> None:
@@ -77,3 +83,274 @@ def test_collect_payload_candidates_include_keys_aliases_tensors_and_yaml_tokens
     assert "ln_f.weight" in candidates
     assert "base::ln_f.weight" in candidates
     assert "{ " in candidates
+    assert ": " not in candidates
+
+
+def test_payload_context_key_and_value_detection() -> None:
+    assert _payload_context("copy: { ") == "key"
+    assert _payload_context("copy: { from: ") == "value"
+    assert _payload_context("copy: { from: x, ") == "key"
+
+
+def test_match_payload_candidates_filters_by_prefix_and_context() -> None:
+    candidates = [
+        "from: ",
+        "to: ",
+        "base",
+        "base::",
+        "ln_f.weight",
+        "base::ln_f.weight",
+        "{ ",
+    ]
+    key_matches = _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { f",
+        begidx=len("copy: { f"),
+        payload_candidates=candidates,
+    )
+    assert key_matches == ["from: "]
+
+    value_matches = _match_payload_candidates(
+        text="ba",
+        line_buffer="copy: { from: ba",
+        begidx=len("copy: { from: ba"),
+        payload_candidates=candidates,
+        active_transform="copy",
+    )
+    assert "base::" in value_matches
+    assert "base" not in value_matches
+    assert "from: " not in value_matches
+
+    ref_matches = _match_payload_candidates(
+        text="base::",
+        line_buffer="copy: { from: base::",
+        begidx=len("copy: { from: base::"),
+        payload_candidates=candidates,
+        active_transform="copy",
+    )
+    assert "base::" in ref_matches
+    assert "base::ln_f.weight" in ref_matches
+
+
+def test_transform_payload_start_only_suggests_open_brace() -> None:
+    assert _is_transform_payload_start(
+        line_buffer="copy: ",
+        begidx=len("copy: "),
+        active_transform="copy",
+    )
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: ",
+        begidx=len("copy: "),
+        payload_candidates=["base::x", "from: ", "{ "],
+    )
+    assert matches == ["{ "]
+
+
+def test_copy_mapping_start_suggests_keys_not_yaml_colon() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { ",
+        begidx=len("copy: { "),
+        payload_candidates=["from: ", "to: ", "{ ", "}"],
+    )
+    assert "from: " in matches
+    assert "to: " in matches
+    assert "{ " not in matches
+
+
+def test_key_context_filters_already_used_keys() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: ln_f.weight, ",
+        begidx=len("copy: { from: ln_f.weight, "),
+        payload_candidates=["from: ", "to: "],
+        active_transform="copy",
+    )
+    assert matches == ["to: "]
+
+
+def test_value_context_for_reference_key_shows_aliases_and_tensors() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: ",
+        begidx=len("copy: { from: "),
+        payload_candidates=["base", "base::", "base::ln_f.weight", "from: ", "{ ", "}"],
+        active_transform="copy",
+    )
+    assert "base::" in matches
+    assert "base" not in matches
+    assert "base::ln_f.weight" in matches
+    assert "from: " not in matches
+
+
+def test_value_context_short_prefix_keeps_reference_candidates() -> None:
+    matches = _match_payload_candidates(
+        text="b",
+        line_buffer="copy: { from: b",
+        begidx=len("copy: { from: b"),
+        payload_candidates=["base", "base::", "base::ln_f.weight", "from: "],
+        active_transform="copy",
+    )
+    assert "base::" in matches
+    assert "base::ln_f.weight" in matches
+    assert "b, to: " not in matches
+
+
+def test_reference_completion_adds_copy_to_continuation_snippet() -> None:
+    matches = _match_payload_candidates(
+        text="base::ln_f.weight",
+        line_buffer="copy: { from: base::ln_f.weight",
+        begidx=len("copy: { from: base::ln_f.weight"),
+        payload_candidates=["base::", "base::ln_f.weight"],
+        active_transform="copy",
+    )
+    assert matches == ["base::ln_f.weight", "base::ln_f.weight, to: "]
+
+
+def test_copy_after_both_keys_only_suggests_close_brace() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: model::h.0.attn.bias, to: model::h.1.attn.bias ",
+        begidx=len("copy: { from: model::h.0.attn.bias, to: model::h.1.attn.bias "),
+        payload_candidates=["from: ", "to: ", "model::h.0.attn.bias", "}"],
+        active_transform="copy",
+    )
+    assert matches == ["}"]
+
+
+def test_copy_after_completed_to_with_trailing_space_only_suggests_close_brace() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: model::h.0.attn.bias, to: model::h.1.attn.bias ",
+        begidx=len("copy: { from: model::h.0.attn.bias, to: model::h.1.attn.bias "),
+        payload_candidates=["from: ", "to: ", "model::h.0.attn.bias", "model::h.1.attn.bias", "}"],
+        active_transform="copy",
+    )
+    assert matches == ["}"]
+
+
+def test_copy_after_first_key_suggests_remaining_key_and_close() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: model::h.0.attn.bias ",
+        begidx=len("copy: { from: model::h.0.attn.bias "),
+        payload_candidates=["from: ", "to: ", "model::h.0.attn.bias", "}"],
+        active_transform="copy",
+    )
+    assert ", to: " in matches
+    assert "}" in matches
+
+
+def test_copy_after_comma_without_space_tab_can_insert_spaced_next_key() -> None:
+    matches = _match_payload_candidates(
+        text="model::h.0.attn.bias,",
+        line_buffer="copy: { from: model::h.0.attn.bias,",
+        begidx=len("copy: { from: "),
+        endidx=len("copy: { from: model::h.0.attn.bias,"),
+        payload_candidates=["from: ", "to: ", "model::h.0.attn.bias", "}"],
+        active_transform="copy",
+    )
+    assert matches == ["model::h.0.attn.bias, to: "]
+
+
+def test_help_value_completion_suggests_commands() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="help: ",
+        begidx=len("help: "),
+        payload_candidates=["{ ", "}"],
+        active_transform="help",
+    )
+    assert "copy" in matches
+    assert "exit" in matches
+
+
+def test_help_mapping_key_completion_suggests_command_keys() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="help: { ",
+        begidx=len("help: { "),
+        payload_candidates=["{ ", "}"],
+        active_transform="help",
+    )
+    assert "assert: " in matches
+    assert "copy: " not in matches
+
+
+def test_help_mapping_start_with_open_brace_only_suggests_assert_key() -> None:
+    matches = _match_payload_candidates(
+        text="{",
+        line_buffer="help: {",
+        begidx=len("help: "),
+        endidx=len("help: {"),
+        payload_candidates=["{ ", "}"],
+        active_transform="help",
+    )
+    assert matches == ["{ assert: "]
+
+
+def test_help_assert_value_completion_suggests_assert_expressions() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="help: { assert: ",
+        begidx=len("help: { assert: "),
+        payload_candidates=["{ ", "}"],
+        active_transform="help",
+    )
+    assert "equal" in matches
+    assert "exists" in matches
+
+
+def test_help_assert_committed_value_only_suggests_close_brace() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="help: { assert: not ",
+        begidx=len("help: { assert: not "),
+        payload_candidates=["assert: ", "{ ", "}"],
+        active_transform="help",
+    )
+    assert matches == ["}"]
+
+
+def test_prefixes_key_suggestions_depend_on_mode() -> None:
+    matches_remove = _match_payload_candidates(
+        text="",
+        line_buffer="prefixes: { mode: remove, ",
+        begidx=len("prefixes: { mode: remove, "),
+        payload_candidates=["mode: ", "alias: ", "from: ", "to: ", "}"],
+        active_transform="prefixes",
+    )
+    assert "alias: " in matches_remove
+    assert "from: " not in matches_remove
+    assert "to: " not in matches_remove
+
+    matches_rename = _match_payload_candidates(
+        text="",
+        line_buffer="prefixes: { mode: rename, ",
+        begidx=len("prefixes: { mode: rename, "),
+        payload_candidates=["mode: ", "alias: ", "from: ", "to: ", "}"],
+        active_transform="prefixes",
+    )
+    assert "from: " in matches_rename
+    assert "to: " in matches_rename
+    assert "alias: " not in matches_rename
+
+
+def test_prefixes_alias_value_completion_uses_aliases() -> None:
+    matches = _match_payload_candidates(
+        text="s",
+        line_buffer="prefixes: { mode: remove, alias: s",
+        begidx=len("prefixes: { mode: remove, alias: s"),
+        payload_candidates=["mode: ", "alias: ", "}"],
+        active_transform="prefixes",
+        model_aliases=["scratch", "source", "base"],
+    )
+    assert "scratch" in matches
+    assert "source" in matches
+    assert "base" not in matches
+
+
+def test_render_completion_preview_compacts_and_limits() -> None:
+    preview = _render_completion_preview(["a", "b", "c"], limit=2)
+    assert preview == "a  b (+1 more)"

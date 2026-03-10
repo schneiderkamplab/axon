@@ -263,6 +263,89 @@ def test_cross_help_dump_exit_in_single_flow(monkeypatch: pytest.MonkeyPatch, ca
     assert "x_copy_should_not_exist" not in provider.get_state_dict("model")
 
 
+def test_cross_prefixes_lists_available_aliases(capsys: pytest.CaptureFixture[str]) -> None:
+    raw = {
+        "inputs": ["/tmp/model.safetensors"],
+        "transforms": [
+            {"prefixes": {}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = _Provider(
+        {
+            "model": _make_state_dict({"x": torch.zeros((1,), dtype=torch.float32)}),
+            "scratch": _make_state_dict({"y": torch.ones((1,), dtype=torch.float32)}),
+        }
+    )
+
+    should_continue, executed = execute_transform_pairs(
+        zip(raw["transforms"], plan.transforms, strict=False),
+        provider,
+        interactive=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "Available model prefixes:" in output
+    assert "  model::" in output
+    assert "  scratch::" in output
+    assert should_continue is True
+    assert executed == raw["transforms"]
+
+
+def test_cross_prefixes_add_creates_empty_alias() -> None:
+    raw = {
+        "inputs": ["/tmp/model.safetensors"],
+        "transforms": [
+            {"prefixes": {"mode": "add", "alias": "scratch"}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = _Provider(
+        {
+            "model": _make_state_dict({"x": torch.zeros((1,), dtype=torch.float32)}),
+        }
+    )
+
+    should_continue, executed = execute_transform_pairs(
+        zip(raw["transforms"], plan.transforms, strict=False),
+        provider,
+        interactive=False,
+    )
+
+    assert should_continue is True
+    assert executed == raw["transforms"]
+    assert set(provider._state_dicts.keys()) == {"model", "scratch"}
+    assert len(provider._state_dicts["scratch"]) == 0
+    assert provider._state_dicts["scratch"] is not provider._state_dicts["model"]
+
+
+def test_cross_prefixes_rename_remove_mutate_aliases() -> None:
+    raw = {
+        "inputs": ["/tmp/model.safetensors"],
+        "transforms": [
+            {"prefixes": {"mode": "rename", "from": "scratch", "to": "edited"}},
+            {"prefixes": {"mode": "remove", "alias": "edited"}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = _Provider(
+        {
+            "model": _make_state_dict({"x": torch.zeros((1,), dtype=torch.float32)}),
+            "scratch": _make_state_dict({}),
+        }
+    )
+
+    should_continue, executed = execute_transform_pairs(
+        zip(raw["transforms"], plan.transforms, strict=False),
+        provider,
+        interactive=False,
+    )
+
+    assert should_continue is True
+    assert executed == raw["transforms"]
+    assert set(provider._state_dicts.keys()) == {"model"}
+
+
 def _write_checkpoint(path: Path) -> None:
     save_safetensors_file(
         {

@@ -7,18 +7,19 @@ import pytest
 from brainsurgery.plan import PlanLoaderError, compile_plan
 
 
-def test_compile_plan_allows_missing_inputs_for_basic_and_load_transforms() -> None:
+def test_compile_plan_allows_missing_inputs_for_non_tensor_transforms_and_load() -> None:
     plan = compile_plan(
         {
             "transforms": [
                 {"help": {}},
+                {"prefixes": {}},
                 {"load": {"path": "/tmp/model.safetensors", "alias": "loaded"}},
                 {"exit": {}},
             ]
         }
     )
     assert plan.inputs == {}
-    assert len(plan.transforms) == 3
+    assert len(plan.transforms) == 4
 
 
 def test_compile_plan_allows_empty_inputs_list() -> None:
