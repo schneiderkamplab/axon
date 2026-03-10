@@ -23,6 +23,9 @@ from brainsurgery.transform import (
     require_numeric,
     validate_payload_keys,
 )
+from brainsurgery.transforms.copy import CopyTransform
+from brainsurgery.transforms.help import HelpTransform
+from brainsurgery.transforms.save import SaveTransform
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,26 @@ def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
         output=None,
         transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
     )
+    assert infer_output_model(plan, _Provider()) == "model"
+
+
+def test_infer_output_model_skips_non_contributing_transforms() -> None:
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        transforms=[
+            CompiledTransform(HelpTransform(), HelpTransform().compile("copy", default_model=None)),
+            CompiledTransform(
+                SaveTransform(),
+                SaveTransform().compile({"path": "/tmp/out.safetensors", "alias": "model"}, default_model=None),
+            ),
+            CompiledTransform(
+                CopyTransform(),
+                CopyTransform().compile({"from": "model::w", "to": "model::w_copy"}, default_model=None),
+            ),
+        ],
+    )
+
     assert infer_output_model(plan, _Provider()) == "model"
 
 
