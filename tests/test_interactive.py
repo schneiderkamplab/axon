@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from brainsurgery.interactive import (
     _render_completion_preview,
     _is_top_level_completion_position,
     parse_transform_block,
+    prompt_interactive_transform,
 )
 
 
@@ -25,6 +27,54 @@ def test_parse_transform_block_accepts_canonical_help_mapping() -> None:
 def test_parse_transform_block_rejects_help_shorthand() -> None:
     with pytest.raises(ValueError):
         parse_transform_block("help: assert: all")
+
+
+@contextmanager
+def _no_completion(*args: object, **kwargs: object):
+    del args, kwargs
+    yield
+
+
+def test_prompt_interactive_transform_ctrl_c_at_fresh_prompt_restarts(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter([KeyboardInterrupt(), EOFError()])
+
+    def fake_input(prompt: str) -> str:
+        response = next(responses)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    monkeypatch.setattr("brainsurgery.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert prompt_interactive_transform() is None
+
+
+def test_prompt_interactive_transform_ctrl_c_discards_partial_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            "copy: {",
+            KeyboardInterrupt(),
+            "exit",
+            "",
+        ]
+    )
+    history_entries: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        response = next(responses)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    monkeypatch.setattr("brainsurgery.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("brainsurgery.interactive.add_history_entry", history_entries.append)
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert prompt_interactive_transform() == [{"exit": {}}]
+    assert history_entries == ["exit"]
 
 
 def test_collect_completion_candidates_includes_commands_keys_and_refs() -> None:
