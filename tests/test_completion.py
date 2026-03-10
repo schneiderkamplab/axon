@@ -6,7 +6,6 @@ from pathlib import Path
 import brainsurgery
 import pytest
 
-from brainsurgery.completion_config import load_completion_config
 from brainsurgery.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
@@ -59,9 +58,6 @@ MULTI_ALIAS_PROVIDER = _MiniProvider(
     },
 )
 
-_CONFIG = load_completion_config()
-_REFERENCE_KEYS = set(_CONFIG["reference_value_keys"])
-_REFERENCE_KEY_ORDER = list(_CONFIG["reference_key_order"])
 _SPECIAL_TRANSFORMS = {"assert", "exit", "help", "prefixes"}
 _PREFERRED_KEYS = {
     "add": "from_a",
@@ -93,6 +89,12 @@ _PREFERRED_KEYS = {
     "subtract": "from_a",
     "subtract_": "from",
 }
+
+_REFERENCE_TRANSFORMS = [
+    name
+    for name in list_transforms()
+    if _PREFERRED_KEYS.get(name) in set(get_transform(name).completion_reference_keys())
+]
 
 
 def _top_level_candidate(transform_name: str) -> str:
@@ -163,11 +165,7 @@ def _complete_unique(buffer: str, provider: object | None) -> str:
 
 def _transform_reference_keys(transform_name: str) -> list[str]:
     transform = get_transform(transform_name)
-    keys = set(getattr(transform, "required_keys", set()) or set()) | set(
-        getattr(transform, "allowed_keys", set()) or set()
-    )
-    ordered = [key for key in _REFERENCE_KEY_ORDER if key in keys]
-    return ordered
+    return transform.completion_reference_keys()
 
 
 def _next_reference_key(transform_name: str, current_key: str) -> str | None:
@@ -225,7 +223,7 @@ def test_single_alias_typical_completion_sequence_for_each_non_special_transform
     else:
         assert key_candidate in key_prefix_matches
 
-    if preferred_key not in _REFERENCE_KEYS:
+    if preferred_key not in set(_transform_reference_keys(transform_name)):
         return
 
     reference_matches = _completion_matches(
@@ -255,8 +253,8 @@ def test_single_alias_typical_completion_sequence_for_each_non_special_transform
 
 @pytest.mark.parametrize(
     "transform_name",
-    [name for name in list_transforms() if _PREFERRED_KEYS.get(name) in _REFERENCE_KEYS],
-    ids=[name for name in list_transforms() if _PREFERRED_KEYS.get(name) in _REFERENCE_KEYS],
+    _REFERENCE_TRANSFORMS,
+    ids=_REFERENCE_TRANSFORMS,
 )
 def test_multi_alias_reference_completion_sequence_for_reference_transforms(
     transform_name: str,
