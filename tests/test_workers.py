@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 
-from brainsurgery.workers import choose_num_io_workers
+from brainsurgery.workers import choose_num_io_workers, run_threadpool_tasks_with_progress
 
 
 def test_choose_num_io_workers_validates_inputs() -> None:
@@ -17,3 +19,45 @@ def test_choose_num_io_workers_bounds_to_items() -> None:
     assert choose_num_io_workers(1, 8) == 1
     assert choose_num_io_workers(4, 8) == 4
     assert choose_num_io_workers(8, 4) == 4
+
+
+@dataclass
+class _Progress:
+    total: int
+    desc: str
+    unit: str
+    leave: bool
+    updates: int = 0
+    closed: bool = False
+
+    def update(self, amount: int) -> None:
+        self.updates += amount
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_run_threadpool_tasks_with_progress_reports_results() -> None:
+    progress_items: list[_Progress] = []
+    seen_results: list[tuple[int, int]] = []
+
+    def progress_factory(**kwargs: object) -> _Progress:
+        progress = _Progress(**kwargs)
+        progress_items.append(progress)
+        return progress
+
+    run_threadpool_tasks_with_progress(
+        items=[1, 2, 3],
+        worker=lambda item: item * 2,
+        num_workers=2,
+        total=3,
+        progress_desc="Load",
+        progress_unit="file",
+        progress_factory=progress_factory,
+        on_result=lambda item, result: seen_results.append((item, result)),
+    )
+
+    assert sorted(seen_results) == [(1, 2), (2, 4), (3, 6)]
+    assert progress_items == [
+        _Progress(total=3, desc="Load", unit="file", leave=False, updates=3, closed=True)
+    ]
