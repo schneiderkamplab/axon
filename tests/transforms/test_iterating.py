@@ -1,0 +1,35 @@
+from importlib import import_module
+
+_module = import_module("brainsurgery.transforms.iterating")
+globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+
+
+def test_destination_policy_values_are_stable() -> None:
+    assert DestinationPolicy.ANY.value == "any"
+    assert DestinationPolicy.MUST_EXIST.value == "must_exist"
+    assert DestinationPolicy.MUST_NOT_EXIST.value == "must_not_exist"
+
+
+def test_iterating_transform_default_validation_is_noop() -> None:
+    class _Transform(IteratingTransform[int, int]):
+        name = "dummy"
+        spec_type = int
+
+        def compile(self, payload: dict, default_model: str | None) -> object:
+            del default_model
+            return int(payload["value"])
+
+        def infer_output_model(self, spec: object) -> str:
+            del spec
+            return "model"
+
+        def resolve_items(self, spec: int, provider: StateDictProvider) -> list[int]:
+            del provider
+            return [spec]
+
+        def apply_item(self, spec: int, item: int, provider: StateDictProvider) -> None:
+            del spec, item, provider
+
+    result = _Transform().apply(1, provider=None)  # type: ignore[arg-type]
+    assert result.name == "dummy"
+    assert result.count == 1

@@ -1,0 +1,74 @@
+from importlib import import_module
+
+_module = import_module("brainsurgery.transforms.add")
+globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+
+
+def test_add_apply_success() -> None:
+    class _Provider:
+        def __init__(self) -> None:
+            self._state_dict = {
+                "a": torch.tensor([1.0, 2.0]),
+                "b": torch.tensor([3.0, 4.0]),
+                "dst": torch.tensor([0.0, 0.0]),
+            }
+
+        def get_state_dict(self, model: str):
+            assert model == "m"
+            return self._state_dict
+
+    provider = _Provider()
+    item = ResolvedTernaryMapping(
+        src_a_model="m",
+        src_a_name="a",
+        src_a_slice=None,
+        src_b_model="m",
+        src_b_name="b",
+        src_b_slice=None,
+        dst_model="m",
+        dst_name="dst",
+        dst_slice=None,
+    )
+    AddTransform().apply_mapping(item, provider)
+    assert provider._state_dict["dst"].tolist() == [4.0, 6.0]
+
+
+def test_add_compile_requires_from_b() -> None:
+    try:
+        AddTransform().compile({"from_a": "a", "to": "b"}, default_model="m")
+    except TransformError as exc:
+        assert "from_b" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected required-key validation error")
+
+
+def test_add_dtype_mismatch() -> None:
+    class _Provider:
+        def __init__(self) -> None:
+            self._state_dict = {
+                "a": torch.tensor([1.0, 2.0], dtype=torch.float32),
+                "b": torch.tensor([3.0, 4.0], dtype=torch.float16),
+                "dst": torch.tensor([0.0, 0.0], dtype=torch.float32),
+            }
+
+        def get_state_dict(self, model: str):
+            assert model == "m"
+            return self._state_dict
+
+    item = ResolvedTernaryMapping(
+        src_a_model="m",
+        src_a_name="a",
+        src_a_slice=None,
+        src_b_model="m",
+        src_b_name="b",
+        src_b_slice=None,
+        dst_model="m",
+        dst_name="dst",
+        dst_slice=None,
+    )
+    try:
+        AddTransform().apply_mapping(item, _Provider())
+    except AddTransformError as exc:
+        assert "dtype mismatch" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected dtype mismatch")
