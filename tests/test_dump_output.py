@@ -7,10 +7,11 @@ import torch
 
 import brainsurgery.transforms.dump as dump_module
 from brainsurgery.transforms.dump import DumpTransform
+from brainsurgery.providers import InMemoryStateDict
 
 
 class _Provider:
-    def __init__(self, state_dict: dict[str, torch.Tensor]) -> None:
+    def __init__(self, state_dict) -> None:
         self._state_dict = state_dict
 
     def get_state_dict(self, model: str):
@@ -19,20 +20,20 @@ class _Provider:
 
 
 @pytest.fixture
-def sample_state_dict() -> dict[str, torch.Tensor]:
+def sample_state_dict() -> InMemoryStateDict:
     # 0 and 1 are intentionally identical; 2 is different so compact list grouping
     # should group [0-1] but keep [2] separate.
-    return {
-        "block.0.weight": torch.tensor([1.0, 2.0]),
-        "block.1.weight": torch.tensor([1.0, 2.0]),
-        "block.2.weight": torch.tensor([9.0, 8.0, 7.0]),
-    }
+    state_dict = InMemoryStateDict()
+    state_dict["block.0.weight"] = torch.tensor([1.0, 2.0])
+    state_dict["block.1.weight"] = torch.tensor([1.0, 2.0])
+    state_dict["block.2.weight"] = torch.tensor([9.0, 8.0, 7.0])
+    return state_dict
 
 
 def _run_dump(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    state_dict: dict[str, torch.Tensor],
+    state_dict: InMemoryStateDict,
     *,
     fmt: str,
     verbosity: str,
@@ -57,7 +58,7 @@ def _run_dump(
 def test_dump_tree_does_not_group_list_entries(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    sample_state_dict: dict[str, torch.Tensor],
+    sample_state_dict: InMemoryStateDict,
     verbosity: str,
 ) -> None:
     output = _run_dump(
@@ -77,7 +78,7 @@ def test_dump_tree_does_not_group_list_entries(
 def test_dump_compact_groups_list_entries_with_same_structure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    sample_state_dict: dict[str, torch.Tensor],
+    sample_state_dict: InMemoryStateDict,
     verbosity: str,
 ) -> None:
     output = _run_dump(
@@ -98,7 +99,7 @@ def test_dump_compact_groups_list_entries_with_same_structure(
 def test_dump_text_output_respects_verbosity(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    sample_state_dict: dict[str, torch.Tensor],
+    sample_state_dict: InMemoryStateDict,
     fmt: str,
     verbosity: str,
 ) -> None:
@@ -114,6 +115,8 @@ def test_dump_text_output_respects_verbosity(
         assert "min=" not in output
         assert "max=" not in output
         assert "mean=" not in output
+        assert "reads=" not in output
+        assert "writes=" not in output
         assert "dtype=" not in output
         assert "device=" not in output
         assert "values=" not in output
@@ -121,6 +124,8 @@ def test_dump_text_output_respects_verbosity(
         assert "min=" in output
         assert "max=" in output
         assert "mean=" in output
+        assert "reads=" in output
+        assert "writes=" in output
         assert "dtype=" not in output
         assert "device=" not in output
         assert "values=" not in output
@@ -132,6 +137,8 @@ def test_dump_text_output_respects_verbosity(
         assert "dtype=torch.float32" in output
         assert "device=cpu" in output
         assert "values=" in output
+        assert "reads=" in output
+        assert "writes=" in output
         assert "min=" not in output
         assert "max=" not in output
         assert "mean=" not in output
@@ -141,7 +148,7 @@ def test_dump_text_output_respects_verbosity(
 def test_dump_json_output_respects_verbosity(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    sample_state_dict: dict[str, torch.Tensor],
+    sample_state_dict: InMemoryStateDict,
     verbosity: str,
 ) -> None:
     output = _run_dump(
@@ -162,14 +169,18 @@ def test_dump_json_output_respects_verbosity(
         assert leaf1["shape"] == [2]
         assert leaf2["shape"] == [3]
     elif verbosity == "stat":
-        assert set(leaf0.keys()) == {"shape", "min", "max", "mean"}
+        assert set(leaf0.keys()) == {"shape", "min", "max", "mean", "reads", "writes"}
         assert leaf0["shape"] == [2]
         assert leaf0["min"] == 1.0
         assert leaf0["max"] == 2.0
         assert leaf0["mean"] == 1.5
+        assert leaf0["reads"] >= 1
+        assert leaf0["writes"] == 1
     else:
-        assert set(leaf0.keys()) == {"shape", "dtype", "device", "values"}
+        assert set(leaf0.keys()) == {"shape", "dtype", "device", "values", "reads", "writes"}
         assert leaf0["shape"] == [2]
         assert leaf0["dtype"] == "torch.float32"
         assert leaf0["device"] == "cpu"
         assert leaf0["values"] == [1.0, 2.0]
+        assert leaf0["reads"] >= 1
+        assert leaf0["writes"] == 1

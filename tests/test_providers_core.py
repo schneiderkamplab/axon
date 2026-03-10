@@ -4,7 +4,13 @@ import pytest
 import torch
 
 from brainsurgery.arena import ProviderError
-from brainsurgery.providers import InMemoryStateDict, InMemoryStateDictProvider, create_state_dict_provider
+from brainsurgery.arena import SegmentedFileBackedArena
+from brainsurgery.providers import (
+    ArenaStateDict,
+    InMemoryStateDict,
+    InMemoryStateDictProvider,
+    create_state_dict_provider,
+)
 
 
 def test_inmemory_state_dict_enforces_tensor_values() -> None:
@@ -14,6 +20,28 @@ def test_inmemory_state_dict_enforces_tensor_values() -> None:
 
     with pytest.raises(ProviderError, match="not a tensor"):
         state_dict["bad"] = object()  # type: ignore[assignment]
+
+
+def test_inmemory_state_dict_tracks_reads_and_writes() -> None:
+    state_dict = InMemoryStateDict()
+
+    state_dict["weight"] = torch.ones(2)
+    _ = state_dict["weight"]
+    state_dict.mark_write("weight")
+
+    assert state_dict.access_counts("weight") == {"reads": 1, "writes": 2}
+
+
+def test_arena_state_dict_tracks_reads_and_writes(tmp_path) -> None:
+    arena = SegmentedFileBackedArena(tmp_path, segment_size_bytes=1024, alignment=16)
+    state_dict = ArenaStateDict(arena)
+
+    state_dict["weight"] = torch.ones(2)
+    _ = state_dict["weight"]
+    state_dict.mark_write("weight")
+
+    assert state_dict.access_counts("weight") == {"reads": 1, "writes": 2}
+    arena.close()
 
 
 def test_provider_get_or_create_alias_state_dict_creates_new_alias() -> None:
