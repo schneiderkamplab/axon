@@ -58,7 +58,7 @@ MULTI_ALIAS_PROVIDER = _MiniProvider(
     },
 )
 
-_SPECIAL_TRANSFORMS = {"assert", "exit", "help", "prefixes"}
+_SPECIAL_TRANSFORMS = {"assert", "diff", "exit", "help", "prefixes"}
 _PREFERRED_KEYS = {
     "add": "from_a",
     "add_": "from",
@@ -350,6 +350,32 @@ def test_prefixes_completion_sequence() -> None:
 
     alias_matches = _completion_matches(
         "prefixes: { mode: rename, from: ",
+        MULTI_ALIAS_PROVIDER,
+    )
+    assert alias_matches == ["base", "scratch"]
+
+
+def test_diff_completion_sequence() -> None:
+    candidate = _top_level_candidate("diff")
+    assert _complete_unique(
+        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+        MULTI_ALIAS_PROVIDER,
+    ) == candidate
+
+    assert _complete_unique(candidate, MULTI_ALIAS_PROVIDER) == f"{candidate}{{ "
+
+    mapping_start_matches = _completion_matches(f"{candidate}{{ ", MULTI_ALIAS_PROVIDER)
+    assert "mode: " in mapping_start_matches
+    assert "left: " in mapping_start_matches
+
+    mode_matches = _completion_matches(f"{candidate}{{ mode: a", MULTI_ALIAS_PROVIDER)
+    assert mode_matches == ["aliases"]
+
+    ref_matches = _completion_matches(f"{candidate}{{ left: ", MULTI_ALIAS_PROVIDER)
+    assert ref_matches == ["base::", "scratch::"]
+
+    alias_matches = _completion_matches(
+        f"{candidate}{{ mode: aliases, left_alias: ",
         MULTI_ALIAS_PROVIDER,
     )
     assert alias_matches == ["base", "scratch"]
