@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from brainsurgery.utils.render import render_tree, shape_only, summarize_tensor
+from brainsurgery.utils.render import _shape_only, render_tree, summarize_tensor
 
 
 def test_summarize_tensor_supports_shape_full_and_stats_modes() -> None:
@@ -24,7 +24,7 @@ def test_shape_only_and_render_tree_handle_nested_lists() -> None:
         ]
     }
 
-    assert shape_only(tree) == {"layer": [{"shape": [2, 2]}, {"shape": [2, 2]}, None]}
+    assert _shape_only(tree) == {"layer": [{"shape": [2, 2]}, {"shape": [2, 2]}, None]}
 
     rendered = render_tree(tree, compact=True)
     assert "[0-1]" in rendered

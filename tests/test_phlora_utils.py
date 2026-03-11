@@ -4,14 +4,13 @@ import pytest
 import torch
 
 from brainsurgery.core import (
-    _require_matrix,
-    _resolve_effective_rank,
     PhloraSvdCache,
     compute_phlora_factors,
     reconstruct_phlora_rank,
     require_positive_rank,
 )
 from brainsurgery.core import TransformError
+from brainsurgery.core.phlora import _require_matrix, _resolve_effective_rank
 
 
 def test_require_positive_rank_rejects_non_integral_value() -> None:

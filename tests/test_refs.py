@@ -5,8 +5,6 @@ import torch
 
 from brainsurgery.core import (
     TensorRef,
-    _looks_like_slice,
-    _validate_expr_kind,
     format_tensor_ref,
     must_model,
     parse_model_expr,
@@ -14,6 +12,7 @@ from brainsurgery.core import (
     select_tensor,
 )
 from brainsurgery.core import TransformError
+from brainsurgery.core.refs import _looks_like_slice, _validate_expr_kind
 
 
 def test_parse_model_expr_supports_default_model_explicit_model_and_slices() -> None:

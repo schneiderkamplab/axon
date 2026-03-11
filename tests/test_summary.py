@@ -4,19 +4,19 @@ from pathlib import Path
 
 import typer
 
-from brainsurgery.utils.summary import build_raw_plan, derive_summary_path, write_executed_plan_summary
+from brainsurgery.utils.summary import _derive_summary_path, build_raw_plan, write_executed_plan_summary
 
 
 def test_build_raw_plan_and_derive_summary_path_cover_common_outputs(tmp_path) -> None:
     plan = build_raw_plan(inputs=["a"], output={"path": "out"}, transforms=[{"help": {}}])
     assert plan == {"inputs": ["a"], "output": {"path": "out"}, "transforms": [{"help": {}}]}
 
-    assert derive_summary_path(None) == Path("brainsurgery-executed-plan.yaml")
-    assert derive_summary_path(tmp_path / "out.safetensors") == tmp_path / "out.safetensors.executed.yaml"
+    assert _derive_summary_path(None) == Path("brainsurgery-executed-plan.yaml")
+    assert _derive_summary_path(tmp_path / "out.safetensors") == tmp_path / "out.safetensors.executed.yaml"
 
     directory = tmp_path / "dir"
     directory.mkdir()
-    assert derive_summary_path(directory) == directory / "executed-plan.yaml"
+    assert _derive_summary_path(directory) == directory / "executed-plan.yaml"
 
 
 def test_write_executed_plan_summary_writes_yaml(tmp_path, monkeypatch) -> None:

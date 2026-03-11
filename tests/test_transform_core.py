@@ -12,10 +12,9 @@ from brainsurgery.core import (
     CompiledTransform,
     TransformError,
     TransformResult,
-    _REGISTRY,
     ensure_mapping_payload,
     get_transform,
-    _infer_output_model,
+    infer_output_model,
     list_transforms,
     register_transform,
     require_expr,
@@ -23,6 +22,7 @@ from brainsurgery.core import (
     require_numeric,
     validate_payload_keys,
 )
+from brainsurgery.core.transform import _REGISTRY
 from brainsurgery.transforms.copy import CopyTransform
 from brainsurgery.transforms.help import HelpTransform
 from brainsurgery.transforms.save import SaveTransform
@@ -95,7 +95,7 @@ def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
         output=None,
         transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
     )
-    assert _infer_output_model(plan, _Provider()) == "model"
+    assert infer_output_model(plan, _Provider()) == "model"
 
 
 def test_infer_output_model_skips_non_contributing_transforms() -> None:
@@ -115,7 +115,7 @@ def test_infer_output_model_skips_non_contributing_transforms() -> None:
         ],
     )
 
-    assert _infer_output_model(plan, _Provider()) == "model"
+    assert infer_output_model(plan, _Provider()) == "model"
 
 
 def test_validate_payload_helpers_cover_required_unknown_and_type_errors() -> None:
