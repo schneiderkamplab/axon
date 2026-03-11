@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_exists_compile_rejects_empty_ref() -> None:
     try:
         compile_exists_expr("", default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "exists must be a non-empty string reference" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected non-empty reference validation error")
@@ -30,7 +30,7 @@ def test_exists_evaluate_failure() -> None:
 
     try:
         ExistsExpr(ref=TensorRef(model="model", expr="z.*")).evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "matched zero tensors" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected exists failure")

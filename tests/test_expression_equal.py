@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.expression import AssertTransformError
+from brainsurgery.core import TransformError
 from brainsurgery.expressions.equal import EqualExpr, compile_equal_expr
 from brainsurgery.core import TensorRef
 from brainsurgery.core import TransformError
@@ -70,12 +70,12 @@ def test_equal_value_mismatch() -> None:
         right=TensorRef(model="model", expr="right"),
     )
 
-    with pytest.raises(AssertTransformError, match="!="):
+    with pytest.raises(TransformError, match="!="):
         expr.evaluate(provider)
 
 
 def test_equal_compile_rejects_negative_eps() -> None:
-    with pytest.raises(AssertTransformError, match="equal.eps must be a non-negative number"):
+    with pytest.raises(TransformError, match="equal.eps must be a non-negative number"):
         compile_equal_expr({"left": "x", "right": "y", "eps": -1e-3}, default_model="model")
 
 
@@ -114,7 +114,7 @@ def test_equal_value_outside_eps_fails() -> None:
         eps=1e-4,
     )
 
-    with pytest.raises(AssertTransformError, match="!="):
+    with pytest.raises(TransformError, match="!="):
         expr.evaluate(provider)
 
 
@@ -158,7 +158,7 @@ def test_equal_regex_mapping_missing_destination() -> None:
         right=TensorRef(model="orig", expr=r"\1"),
     )
 
-    with pytest.raises(AssertTransformError, match="destination missing"):
+    with pytest.raises(TransformError, match="destination missing"):
         expr.evaluate(provider)
 
 

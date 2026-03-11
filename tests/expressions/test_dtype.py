@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_dtype_compile_rejects_empty_is() -> None:
     try:
         compile_dtype_expr({"of": "x", "is": ""}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "dtype.is must be a non-empty string" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dtype.is non-empty string validation error")
@@ -32,7 +32,7 @@ def test_dtype_evaluate_mismatch() -> None:
     expr = DtypeExpr(ref=TensorRef(model="model", expr="x"), is_value=torch.float32)
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "has dtype torch.float16, expected torch.float32" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dtype mismatch")
@@ -50,7 +50,7 @@ def test_dtype_evaluate_pattern_checks_all_matches() -> None:
     expr = DtypeExpr(ref=TensorRef(model="model", expr="x.*"), is_value=torch.float32)
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "model::x1" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dtype mismatch on one matched tensor")

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.expression import (
-    AssertTransformError,
+from brainsurgery.core import (
+    TransformError,
     collect_expr_models,
     compile_assert_expr,
     compile_shape,
@@ -42,13 +42,13 @@ def test_compile_assert_expr_and_helpers_validate_payloads() -> None:
     assert format_ref(TensorRef(model="base", expr="weight")) == "base::weight"
     assert collect_expr_models([_Expr("a"), _Expr("b")]) == {"a", "b"}
 
-    with pytest.raises(AssertTransformError, match="single-key mapping"):
+    with pytest.raises(TransformError, match="single-key mapping"):
         compile_assert_expr({}, default_model=None)
 
-    with pytest.raises(AssertTransformError, match="must be a list of integers"):
+    with pytest.raises(TransformError, match="must be a list of integers"):
         compile_shape([2, "3"])
 
 
 def test_compile_tensor_ref_expr_rejects_invalid_payload() -> None:
-    with pytest.raises(AssertTransformError, match="non-empty string reference"):
+    with pytest.raises(TransformError, match="non-empty string reference"):
         compile_tensor_ref_expr(1, "base", "exists")

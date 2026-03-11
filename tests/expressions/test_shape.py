@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_shape_compile_rejects_non_integer_shape() -> None:
     try:
         compile_shape_expr({"of": "x", "is": [1, "2"]}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "shape.is must be a list of integers" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape integer validation error")
@@ -30,7 +30,7 @@ def test_shape_evaluate_mismatch() -> None:
 
     try:
         ShapeExpr(ref=TensorRef(model="model", expr="x"), is_value=(3, 2)).evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "has shape (2, 3), expected (3, 2)" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch")
@@ -44,7 +44,7 @@ def test_shape_evaluate_pattern_checks_all_matches() -> None:
 
     try:
         ShapeExpr(ref=TensorRef(model="model", expr="x.*"), is_value=(2, 3)).evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "model::x1" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch on one matched tensor")

@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_count_compile_rejects_non_int_is() -> None:
     try:
         compile_count_expr({"of": "x", "is": "1"}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "count.is must be an integer" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected count.is integer validation error")
@@ -32,7 +32,7 @@ def test_count_evaluate_mismatch_raises() -> None:
     expr = CountExpr(ref=TensorRef(model="model", expr="a"), is_value=2)
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "matched 1 tensors, expected 2" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected count mismatch error")

@@ -2,7 +2,7 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.expression import AssertTransformError
+from brainsurgery.core import TransformError
 from brainsurgery.providers import InMemoryStateDict
 from brainsurgery.core import TensorRef
 
@@ -13,7 +13,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_reads_compile_requires_comparison() -> None:
     try:
         compile_reads_expr({"of": "x"}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "must include at least one of" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected reads comparison validation error")
@@ -22,7 +22,7 @@ def test_reads_compile_requires_comparison() -> None:
 def test_writes_compile_rejects_contradictory_bounds() -> None:
     try:
         compile_writes_expr({"of": "x", "gt": 2, "lt": 2}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "contradictory bounds" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected writes bounds validation error")
@@ -91,7 +91,7 @@ def test_writes_evaluate_reports_mismatch() -> None:
     )
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "writes=1" in str(exc)
         assert "expected exactly 0" in str(exc)
     else:  # pragma: no cover
@@ -111,7 +111,7 @@ def test_reads_evaluate_rejects_uninstrumented_state_dict() -> None:
     )
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "instrumented state_dict backend" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected unsupported backend error")

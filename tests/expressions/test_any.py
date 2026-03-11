@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_any_compile_rejects_empty_list() -> None:
     try:
         compile_any_expr([], default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "any must be a non-empty list" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected non-empty list validation error")
@@ -17,7 +17,7 @@ def test_any_evaluate_succeeds_when_one_branch_passes() -> None:
     class _FailExpr:
         def evaluate(self, provider) -> None:
             del provider
-            raise AssertTransformError("fail")
+            raise TransformError("fail")
 
         def collect_models(self) -> set[str]:
             return {"model"}
@@ -39,14 +39,14 @@ def test_any_evaluate_reports_all_failures() -> None:
 
         def evaluate(self, provider) -> None:
             del provider
-            raise AssertTransformError(self.msg)
+            raise TransformError(self.msg)
 
         def collect_models(self) -> set[str]:
             return {"model"}
 
     try:
         AnyExpr(exprs=[_FailExpr("a"), _FailExpr("b")]).evaluate(provider=None)  # type: ignore[arg-type]
-    except AssertTransformError as exc:
+    except TransformError as exc:
         message = str(exc)
         assert "all alternatives failed" in message
         assert "- a" in message

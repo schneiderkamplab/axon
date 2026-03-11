@@ -12,7 +12,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_assert_compile_rejects_unknown_op() -> None:
     try:
         AssertTransform().compile({"unknown": {}}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "unknown assert op" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected unknown assert op error")
@@ -31,7 +31,7 @@ def test_assert_infer_output_model_requires_single_model() -> None:
     )
     try:
         AssertTransform().infer_output_model(spec)
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "exactly one model" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected single-model inference error")
@@ -70,5 +70,5 @@ def test_assert_apply_fails_when_tensor_has_not_been_read() -> None:
         {"reads": {"of": ".*", "ge": 1}},
         default_model="model",
     )
-    with pytest.raises(AssertTransformError, match="reads=0"):
+    with pytest.raises(TransformError, match="reads=0"):
         AssertTransform().apply(spec, _Provider())

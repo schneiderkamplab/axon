@@ -6,10 +6,10 @@ import torch
 from brainsurgery.providers import InMemoryStateDict
 from brainsurgery.core import TensorRef
 from brainsurgery.core.resolver import (
+    _resolve_tensor_mappings as resolve_tensor_mappings,
+    _resolve_tensors as resolve_tensors,
     resolve_single_tensor,
     resolve_target_names,
-    resolve_tensor_mappings,
-    resolve_tensors,
 )
 from brainsurgery.core import TransformError
 

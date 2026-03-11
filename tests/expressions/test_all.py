@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_all_compile_rejects_empty_list() -> None:
     try:
         compile_all_expr([], default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "all must be a non-empty list" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected non-empty list validation error")

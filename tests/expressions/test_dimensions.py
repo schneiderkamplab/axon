@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_dimensions_compile_rejects_non_int_is() -> None:
     try:
         compile_dimensions_expr({"of": "x", "is": "1"}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "dimensions.is must be a non-negative integer" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dimensions.is integer validation error")
@@ -22,7 +22,7 @@ def test_dimensions_compile_accepts_inequalities() -> None:
 def test_dimensions_compile_rejects_contradictory_bounds() -> None:
     try:
         compile_dimensions_expr({"of": "x", "gt": 3, "le": 3}, default_model="model")
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "contradictory bounds" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected contradictory dimensions bounds error")
@@ -53,7 +53,7 @@ def test_dimensions_evaluate_mismatch() -> None:
     )
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "has 2 dims, expected >= 3" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dimension mismatch error")
@@ -71,7 +71,7 @@ def test_dimensions_evaluate_pattern_checks_all_matches() -> None:
     )
     try:
         expr.evaluate(_Provider())
-    except AssertTransformError as exc:
+    except TransformError as exc:
         assert "model::x1" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dimensions mismatch on one matched tensor")
