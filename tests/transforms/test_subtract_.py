@@ -6,7 +6,7 @@ from brainsurgery.core import TensorRef
 from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import BinaryMappingSpec
 
-_module = import_module("brainsurgery.transforms.subtract_")
+_module = import_module("brainsurgery.transforms.subtract")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
 

@@ -1,24 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 import torch
 
 from brainsurgery.core import TransformError
 from brainsurgery.expressions.equal import EqualExpr, compile_equal_expr
 from brainsurgery.core import TensorRef
-from brainsurgery.core import TransformError
 
 
-class DictProvider:
-    def __init__(self, state_dicts: dict[str, dict[str, torch.Tensor]]) -> None:
-        self._state_dicts = state_dicts
-
-    def get_state_dict(self, model: str):
-        return self._state_dicts[model]
-
-
-def test_equal_dtype_compatibility() -> None:
-    provider = DictProvider(
+def test_equal_dtype_compatibility(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "left": torch.ones((2, 2), dtype=torch.float32),
@@ -36,8 +31,10 @@ def test_equal_dtype_compatibility() -> None:
         expr.evaluate(provider)
 
 
-def test_equal_shape_compatibility() -> None:
-    provider = DictProvider(
+def test_equal_shape_compatibility(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "left": torch.ones((2, 2)),
@@ -55,8 +52,10 @@ def test_equal_shape_compatibility() -> None:
         expr.evaluate(provider)
 
 
-def test_equal_value_mismatch() -> None:
-    provider = DictProvider(
+def test_equal_value_mismatch(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "left": torch.tensor([1.0, 2.0]),
@@ -79,8 +78,10 @@ def test_equal_compile_rejects_negative_eps() -> None:
         compile_equal_expr({"left": "x", "right": "y", "eps": -1e-3}, default_model="model")
 
 
-def test_equal_value_within_eps_succeeds() -> None:
-    provider = DictProvider(
+def test_equal_value_within_eps_succeeds(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "left": torch.tensor([1.0, 2.0]),
@@ -98,8 +99,10 @@ def test_equal_value_within_eps_succeeds() -> None:
     expr.evaluate(provider)
 
 
-def test_equal_value_outside_eps_fails() -> None:
-    provider = DictProvider(
+def test_equal_value_outside_eps_fails(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "left": torch.tensor([1.0, 2.0]),
@@ -118,8 +121,10 @@ def test_equal_value_outside_eps_fails() -> None:
         expr.evaluate(provider)
 
 
-def test_equal_regex_mapping_success() -> None:
-    provider = DictProvider(
+def test_equal_regex_mapping_success(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "a": torch.tensor([1.0, 2.0]),
@@ -140,8 +145,10 @@ def test_equal_regex_mapping_success() -> None:
     expr.evaluate(provider)
 
 
-def test_equal_regex_mapping_missing_destination() -> None:
-    provider = DictProvider(
+def test_equal_regex_mapping_missing_destination(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "a": torch.tensor([1.0, 2.0]),
@@ -162,8 +169,10 @@ def test_equal_regex_mapping_missing_destination() -> None:
         expr.evaluate(provider)
 
 
-def test_equal_structured_mapping_success() -> None:
-    provider = DictProvider(
+def test_equal_structured_mapping_success(
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+) -> None:
+    provider = multi_model_provider(
         {
             "model": {
                 "block.0.weight": torch.tensor([1.0, 2.0]),

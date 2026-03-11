@@ -1,20 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 import torch
 
 from brainsurgery.core import TransformError
 from brainsurgery.transforms.cast import CastTransform
-from brainsurgery.core import TransformError
-
-
-class DictProvider:
-    def __init__(self, state_dict: dict[str, torch.Tensor]) -> None:
-        self.state_dict = state_dict
-
-    def get_state_dict(self, model: str):
-        assert model == "model"
-        return self.state_dict
 
 
 def test_cast_compile_rejects_unknown_dtype() -> None:
@@ -38,8 +30,10 @@ def test_cast_compile_rejects_sliced_destination() -> None:
         )
 
 
-def test_cast_apply_creates_new_tensor_with_new_dtype() -> None:
-    provider = DictProvider({"x": torch.ones((2,), dtype=torch.float32)})
+def test_cast_apply_creates_new_tensor_with_new_dtype(
+    single_model_provider: Callable[[dict[str, torch.Tensor], str], object]
+) -> None:
+    provider = single_model_provider({"x": torch.ones((2,), dtype=torch.float32)})
 
     spec = CastTransform().compile(
         {"from": "x", "to": "y", "dtype": "float16"},
@@ -52,8 +46,12 @@ def test_cast_apply_creates_new_tensor_with_new_dtype() -> None:
     assert provider.state_dict["y"].dtype == torch.float16
 
 
-def test_cast_apply_honors_source_slice() -> None:
-    provider = DictProvider({"x": torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)})
+def test_cast_apply_honors_source_slice(
+    single_model_provider: Callable[[dict[str, torch.Tensor], str], object]
+) -> None:
+    provider = single_model_provider(
+        {"x": torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)}
+    )
 
     spec = CastTransform().compile(
         {"from": "x::[1:3]", "to": "y", "dtype": "float16"},

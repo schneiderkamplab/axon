@@ -1,6 +1,6 @@
 import torch
 
-from brainsurgery.transforms.phlora_ import PhloraInPlaceTransform, PhloraInPlaceTransformError
+from brainsurgery.transforms.phlora import PhloraInPlaceTransform, PhloraInPlaceTransformError
 
 
 def test_phlora_in_place_compile_rejects_non_integral_rank() -> None:

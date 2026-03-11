@@ -4,7 +4,7 @@ import torch
 
 from brainsurgery.engine import InMemoryStateDict
 
-_module = import_module("brainsurgery.transforms.fill_")
+_module = import_module("brainsurgery.transforms.fill")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
 

@@ -1,6 +1,6 @@
 from importlib import import_module
 
-_module = import_module("brainsurgery.transforms.cast_")
+_module = import_module("brainsurgery.transforms.cast")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
 

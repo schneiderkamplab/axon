@@ -1,20 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 import torch
 
 from brainsurgery.core import TransformError
 from brainsurgery.transforms.scale import ScaleTransform
-from brainsurgery.core import TransformError
-
-
-class DictProvider:
-    def __init__(self, state_dict: dict[str, torch.Tensor]) -> None:
-        self.state_dict = state_dict
-
-    def get_state_dict(self, model: str):
-        assert model == "model"
-        return self.state_dict
 
 
 def test_scale_compile_rejects_non_numeric_factor() -> None:
@@ -35,8 +27,10 @@ def test_scale_compile_rejects_sliced_destination() -> None:
         )
 
 
-def test_scale_apply_creates_scaled_tensor_from_slice() -> None:
-    provider = DictProvider(
+def test_scale_apply_creates_scaled_tensor_from_slice(
+    single_model_provider: Callable[[dict[str, torch.Tensor], str], object]
+) -> None:
+    provider = single_model_provider(
         {"x": torch.tensor([1.0, 2.0, 3.0, 4.0]), "z": torch.tensor([0.0])}
     )
 
@@ -51,8 +45,10 @@ def test_scale_apply_creates_scaled_tensor_from_slice() -> None:
     assert provider.state_dict["y"].tolist() == [20.0, 30.0]
 
 
-def test_scale_apply_rejects_existing_destination() -> None:
-    provider = DictProvider(
+def test_scale_apply_rejects_existing_destination(
+    single_model_provider: Callable[[dict[str, torch.Tensor], str], object]
+) -> None:
+    provider = single_model_provider(
         {
             "x": torch.tensor([1.0, 2.0]),
             "y": torch.tensor([0.0, 0.0]),
