@@ -1,5 +1,7 @@
 from importlib import import_module
 
+import torch
+
 from brainsurgery.engine import InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.assign")
