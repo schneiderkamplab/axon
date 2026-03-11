@@ -3,7 +3,8 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import TensorRef
-from brainsurgery.transforms.ternary import TernaryMappingSpec
+from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.core import TernaryMappingSpec
 
 _module = import_module("brainsurgery.transforms.add")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
@@ -12,11 +13,10 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_add_apply_success() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {
-                "a": torch.tensor([1.0, 2.0]),
-                "b": torch.tensor([3.0, 4.0]),
-                "dst": torch.tensor([0.0, 0.0]),
-            }
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["a"] = torch.tensor([1.0, 2.0])
+            self._state_dict["b"] = torch.tensor([3.0, 4.0])
+            self._state_dict["dst"] = torch.tensor([0.0, 0.0])
 
         def get_state_dict(self, model: str):
             assert model == "m"
@@ -55,11 +55,10 @@ def test_add_compile_requires_from_b() -> None:
 def test_add_dtype_mismatch() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {
-                "a": torch.tensor([1.0, 2.0], dtype=torch.float32),
-                "b": torch.tensor([3.0, 4.0], dtype=torch.float16),
-                "dst": torch.tensor([0.0, 0.0], dtype=torch.float32),
-            }
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["a"] = torch.tensor([1.0, 2.0], dtype=torch.float32)
+            self._state_dict["b"] = torch.tensor([3.0, 4.0], dtype=torch.float16)
+            self._state_dict["dst"] = torch.tensor([0.0, 0.0], dtype=torch.float32)
 
         def get_state_dict(self, model: str):
             assert model == "m"

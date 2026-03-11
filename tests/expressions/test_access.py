@@ -2,7 +2,7 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.core import AssertTransformError
+from brainsurgery.expression import AssertTransformError
 from brainsurgery.providers import InMemoryStateDict
 from brainsurgery.core import TensorRef
 

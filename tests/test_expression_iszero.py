@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.core import AssertTransformError
+from brainsurgery.expression import AssertTransformError
 from brainsurgery.expressions.iszero import IsZeroExpr, compile_iszero_expr
 from brainsurgery.core import TensorRef
 

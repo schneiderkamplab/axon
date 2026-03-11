@@ -8,21 +8,25 @@ import torch
 from brainsurgery.engine.plan import SurgeryPlan
 from brainsurgery.providers import InMemoryStateDict
 from brainsurgery.core import (
+    TransformError,
+)
+from brainsurgery.core import (
     BaseTransform,
     CompiledTransform,
-    TransformError,
+    REGISTRY,
     TransformResult,
-    ensure_mapping_payload,
     get_transform,
-    infer_output_model,
     list_transforms,
     register_transform,
+)
+from brainsurgery.engine.output_model import infer_output_model
+from brainsurgery.core.validation import (
+    ensure_mapping_payload,
     require_expr,
     require_nonempty_string,
     require_numeric,
     validate_payload_keys,
 )
-from brainsurgery.core.transform import _REGISTRY
 from brainsurgery.transforms.copy import CopyTransform
 from brainsurgery.transforms.help import HelpTransform
 from brainsurgery.transforms.save import SaveTransform
@@ -73,8 +77,8 @@ class _Provider:
 
 
 def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
-    original_registry = dict(_REGISTRY)
-    _REGISTRY.clear()
+    original_registry = dict(REGISTRY)
+    REGISTRY.clear()
     try:
         transform = _Transform()
         register_transform(transform)
@@ -85,8 +89,8 @@ def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
         with pytest.raises(TransformError, match="already registered"):
             register_transform(_Transform())
     finally:
-        _REGISTRY.clear()
-        _REGISTRY.update(original_registry)
+        REGISTRY.clear()
+        REGISTRY.update(original_registry)
 
 
 def test_infer_output_model_uses_provider_fallback_when_needed() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.utils.dtypes import parse_torch_dtype
+from brainsurgery.core.dtypes import parse_torch_dtype
 from brainsurgery.core import TransformError
 
 

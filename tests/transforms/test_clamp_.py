@@ -2,6 +2,8 @@ from importlib import import_module
 
 import torch
 
+from brainsurgery.providers import InMemoryStateDict
+
 _module = import_module("brainsurgery.transforms.clamp_")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -9,7 +11,8 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_clamp_in_place_apply_with_slice() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {"x": torch.tensor([-3.0, 0.0, 4.0])}
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["x"] = torch.tensor([-3.0, 0.0, 4.0])
 
         def get_state_dict(self, model: str):
             assert model == "m"

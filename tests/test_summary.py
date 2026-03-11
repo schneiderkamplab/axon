@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from brainsurgery.utils.summary import _derive_summary_path, build_raw_plan, write_executed_plan_summary
+from brainsurgery.engine.summary import _derive_summary_path, build_raw_plan, write_executed_plan_summary
 
 
 def test_build_raw_plan_and_derive_summary_path_cover_common_outputs(tmp_path) -> None:

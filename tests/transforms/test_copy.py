@@ -3,7 +3,7 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import TensorRef
-from brainsurgery.transforms.binary import BinaryMappingSpec
+from brainsurgery.core import BinaryMappingSpec
 
 _module = import_module("brainsurgery.transforms.copy")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})

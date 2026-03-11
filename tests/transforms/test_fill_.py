@@ -2,6 +2,8 @@ from importlib import import_module
 
 import torch
 
+from brainsurgery.providers import InMemoryStateDict
+
 _module = import_module("brainsurgery.transforms.fill_")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -9,7 +11,8 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_fill_in_place_tensor_mode() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {"x": torch.zeros((2,), dtype=torch.float32)}
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["x"] = torch.zeros((2,), dtype=torch.float32)
 
         def get_state_dict(self, model: str):
             assert model == "m"

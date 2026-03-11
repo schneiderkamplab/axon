@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.core import (
+from brainsurgery.expression import (
     AssertTransformError,
     collect_expr_models,
     compile_assert_expr,

@@ -7,11 +7,11 @@ import torch
 
 from brainsurgery.providers import InMemoryStateDict
 from brainsurgery.core import TensorRef
-from brainsurgery.transforms.ternary import TernaryMappingSpec, TernaryMappingTransform
+from brainsurgery.core import TernaryMappingSpec, TernaryMappingTransform
 from brainsurgery.core import TransformError
-from brainsurgery.transforms.binary import BinaryMappingSpec, BinaryMappingTransform
-from brainsurgery.transforms.iterating import DestinationPolicy
-from brainsurgery.transforms.unary import UnarySpec, UnaryTransform
+from brainsurgery.core import BinaryMappingSpec, BinaryMappingTransform
+from brainsurgery.core import DestinationPolicy
+from brainsurgery.core import UnarySpec, UnaryTransform
 
 
 class _Provider:

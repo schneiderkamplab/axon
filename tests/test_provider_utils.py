@@ -1,4 +1,4 @@
-from brainsurgery.utils.provider_utils import (
+from brainsurgery.providers.provider_utils import (
     find_alias_mapping,
     get_or_create_alias_state_dict,
     list_loaded_tensor_names,

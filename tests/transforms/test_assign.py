@@ -1,5 +1,7 @@
 from importlib import import_module
 
+from brainsurgery.providers import InMemoryStateDict
+
 _module = import_module("brainsurgery.transforms.assign")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -7,10 +9,9 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_assign_dtype_compatibility() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {
-                "src": torch.ones((2, 2), dtype=torch.float32),
-                "dst": torch.ones((2, 2), dtype=torch.float16),
-            }
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["src"] = torch.ones((2, 2), dtype=torch.float32)
+            self._state_dict["dst"] = torch.ones((2, 2), dtype=torch.float16)
 
         def get_state_dict(self, model: str):
             assert model == "model"
@@ -36,10 +37,9 @@ def test_assign_dtype_compatibility() -> None:
 def test_assign_shape_compatibility() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {
-                "src": torch.ones((2, 2), dtype=torch.float32),
-                "dst": torch.ones((3, 2), dtype=torch.float32),
-            }
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["src"] = torch.ones((2, 2), dtype=torch.float32)
+            self._state_dict["dst"] = torch.ones((3, 2), dtype=torch.float32)
 
         def get_state_dict(self, model: str):
             assert model == "model"
@@ -65,10 +65,9 @@ def test_assign_shape_compatibility() -> None:
 def test_assign_successful_copy() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = {
-                "src": torch.tensor([1.0, 2.0], dtype=torch.float32),
-                "dst": torch.tensor([0.0, 0.0], dtype=torch.float32),
-            }
+            self._state_dict = InMemoryStateDict()
+            self._state_dict["src"] = torch.tensor([1.0, 2.0], dtype=torch.float32)
+            self._state_dict["dst"] = torch.tensor([0.0, 0.0], dtype=torch.float32)
 
         def get_state_dict(self, model: str):
             assert model == "model"

@@ -5,7 +5,7 @@ import torch
 
 from brainsurgery.providers import InMemoryStateDict
 from brainsurgery.core import TensorRef
-from brainsurgery.utils.resolver import (
+from brainsurgery.core.resolver import (
     resolve_single_tensor,
     resolve_target_names,
     resolve_tensor_mappings,
