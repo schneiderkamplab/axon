@@ -7,14 +7,9 @@ import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.engine.model import (
-    infer_tensor_file_format,
-    load_tensor_from_path,
-    parse_shard_size,
-    resolve_output_destination,
-    shard_state_dict,
-    validate_state_dict_mapping,
-)
+from brainsurgery.engine.tensor_files import infer_tensor_file_format, load_tensor_from_path
+from brainsurgery.engine.output_paths import parse_shard_size, resolve_output_destination
+from brainsurgery.engine.checkpoint_io import shard_state_dict, validate_state_dict_mapping
 from brainsurgery.engine.plan import OutputSpec
 
 
