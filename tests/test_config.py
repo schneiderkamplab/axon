@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from brainsurgery.engine.config import (
+from brainsurgery.cli.config import (
     apply_override,
     build_override_fragment,
     deep_merge_dicts,

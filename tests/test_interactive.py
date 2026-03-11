@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.engine.interactive import (
+from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
     _configure_readline_completion_bindings,
@@ -45,7 +45,7 @@ def test_prompt_interactive_transform_ctrl_c_at_fresh_prompt_restarts(monkeypatc
             raise response
         return response
 
-    monkeypatch.setattr("brainsurgery.engine.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("brainsurgery.cli.interactive._interactive_completion", _no_completion)
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert prompt_interactive_transform() is None
@@ -70,8 +70,8 @@ def test_prompt_interactive_transform_ctrl_c_discards_partial_block(
             raise response
         return response
 
-    monkeypatch.setattr("brainsurgery.engine.interactive._interactive_completion", _no_completion)
-    monkeypatch.setattr("brainsurgery.engine.interactive._add_history_entry", history_entries.append)
+    monkeypatch.setattr("brainsurgery.cli.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("brainsurgery.cli.interactive._add_history_entry", history_entries.append)
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert prompt_interactive_transform() == [{"exit": {}}]
@@ -529,7 +529,7 @@ def test_configure_readline_completion_bindings_uses_zsh_style_view_then_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _FakeReadline()
-    monkeypatch.setattr("brainsurgery.engine.interactive.readline", fake)
+    monkeypatch.setattr("brainsurgery.cli.interactive.readline", fake)
 
     _configure_readline_completion_bindings()
 

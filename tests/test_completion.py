@@ -6,7 +6,7 @@ from pathlib import Path
 import brainsurgery
 import pytest
 
-from brainsurgery.engine.interactive import (
+from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
     _infer_active_transform,
