@@ -8,7 +8,11 @@ import torch
 from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine.tensor_files import infer_tensor_file_format, load_tensor_from_path
-from brainsurgery.engine.output_paths import parse_shard_size, resolve_output_destination
+from brainsurgery.engine.output_paths import (
+    parse_shard_size,
+    resolve_output_destination,
+    resolve_sharded_output_directory,
+)
 from brainsurgery.engine.checkpoint_io import shard_state_dict, validate_state_dict_mapping
 from brainsurgery.engine.plan import OutputSpec
 
@@ -63,3 +67,29 @@ def test_load_tensor_from_path_supports_numpy_safetensors_and_torch(tmp_path: Pa
 def test_validate_state_dict_mapping_rejects_non_tensor_values(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="plain tensor state_dict"):
         validate_state_dict_mapping({"bad": 1}, tmp_path / "bad.pt")
+
+
+def test_resolve_output_destination_rejects_incompatible_explicit_safetensors(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="incompatible"):
+        resolve_output_destination(
+            OutputSpec(path=tmp_path / "model.pt", format="safetensors"),
+            default_shard_size="none",
+        )
+
+
+def test_resolve_output_destination_rejects_torch_directory_path(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    with pytest.raises(RuntimeError, match="requires a file path"):
+        resolve_output_destination(
+            OutputSpec(path=output_dir, format="torch"),
+            default_shard_size="none",
+        )
+
+
+def test_resolve_sharded_output_directory_rejects_file_style_path(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="directory-style output path"):
+        resolve_sharded_output_directory(
+            original_path=tmp_path / "model.safetensors",
+            resolved_path=tmp_path / "model.safetensors",
+        )
