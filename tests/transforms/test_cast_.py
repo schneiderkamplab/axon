@@ -7,7 +7,7 @@ globals().update({name: getattr(_module, name) for name in dir(_module) if not n
 def test_cast_in_place_compile_rejects_unknown_dtype() -> None:
     try:
         CastInPlaceTransform().compile({"target": "x", "to": "not_a_dtype"}, default_model="model")
-    except CastInPlaceTransformError as exc:
+    except TransformError as exc:
         assert "cast_.to" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected cast_ dtype parse error")

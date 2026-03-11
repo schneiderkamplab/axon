@@ -1,5 +1,10 @@
 from importlib import import_module
 
+import torch
+
+from brainsurgery.refs import TensorRef
+from brainsurgery.ternary import TernaryMappingSpec
+
 _module = import_module("brainsurgery.transforms.subtract")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -29,7 +34,12 @@ def test_subtract_apply_success() -> None:
         dst_name="dst",
         dst_slice=None,
     )
-    SubtractTransform().apply_mapping(item, provider)
+    spec = TernaryMappingSpec(
+        from_a_ref=TensorRef(model="m", expr="a"),
+        from_b_ref=TensorRef(model="m", expr="b"),
+        to_ref=TensorRef(model="m", expr="dst"),
+    )
+    SubtractTransform().apply_item(spec, item, provider)
     assert provider._state_dict["dst"].tolist() == [4.0, 5.0]
 
 
@@ -58,8 +68,13 @@ def test_subtract_shape_mismatch() -> None:
         dst_slice=None,
     )
     try:
-        SubtractTransform().apply_mapping(item, _Provider())
-    except SubtractTransformError as exc:
+        spec = TernaryMappingSpec(
+            from_a_ref=TensorRef(model="m", expr="a"),
+            from_b_ref=TensorRef(model="m", expr="b"),
+            to_ref=TensorRef(model="m", expr="dst"),
+        )
+        SubtractTransform().apply_item(spec, item, _Provider())
+    except TransformError as exc:
         assert "shape mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch")

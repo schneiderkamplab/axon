@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from brainsurgery.transform import TransformError
-from brainsurgery.transforms.scale import ScaleTransform, ScaleTransformError
+from brainsurgery.transforms.scale import ScaleTransform
+from brainsurgery.transform import TransformError
 
 
 class DictProvider:
@@ -27,7 +28,7 @@ def test_scale_compile_accepts_numeric_string_factor() -> None:
 
 
 def test_scale_compile_rejects_sliced_destination() -> None:
-    with pytest.raises(ScaleTransformError, match="destination must not be sliced"):
+    with pytest.raises(TransformError, match="destination must not be sliced"):
         ScaleTransform().compile(
             {"from": "x", "to": "y::[:]", "by": 1.0},
             default_model="model",

@@ -6,6 +6,7 @@ import torch
 from brainsurgery.expression import AssertTransformError
 from brainsurgery.expressions.equal import EqualExpr, compile_equal_expr
 from brainsurgery.refs import TensorRef
+from brainsurgery.transform_types import TransformError
 
 
 class DictProvider:
@@ -31,7 +32,7 @@ def test_equal_dtype_compatibility() -> None:
         right=TensorRef(model="model", expr="right"),
     )
 
-    with pytest.raises(AssertTransformError, match="dtype mismatch"):
+    with pytest.raises(TransformError, match="dtype mismatch"):
         expr.evaluate(provider)
 
 
@@ -50,7 +51,7 @@ def test_equal_shape_compatibility() -> None:
         right=TensorRef(model="model", expr="right"),
     )
 
-    with pytest.raises(AssertTransformError, match="shape mismatch"):
+    with pytest.raises(TransformError, match="shape mismatch"):
         expr.evaluate(provider)
 
 

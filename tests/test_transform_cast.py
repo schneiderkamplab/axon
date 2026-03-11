@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from brainsurgery.transform import TransformError
-from brainsurgery.transforms.cast import CastTransform, CastTransformError
+from brainsurgery.transforms.cast import CastTransform
+from brainsurgery.transform import TransformError
 
 
 class DictProvider:
@@ -17,7 +18,7 @@ class DictProvider:
 
 
 def test_cast_compile_rejects_unknown_dtype() -> None:
-    with pytest.raises(CastTransformError, match="cast.dtype"):
+    with pytest.raises(TransformError, match="cast.dtype"):
         CastTransform().compile(
             {"from": "x", "to": "y", "dtype": "not_a_dtype"},
             default_model="model",
@@ -30,7 +31,7 @@ def test_cast_compile_requires_dtype_key() -> None:
 
 
 def test_cast_compile_rejects_sliced_destination() -> None:
-    with pytest.raises(CastTransformError, match="destination must not be sliced"):
+    with pytest.raises(TransformError, match="destination must not be sliced"):
         CastTransform().compile(
             {"from": "x", "to": "y::[:]", "dtype": "float16"},
             default_model="model",

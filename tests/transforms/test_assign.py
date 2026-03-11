@@ -27,7 +27,7 @@ def test_assign_dtype_compatibility() -> None:
 
     try:
         AssignTransform().apply_mapping(item, _Provider())
-    except AssignTransformError as exc:
+    except TransformError as exc:
         assert "dtype mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dtype mismatch error")
@@ -56,7 +56,7 @@ def test_assign_shape_compatibility() -> None:
 
     try:
         AssignTransform().apply_mapping(item, _Provider())
-    except AssignTransformError as exc:
+    except TransformError as exc:
         assert "shape mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch error")

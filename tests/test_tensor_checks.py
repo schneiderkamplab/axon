@@ -10,7 +10,6 @@ def test_require_same_shape_dtype_device_accepts_matching_tensors() -> None:
     require_same_shape_dtype_device(
         left,
         right,
-        error_type=TransformError,
         op_name="assigning",
         left_name="a",
         right_name="b",
@@ -23,8 +22,7 @@ def test_require_same_shape_dtype_device3_rejects_shape_mismatch() -> None:
             torch.ones((2,)),
             torch.ones((1,)),
             torch.ones((2,)),
-            error_type=TransformError,
-            op_name="adding",
+                op_name="adding",
             first_name="a",
             second_name="b",
             dest_name="dst",

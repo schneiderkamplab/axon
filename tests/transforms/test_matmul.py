@@ -10,7 +10,7 @@ def test_matmul_compile_rejects_sliced_destination() -> None:
             {"from_a": "a", "from_b": "b", "to": "c::[:]"},
             default_model="m",
         )
-    except MatmulTransformError as exc:
+    except TransformError as exc:
         assert "destination must not be sliced" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected sliced destination rejection")
