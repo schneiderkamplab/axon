@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from brainsurgery.engine.plan import SurgeryPlan
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import (
     TransformError,
 )

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TensorRef
 from brainsurgery.core import TernaryMappingSpec, TernaryMappingTransform
 from brainsurgery.core import TransformError

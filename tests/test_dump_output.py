@@ -7,7 +7,7 @@ import torch
 
 import brainsurgery.transforms.dump as dump_module
 from brainsurgery.transforms.dump import DumpTransform
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 
 
 class _Provider:

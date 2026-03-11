@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.providers.arena import ProviderError
-from brainsurgery.providers import InMemoryStateDictProvider
+from brainsurgery.engine.arena import ProviderError
+from brainsurgery.engine import InMemoryStateDictProvider
 
 
 def test_get_state_dict_rejects_unknown_model_alias(tmp_path: Path) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TensorRef
 from brainsurgery.core.resolver import (
     _resolve_tensor_mappings as resolve_tensor_mappings,

@@ -71,7 +71,7 @@ def test_prompt_interactive_transform_ctrl_c_discards_partial_block(
         return response
 
     monkeypatch.setattr("brainsurgery.engine.interactive._interactive_completion", _no_completion)
-    monkeypatch.setattr("brainsurgery.engine.interactive.add_history_entry", history_entries.append)
+    monkeypatch.setattr("brainsurgery.engine.interactive._add_history_entry", history_entries.append)
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert prompt_interactive_transform() == [{"exit": {}}]

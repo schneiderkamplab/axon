@@ -3,7 +3,7 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import TransformError
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TensorRef
 
 _module = import_module("brainsurgery.expressions.access")

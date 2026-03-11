@@ -8,7 +8,7 @@ from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-from brainsurgery.providers import InMemoryStateDict, create_state_dict_provider
+from brainsurgery.engine import InMemoryStateDict, create_state_dict_provider
 from brainsurgery.core import TransformError
 import brainsurgery.transforms.dump as dump_module
 

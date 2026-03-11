@@ -3,7 +3,7 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import TensorRef
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import BinaryMappingSpec
 
 _module = import_module("brainsurgery.transforms.subtract_")

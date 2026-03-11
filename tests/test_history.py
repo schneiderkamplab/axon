@@ -38,9 +38,9 @@ def test_add_history_entry_skips_blank_and_duplicate(monkeypatch) -> None:
     readline = _Readline()
     monkeypatch.setattr(history, "readline", readline)
 
-    history.add_history_entry("  one  ")
-    history.add_history_entry("one")
-    history.add_history_entry("   ")
+    history._add_history_entry("  one  ")
+    history._add_history_entry("one")
+    history._add_history_entry("   ")
 
     assert readline.entries == ["one"]
 

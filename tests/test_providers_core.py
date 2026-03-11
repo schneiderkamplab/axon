@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.providers.arena import ProviderError
-from brainsurgery.providers.arena import SegmentedFileBackedArena
-from brainsurgery.providers import (
+from brainsurgery.engine.arena import ProviderError
+from brainsurgery.engine.arena import SegmentedFileBackedArena
+from brainsurgery.engine import (
     ArenaStateDict,
     InMemoryStateDict,
     InMemoryStateDictProvider,

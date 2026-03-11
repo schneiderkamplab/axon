@@ -1,12 +1,12 @@
-from brainsurgery.providers.provider_utils import (
+from brainsurgery.engine.provider_utils import (
     find_alias_mapping,
     get_or_create_alias_state_dict,
-    list_loaded_tensor_names,
+    _list_loaded_tensor_names,
     list_model_aliases,
     new_empty_state_dict,
     resolve_single_model_alias,
 )
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TransformError
 
 
@@ -60,7 +60,7 @@ def test_list_loaded_tensor_names_find_alias_mapping_and_new_empty_state_dict() 
         model_paths = {"disk": object()}
         state_dicts = {"loaded": state_dict}
 
-    assert list_loaded_tensor_names(_Provider()) == {"loaded": {"weight"}}
+    assert _list_loaded_tensor_names(_Provider()) == {"loaded": {"weight"}}
     attr_name, mapping, value = find_alias_mapping(_Provider(), "loaded", error_type=TransformError)
     assert attr_name == "state_dicts"
     assert mapping["loaded"] is value

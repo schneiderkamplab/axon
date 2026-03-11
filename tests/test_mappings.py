@@ -9,7 +9,7 @@ from brainsurgery.core import (
     require_dest_present,
     resolve_name_mappings,
 )
-from brainsurgery.providers import InMemoryStateDict
+from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TensorRef
 from brainsurgery.core import TransformError
 

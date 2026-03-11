@@ -10,7 +10,7 @@ from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-from brainsurgery.providers import create_state_dict_provider
+from brainsurgery.engine import create_state_dict_provider
 import brainsurgery.transforms.save as save_module
 
 try:

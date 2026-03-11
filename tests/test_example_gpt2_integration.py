@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from brainsurgery.providers import create_state_dict_provider
+from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.transforms.copy import CopyTransform
 
 
