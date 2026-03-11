@@ -2,9 +2,9 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.core.expression import AssertTransformError
+from brainsurgery.core import AssertTransformError
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.core.refs import TensorRef
+from brainsurgery.core import TensorRef
 
 _module = import_module("brainsurgery.expressions.access")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})

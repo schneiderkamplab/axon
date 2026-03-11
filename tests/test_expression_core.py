@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.core.expression import (
+from brainsurgery.core import (
     AssertTransformError,
     collect_expr_models,
     compile_assert_expr,
@@ -12,7 +12,7 @@ from brainsurgery.core.expression import (
     get_assert_expr_help,
     get_assert_expr_names,
 )
-from brainsurgery.core.refs import TensorRef
+from brainsurgery.core import TensorRef
 
 
 class _Expr:

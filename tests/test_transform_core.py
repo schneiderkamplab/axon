@@ -5,17 +5,17 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-import brainsurgery.core.transform as transform_module
 from brainsurgery.engine.plan import SurgeryPlan
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.core.transform import (
+from brainsurgery.core import (
     BaseTransform,
     CompiledTransform,
     TransformError,
     TransformResult,
+    _REGISTRY,
     ensure_mapping_payload,
     get_transform,
-    infer_output_model,
+    _infer_output_model,
     list_transforms,
     register_transform,
     require_expr,
@@ -72,16 +72,21 @@ class _Provider:
         return self.state_dicts[model]
 
 
-def test_transform_registry_registers_lists_and_rejects_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(transform_module, "_REGISTRY", {})
-    transform = _Transform()
-    register_transform(transform)
+def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
+    original_registry = dict(_REGISTRY)
+    _REGISTRY.clear()
+    try:
+        transform = _Transform()
+        register_transform(transform)
 
-    assert get_transform("dummy") is transform
-    assert list_transforms() == ["dummy"]
+        assert get_transform("dummy") is transform
+        assert list_transforms() == ["dummy"]
 
-    with pytest.raises(TransformError, match="already registered"):
-        register_transform(_Transform())
+        with pytest.raises(TransformError, match="already registered"):
+            register_transform(_Transform())
+    finally:
+        _REGISTRY.clear()
+        _REGISTRY.update(original_registry)
 
 
 def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
@@ -90,7 +95,7 @@ def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
         output=None,
         transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
     )
-    assert infer_output_model(plan, _Provider()) == "model"
+    assert _infer_output_model(plan, _Provider()) == "model"
 
 
 def test_infer_output_model_skips_non_contributing_transforms() -> None:
@@ -110,7 +115,7 @@ def test_infer_output_model_skips_non_contributing_transforms() -> None:
         ],
     )
 
-    assert infer_output_model(plan, _Provider()) == "model"
+    assert _infer_output_model(plan, _Provider()) == "model"
 
 
 def test_validate_payload_helpers_cover_required_unknown_and_type_errors() -> None:

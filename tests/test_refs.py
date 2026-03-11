@@ -3,17 +3,17 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.core.refs import (
+from brainsurgery.core import (
     TensorRef,
+    _looks_like_slice,
+    _validate_expr_kind,
     format_tensor_ref,
-    looks_like_slice,
     must_model,
     parse_model_expr,
     parse_slice,
     select_tensor,
-    validate_expr_kind,
 )
-from brainsurgery.core.transform_types import TransformError
+from brainsurgery.core import TransformError
 
 
 def test_parse_model_expr_supports_default_model_explicit_model_and_slices() -> None:
@@ -72,13 +72,13 @@ def test_select_tensor_applies_slice_and_wraps_failures() -> None:
 
 
 def test_validate_expr_kind_and_helpers() -> None:
-    validate_expr_kind(expr="layer.*", op_name="copy", role="source")
-    validate_expr_kind(expr=["layer", "$name"], op_name="copy", role="source")
-    assert looks_like_slice("[1:]") is True
+    _validate_expr_kind(expr="layer.*", op_name="copy", role="source")
+    _validate_expr_kind(expr=["layer", "$name"], op_name="copy", role="source")
+    assert _looks_like_slice("[1:]") is True
     assert format_tensor_ref(TensorRef(model="base", expr="weight", slice_spec="[:2]")) == "base::weight::[:2]"
 
     with pytest.raises(TransformError, match="invalid type"):
-        validate_expr_kind(expr=1, op_name="copy", role="source")
+        _validate_expr_kind(expr=1, op_name="copy", role="source")
 
     with pytest.raises(TransformError, match="missing model alias"):
         must_model(TensorRef(model=None, expr="weight"))

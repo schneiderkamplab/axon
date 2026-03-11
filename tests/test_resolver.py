@@ -4,14 +4,14 @@ import pytest
 import torch
 
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.core.refs import TensorRef
+from brainsurgery.core import TensorRef
 from brainsurgery.utils.resolver import (
     resolve_single_tensor,
     resolve_target_names,
     resolve_tensor_mappings,
     resolve_tensors,
 )
-from brainsurgery.core.transform_types import TransformError
+from brainsurgery.core import TransformError
 
 
 class _ResolverError(TransformError):

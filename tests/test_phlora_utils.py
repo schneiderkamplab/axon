@@ -3,15 +3,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.core.phlora import (
+from brainsurgery.core import (
+    _require_matrix,
+    _resolve_effective_rank,
     PhloraSvdCache,
     compute_phlora_factors,
     reconstruct_phlora_rank,
-    require_matrix,
     require_positive_rank,
-    resolve_effective_rank,
 )
-from brainsurgery.core.transform_types import TransformError
+from brainsurgery.core import TransformError
 
 
 def test_require_positive_rank_rejects_non_integral_value() -> None:
@@ -21,7 +21,7 @@ def test_require_positive_rank_rejects_non_integral_value() -> None:
 
 def test_require_matrix_rejects_non_2d_tensor() -> None:
     with pytest.raises(TransformError, match="must be 2D"):
-        require_matrix(
+        _require_matrix(
             torch.ones(3),
             error_type=TransformError,
             op_name="phlora",
@@ -62,7 +62,7 @@ def test_reconstruct_phlora_rank_truncates_to_effective_rank() -> None:
 
 def test_resolve_effective_rank_caps_to_tensor_shape() -> None:
     source = torch.ones((2, 3), dtype=torch.float32)
-    assert resolve_effective_rank(
+    assert _resolve_effective_rank(
         source,
         5,
         error_type=TransformError,

@@ -7,7 +7,7 @@ from brainsurgery.utils.provider_utils import (
     resolve_single_model_alias,
 )
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.core.transform_types import TransformError
+from brainsurgery.core import TransformError
 
 
 def test_list_model_aliases_from_duck_typed_provider() -> None:

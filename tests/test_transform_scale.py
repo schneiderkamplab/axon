@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.core.transform import TransformError
+from brainsurgery.core import TransformError
 from brainsurgery.transforms.scale import ScaleTransform
-from brainsurgery.core.transform import TransformError
+from brainsurgery.core import TransformError
 
 
 class DictProvider:

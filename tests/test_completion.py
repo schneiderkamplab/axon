@@ -14,7 +14,7 @@ from brainsurgery.engine.interactive import (
     _list_model_aliases,
     _match_payload_candidates,
 )
-from brainsurgery.core.transform import get_transform, list_transforms
+from brainsurgery.core import get_transform, list_transforms
 
 
 @dataclass

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from brainsurgery.engine.execution import execute_transform_pairs
-from brainsurgery.core.transform import BaseTransform, CompiledTransform, TransformControl, TransformError, TransformResult
+from brainsurgery.core import BaseTransform, CompiledTransform, TransformControl, TransformError, TransformResult
 
 
 class _Transform(BaseTransform):
