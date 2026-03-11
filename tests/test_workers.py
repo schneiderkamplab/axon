@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from brainsurgery.workers import choose_num_io_workers, run_threadpool_tasks_with_progress
+from brainsurgery.utils.workers import choose_num_io_workers, run_threadpool_tasks_with_progress
 
 
 def test_choose_num_io_workers_validates_inputs() -> None:

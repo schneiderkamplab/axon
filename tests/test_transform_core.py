@@ -5,10 +5,10 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-import brainsurgery.transform as transform_module
-from brainsurgery.plan import SurgeryPlan
+import brainsurgery.core.transform as transform_module
+from brainsurgery.engine.plan import SurgeryPlan
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.transform import (
+from brainsurgery.core.transform import (
     BaseTransform,
     CompiledTransform,
     TransformError,

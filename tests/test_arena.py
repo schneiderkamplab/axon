@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.arena import ProviderError, SegmentedFileBackedArena, ensure_supported_dtype, prod
+from brainsurgery.providers.arena import ProviderError, SegmentedFileBackedArena, ensure_supported_dtype, prod
 
 
 def test_segmented_file_backed_arena_stores_and_reads_tensor_roundtrip(tmp_path) -> None:

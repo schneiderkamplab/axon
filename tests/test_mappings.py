@@ -3,15 +3,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.mappings import (
+from brainsurgery.core.mappings import (
     match_expr_names,
     require_dest_missing,
     require_dest_present,
     resolve_name_mappings,
 )
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.refs import TensorRef
-from brainsurgery.transform_types import TransformError
+from brainsurgery.core.refs import TensorRef
+from brainsurgery.core.transform_types import TransformError
 
 
 class _Provider:

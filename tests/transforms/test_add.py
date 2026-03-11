@@ -2,8 +2,8 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.refs import TensorRef
-from brainsurgery.ternary import TernaryMappingSpec
+from brainsurgery.core.refs import TensorRef
+from brainsurgery.transforms.ternary import TernaryMappingSpec
 
 _module = import_module("brainsurgery.transforms.add")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})

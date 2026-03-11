@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.refs import TensorRef
-from brainsurgery.ternary import TernaryMappingSpec, TernaryMappingTransform
-from brainsurgery.transform_types import TransformError
+from brainsurgery.core.refs import TensorRef
+from brainsurgery.transforms.ternary import TernaryMappingSpec, TernaryMappingTransform
+from brainsurgery.core.transform_types import TransformError
 from brainsurgery.transforms.binary import BinaryMappingSpec, BinaryMappingTransform
 from brainsurgery.transforms.iterating import DestinationPolicy
 from brainsurgery.transforms.unary import UnarySpec, UnaryTransform

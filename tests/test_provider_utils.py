@@ -1,4 +1,4 @@
-from brainsurgery.provider_utils import (
+from brainsurgery.utils.provider_utils import (
     find_alias_mapping,
     get_or_create_alias_state_dict,
     list_loaded_tensor_names,
@@ -7,7 +7,7 @@ from brainsurgery.provider_utils import (
     resolve_single_model_alias,
 )
 from brainsurgery.providers import InMemoryStateDict
-from brainsurgery.transform_types import TransformError
+from brainsurgery.core.transform_types import TransformError
 
 
 def test_list_model_aliases_from_duck_typed_provider() -> None:

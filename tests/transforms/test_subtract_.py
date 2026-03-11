@@ -2,7 +2,7 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.refs import TensorRef
+from brainsurgery.core.refs import TensorRef
 from brainsurgery.transforms.binary import BinaryMappingSpec
 
 _module = import_module("brainsurgery.transforms.subtract_")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import brainsurgery.history as history
+import brainsurgery.utils.history as history
 
 
 class _Readline:

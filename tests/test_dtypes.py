@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.dtypes import parse_torch_dtype
-from brainsurgery.transform_types import TransformError
+from brainsurgery.utils.dtypes import parse_torch_dtype
+from brainsurgery.core.transform_types import TransformError
 
 
 class _Error(TransformError):

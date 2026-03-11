@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.arena import ProviderError
-from brainsurgery.arena import SegmentedFileBackedArena
+from brainsurgery.providers.arena import ProviderError
+from brainsurgery.providers.arena import SegmentedFileBackedArena
 from brainsurgery.providers import (
     ArenaStateDict,
     InMemoryStateDict,

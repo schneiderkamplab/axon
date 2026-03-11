@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.plan import (
+from brainsurgery.engine.plan import (
     PlanLoaderError,
     load_plan,
     parse_input_entry,

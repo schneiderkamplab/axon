@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.phlora import (
+from brainsurgery.core.phlora import (
     PhloraSvdCache,
     compute_phlora_factors,
     reconstruct_phlora_rank,
@@ -11,7 +11,7 @@ from brainsurgery.phlora import (
     require_positive_rank,
     resolve_effective_rank,
 )
-from brainsurgery.transform_types import TransformError
+from brainsurgery.core.transform_types import TransformError
 
 
 def test_require_positive_rank_rejects_non_integral_value() -> None:

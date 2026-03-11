@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.arena import ProviderError
+from brainsurgery.providers.arena import ProviderError
 from brainsurgery.providers import InMemoryStateDictProvider
 
 

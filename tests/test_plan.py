@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.plan import PlanLoaderError, compile_plan
+from brainsurgery.engine.plan import PlanLoaderError, compile_plan
 
 
 def test_compile_plan_allows_missing_inputs_for_non_tensor_transforms_and_load() -> None:

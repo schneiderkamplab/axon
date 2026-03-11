@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.matching import MatchError, StructuredMatch, StructuredPathMatcher
+from brainsurgery.core.matching import MatchError, StructuredMatch, StructuredPathMatcher
 
 
 def test_structured_path_matcher_matches_and_rewrites_captures() -> None:

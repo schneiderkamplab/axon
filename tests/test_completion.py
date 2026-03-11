@@ -6,7 +6,7 @@ from pathlib import Path
 import brainsurgery
 import pytest
 
-from brainsurgery.interactive import (
+from brainsurgery.engine.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
     _infer_active_transform,
@@ -14,7 +14,7 @@ from brainsurgery.interactive import (
     _list_model_aliases,
     _match_payload_candidates,
 )
-from brainsurgery.transform import get_transform, list_transforms
+from brainsurgery.core.transform import get_transform, list_transforms
 
 
 @dataclass

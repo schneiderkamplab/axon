@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.execution import execute_transform_pairs
-from brainsurgery.transform import BaseTransform, CompiledTransform, TransformControl, TransformError, TransformResult
+from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.core.transform import BaseTransform, CompiledTransform, TransformControl, TransformError, TransformResult
 
 
 class _Transform(BaseTransform):

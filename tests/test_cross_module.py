@@ -6,10 +6,10 @@ import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.execution import execute_transform_pairs
-from brainsurgery.plan import compile_plan
+from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.plan import compile_plan
 from brainsurgery.providers import InMemoryStateDict, create_state_dict_provider
-from brainsurgery.transform import TransformError
+from brainsurgery.core.transform import TransformError
 import brainsurgery.transforms.dump as dump_module
 
 

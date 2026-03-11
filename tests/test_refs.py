@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.refs import (
+from brainsurgery.core.refs import (
     TensorRef,
     format_tensor_ref,
     looks_like_slice,
@@ -13,7 +13,7 @@ from brainsurgery.refs import (
     select_tensor,
     validate_expr_kind,
 )
-from brainsurgery.transform_types import TransformError
+from brainsurgery.core.transform_types import TransformError
 
 
 def test_parse_model_expr_supports_default_model_explicit_model_and_slices() -> None:

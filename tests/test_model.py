@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from brainsurgery.model import (
+from brainsurgery.engine.model import (
     resolve_safetensor_shards_from_index,
     save_sharded_safetensors,
 )

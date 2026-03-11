@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from brainsurgery.render import render_tree, shape_only, summarize_tensor
+from brainsurgery.utils.render import render_tree, shape_only, summarize_tensor
 
 
 def test_summarize_tensor_supports_shape_full_and_stats_modes() -> None:

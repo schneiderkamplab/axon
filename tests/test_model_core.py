@@ -7,7 +7,7 @@ import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.model import (
+from brainsurgery.engine.model import (
     infer_tensor_file_format,
     load_tensor_from_path,
     parse_shard_size,
@@ -15,7 +15,7 @@ from brainsurgery.model import (
     shard_state_dict,
     validate_state_dict_mapping,
 )
-from brainsurgery.plan import OutputSpec
+from brainsurgery.engine.plan import OutputSpec
 
 
 def test_resolve_output_destination_infers_directory_and_explicit_torch(tmp_path: Path) -> None:

@@ -3,10 +3,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.expression import AssertTransformError
+from brainsurgery.core.expression import AssertTransformError
 from brainsurgery.expressions.equal import EqualExpr, compile_equal_expr
-from brainsurgery.refs import TensorRef
-from brainsurgery.transform_types import TransformError
+from brainsurgery.core.refs import TensorRef
+from brainsurgery.core.transform_types import TransformError
 
 
 class DictProvider:

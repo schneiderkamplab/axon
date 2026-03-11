@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.expression import AssertTransformError
+from brainsurgery.core.expression import AssertTransformError
 from brainsurgery.expressions.iszero import IsZeroExpr, compile_iszero_expr
-from brainsurgery.refs import TensorRef
+from brainsurgery.core.refs import TensorRef
 
 
 class DictProvider:
