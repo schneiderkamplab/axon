@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import brainsurgery.cli.interactive as interactive_module
 from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
@@ -542,3 +543,139 @@ def test_configure_readline_completion_bindings_uses_zsh_style_view_then_cycle(
         "tab: menu-complete",
         '"\\e[Z": menu-complete-backward',
     ]
+
+
+class _CompletionReadline:
+    def __init__(self) -> None:
+        self._completer = None
+        self._delims = " \t\n"
+        self.line_buffer = ""
+        self.begidx = 0
+        self.endidx = 0
+
+    def get_completer(self):
+        return self._completer
+
+    def get_completer_delims(self) -> str:
+        return self._delims
+
+    def get_line_buffer(self) -> str:
+        return self.line_buffer
+
+    def get_begidx(self) -> int:
+        return self.begidx
+
+    def get_endidx(self) -> int:
+        return self.endidx
+
+    def set_completer_delims(self, delims: str) -> None:
+        self._delims = delims
+
+    def set_completer(self, completer) -> None:
+        self._completer = completer
+
+
+def test_interactive_completion_context_registers_and_restores_completer(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _CompletionReadline()
+    monkeypatch.setattr(interactive_module, "readline", fake)
+
+    with interactive_module._interactive_completion(
+        top_level_candidates=["copy: ", "help: "],
+        lines=[],
+        state_dict_provider=None,
+    ):
+        assert callable(fake._completer)
+        fake.line_buffer = "co"
+        fake.begidx = 0
+        fake.endidx = len(fake.line_buffer)
+        assert fake._completer("co", 0) == "copy: "
+        assert fake._completer("co", 1) is None
+
+    assert fake.get_completer() is None
+
+
+def test_interactive_completion_no_readline_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(interactive_module, "readline", None)
+    with interactive_module._interactive_completion(
+        top_level_candidates=["copy: "],
+        lines=[],
+        state_dict_provider=None,
+    ):
+        pass
+
+
+def test_interactive_completion_handles_readline_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ErrorReadline(_CompletionReadline):
+        def get_line_buffer(self) -> str:
+            raise RuntimeError("broken line buffer")
+
+        def set_completer_delims(self, delims: str) -> None:
+            del delims
+            raise RuntimeError("cannot set delims")
+
+        def set_completer(self, completer) -> None:
+            del completer
+            raise RuntimeError("cannot set completer")
+
+    fake = _ErrorReadline()
+    monkeypatch.setattr(interactive_module, "readline", fake)
+
+    with interactive_module._interactive_completion(
+        top_level_candidates=["copy: "],
+        lines=[],
+        state_dict_provider=None,
+    ):
+        pass
+
+
+def test_interactive_completion_handles_restore_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _RestoreErrorReadline(_CompletionReadline):
+        def __init__(self) -> None:
+            super().__init__()
+            self._set_calls = 0
+
+        def set_completer_delims(self, delims: str) -> None:
+            self._set_calls += 1
+            if self._set_calls >= 2:
+                raise RuntimeError("restore delims failed")
+            super().set_completer_delims(delims)
+
+    fake = _RestoreErrorReadline()
+    monkeypatch.setattr(interactive_module, "readline", fake)
+
+    with interactive_module._interactive_completion(
+        top_level_candidates=["copy: "],
+        lines=[],
+        state_dict_provider=None,
+    ):
+        assert callable(fake.get_completer())
+
+
+def test_prompt_interactive_transform_rejects_invalid_then_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter(["copy: [", "", "exit", ""])
+    history_entries: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        del prompt
+        response = next(responses)
+        return response
+
+    monkeypatch.setattr("brainsurgery.cli.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("brainsurgery.cli.interactive._add_history_entry", history_entries.append)
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert prompt_interactive_transform() == [{"exit": {}}]
+    assert history_entries == ["exit"]
+
+
+def test_prompt_interactive_transform_ignores_leading_blank_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter(["", "exit", ""])
+
+    def fake_input(prompt: str) -> str:
+        del prompt
+        return next(responses)
+
+    monkeypatch.setattr("brainsurgery.cli.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert prompt_interactive_transform() == [{"exit": {}}]

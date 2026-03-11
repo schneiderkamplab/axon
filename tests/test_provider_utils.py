@@ -1,13 +1,17 @@
+import pytest
+
 from brainsurgery.engine.provider_utils import (
+    _list_loaded_tensor_names,
     find_alias_mapping,
     get_or_create_alias_state_dict,
-    _list_loaded_tensor_names,
+    iter_alias_mappings,
     list_model_aliases,
     new_empty_state_dict,
     resolve_single_model_alias,
 )
 from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TransformError
+from brainsurgery.engine import InMemoryStateDictProvider
 
 
 def test_list_model_aliases_from_duck_typed_provider() -> None:
@@ -16,6 +20,15 @@ def test_list_model_aliases_from_duck_typed_provider() -> None:
         state_dicts = {"scratch": object()}
 
     assert list_model_aliases(_Provider()) == {"base", "scratch"}
+
+
+def test_list_model_aliases_handles_none_and_iterable_return() -> None:
+    class _Provider:
+        def list_model_aliases(self):
+            return ["a", "b"]
+
+    assert list_model_aliases(None) == set()
+    assert list_model_aliases(_Provider()) == {"a", "b"}
 
 
 def test_resolve_single_model_alias_rejects_multiple() -> None:
@@ -52,6 +65,34 @@ def test_get_or_create_alias_state_dict_requires_extension_support() -> None:
         raise AssertionError("expected create-alias validation error")
 
 
+def test_get_or_create_alias_state_dict_returns_existing_alias() -> None:
+    class _Provider:
+        def __init__(self) -> None:
+            self.state_dicts = {"base": InMemoryStateDict()}
+
+        def get_state_dict(self, model: str) -> InMemoryStateDict:
+            return self.state_dicts[model]
+
+    provider = _Provider()
+    assert get_or_create_alias_state_dict(
+        provider,
+        "base",
+        error_type=TransformError,
+        op_name="prefixes",
+    ) is provider.state_dicts["base"]
+
+
+def test_get_or_create_alias_state_dict_uses_base_provider_creation() -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    created = get_or_create_alias_state_dict(
+        provider,
+        "scratch",
+        error_type=TransformError,
+        op_name="prefixes",
+    )
+    assert created is provider.get_state_dict("scratch")
+
+
 def test_list_loaded_tensor_names_find_alias_mapping_and_new_empty_state_dict() -> None:
     state_dict = InMemoryStateDict()
     state_dict["weight"] = __import__("torch").ones(1)
@@ -65,3 +106,36 @@ def test_list_loaded_tensor_names_find_alias_mapping_and_new_empty_state_dict() 
     assert attr_name == "state_dicts"
     assert mapping["loaded"] is value
     assert isinstance(new_empty_state_dict([("state_dicts", {"loaded": state_dict})]), InMemoryStateDict)
+
+
+def test_provider_utils_misc_fallbacks_and_errors() -> None:
+    class _KeysRaises:
+        def keys(self):
+            raise RuntimeError("broken keys")
+
+    class _ProviderNoStateDicts:
+        model_paths = {"disk": object()}
+        _state_dicts = {"shadow": object()}
+
+    assert [name for name, _ in iter_alias_mappings(_ProviderNoStateDicts())] == ["model_paths", "_state_dicts"]
+
+    class _ProviderWithBadKeys:
+        state_dicts = {"bad": _KeysRaises()}
+
+    assert _list_loaded_tensor_names(_ProviderWithBadKeys()) == {}
+
+    with pytest.raises(TransformError, match="unknown model prefix"):
+        find_alias_mapping(_ProviderNoStateDicts(), "missing", error_type=TransformError)
+
+    class _NoDefaultCtor(dict):
+        def __init__(self, arg):
+            super().__init__(arg)
+
+    assert new_empty_state_dict([("state_dicts", {"x": _NoDefaultCtor({"a": 1})})]) == {}
+
+
+def test_resolve_single_model_alias_success() -> None:
+    class _Provider:
+        state_dicts = {"only": object()}
+
+    assert resolve_single_model_alias(_Provider(), error_type=TransformError, op_name="save") == "only"

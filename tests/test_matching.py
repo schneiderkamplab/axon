@@ -37,3 +37,54 @@ def test_structured_path_matcher_rejects_binding_count_mismatches() -> None:
 
     with pytest.raises(MatchError, match="binds 2 variables but regex has 1 capturing groups"):
         matcher.match(["~left,right::(x)"], "x")
+
+
+def test_structured_path_matcher_match_and_rewrite_returns_none_when_unmatched() -> None:
+    matcher = StructuredPathMatcher()
+    assert matcher.match_and_rewrite(
+        from_pattern=["encoder", "$layer"],
+        to_pattern=["decoder", "${layer}"],
+        name="decoder.1",
+    ) is None
+
+
+def test_structured_path_matcher_rejects_invalid_capture_and_regex_forms() -> None:
+    matcher = StructuredPathMatcher()
+
+    with pytest.raises(MatchError, match="invalid capture name"):
+        matcher.match(["$1bad"], "x")
+
+    with pytest.raises(MatchError, match="invalid regex token"):
+        matcher.match(["~::(x)"], "x")
+
+    with pytest.raises(MatchError, match="missing regex body"):
+        matcher.match(["~x::"], "x")
+
+    with pytest.raises(MatchError, match="invalid structured regex"):
+        matcher.match(["~x::("], "x")
+
+    with pytest.raises(MatchError, match="named groups are not allowed"):
+        matcher.match(["~x::(?P<v>x)"], "x")
+
+
+def test_structured_path_matcher_rejects_regex_capture_none_values() -> None:
+    matcher = StructuredPathMatcher()
+
+    with pytest.raises(MatchError, match="captured None"):
+        matcher.match(["~x::(a)?"], "")
+
+    with pytest.raises(MatchError, match="captured None"):
+        matcher.match(["~x,y::(a)?(b)?"], "")
+
+
+def test_structured_path_matcher_rejects_invalid_variadic_output_bindings() -> None:
+    matcher = StructuredPathMatcher()
+
+    with pytest.raises(MatchError, match="unknown variadic variable"):
+        matcher.rewrite(["*tail"], StructuredMatch(bindings={"x": "1"}))
+
+    with pytest.raises(MatchError, match="is not variadic"):
+        matcher.rewrite(["*tail"], StructuredMatch(bindings={"tail": "x"}))
+
+    with pytest.raises(MatchError, match="contains non-string segments"):
+        matcher.rewrite(["*tail"], StructuredMatch(bindings={"tail": ["x", 1]}))  # type: ignore[list-item]

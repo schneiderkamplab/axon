@@ -58,3 +58,29 @@ def test_configure_history_sets_readline_options(monkeypatch, tmp_path) -> None:
     assert readline.bound == "set editing-mode emacs"
     assert readline.history_length == history._HISTORY_LENGTH
     assert len(registered) == 1
+
+
+def test_configure_history_no_readline_is_noop(monkeypatch) -> None:
+    monkeypatch.setattr(history, "readline", None)
+    history.configure_history()
+
+
+def test_add_history_entry_no_readline_is_noop(monkeypatch) -> None:
+    monkeypatch.setattr(history, "readline", None)
+    history._add_history_entry("x")
+
+
+class _BrokenReadline:
+    def parse_and_bind(self, value: str) -> None:
+        del value
+        raise RuntimeError("bind failed")
+
+    def set_history_length(self, value: int) -> None:
+        del value
+        raise RuntimeError("set history failed")
+
+
+def test_configure_history_ignores_readline_binding_failures(monkeypatch) -> None:
+    monkeypatch.setattr(history, "readline", _BrokenReadline())
+    monkeypatch.setattr(history, "atexit", SimpleNamespace(register=lambda fn: None))
+    history.configure_history()

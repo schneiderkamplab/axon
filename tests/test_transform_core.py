@@ -76,6 +76,11 @@ class _Provider:
         return self.state_dicts[model]
 
 
+class _SpecBadCollect:
+    def collect_models(self) -> list[str]:
+        return ["model"]
+
+
 def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
     original_registry = dict(REGISTRY)
     REGISTRY.clear()
@@ -120,6 +125,51 @@ def test_infer_output_model_skips_non_contributing_transforms() -> None:
     )
 
     assert infer_output_model(plan, _Provider()) == "model"
+
+
+def test_infer_output_model_raises_when_no_destination_model() -> None:
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        transforms=[CompiledTransform(HelpTransform(), HelpTransform().compile({}, default_model=None))],
+    )
+    with pytest.raises(TransformError, match="cannot infer output model uniquely"):
+        infer_output_model(plan, _Provider())
+
+
+def test_infer_output_model_raises_when_multiple_destination_models() -> None:
+    provider = _Provider()
+    provider.state_dicts["other"]["w"] = torch.ones(1)
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        transforms=[
+            CompiledTransform(_Transform(), _Spec("model")),
+            CompiledTransform(_Transform(), _Spec("other")),
+        ],
+    )
+    with pytest.raises(TransformError, match="cannot infer output model uniquely"):
+        infer_output_model(plan, provider)
+
+
+def test_infer_output_model_fallback_requires_provider() -> None:
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
+    )
+    with pytest.raises(TransformError, match="needs provider"):
+        infer_output_model(plan, None)
+
+
+def test_infer_output_model_fallback_rejects_non_set_collect_models() -> None:
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        transforms=[CompiledTransform(_FallbackTransform(), _SpecBadCollect())],
+    )
+    with pytest.raises(TransformError, match="needs provider"):
+        infer_output_model(plan, _Provider())
 
 
 def test_validate_payload_helpers_cover_required_unknown_and_type_errors() -> None:

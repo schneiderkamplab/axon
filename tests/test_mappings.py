@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+import brainsurgery.core.name_mapping as name_mapping_module
 from brainsurgery.core import (
     match_expr_names,
     require_dest_missing,
@@ -103,3 +104,123 @@ def test_resolve_name_mappings_rejects_mixed_expression_kinds() -> None:
             provider=provider,
             op_name="copy",
         )
+
+
+def test_match_expr_names_and_structured_helpers_wrap_invalid_patterns() -> None:
+    with pytest.raises(TransformError, match="invalid source regex"):
+        match_expr_names(expr="(", names=["x"], op_name="copy", role="source")
+
+    with pytest.raises(TransformError, match="invalid structured source pattern"):
+        match_expr_names(expr=["$1bad"], names=["x"], op_name="copy", role="source")
+
+    with pytest.raises(TransformError, match="invalid structured source pattern"):
+        name_mapping_module._match_structured_expr(
+            expr=["$1bad"],
+            name="x",
+            op_name="copy",
+            role="source",
+        )
+
+    with pytest.raises(TransformError, match="invalid structured destination pattern"):
+        name_mapping_module._rewrite_structured_expr(
+            expr=["${missing}"],
+            match=name_mapping_module._MATCHER.match(["x"], "x"),
+            op_name="copy",
+            role="destination",
+        )
+
+
+def test_resolve_name_mappings_regex_and_structured_error_paths() -> None:
+    provider = _Provider()
+
+    with pytest.raises(TransformError, match="internal error: regex resolver expected"):
+        name_mapping_module._resolve_name_mappings_regex(  # type: ignore[arg-type]
+            from_ref=TensorRef(model="src", expr=["layer", "$i"]),
+            to_ref=TensorRef(model="dst", expr="copy"),
+            provider=provider,
+            op_name="copy",
+        )
+
+    with pytest.raises(TransformError, match="internal error: structured resolver expected"):
+        name_mapping_module._resolve_name_mappings_structured(  # type: ignore[arg-type]
+            from_ref=TensorRef(model="src", expr="layer.*"),
+            to_ref=TensorRef(model="dst", expr=["x"]),
+            provider=provider,
+            op_name="copy",
+        )
+
+    with pytest.raises(TransformError, match="source matched zero tensors"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr=r"missing\..*"),
+            to_ref=TensorRef(model="dst", expr=r"copy.\g<0>"),
+            provider=provider,
+            op_name="copy",
+        )
+
+    with pytest.raises(TransformError, match="invalid regex rewrite"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr=r"layer\.(\d+)\.weight"),
+            to_ref=TensorRef(model="dst", expr=r"copy.\2.weight"),
+            provider=provider,
+            op_name="copy",
+        )
+
+    provider.state_dicts["src"]["dup.0"] = torch.ones(1)
+    provider.state_dicts["src"]["dup.1"] = torch.ones(1)
+    with pytest.raises(TransformError, match="destination collision"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr=r"dup\.(\d+)"),
+            to_ref=TensorRef(model="dst", expr="same"),
+            provider=provider,
+            op_name="copy",
+        )
+
+
+def test_resolve_name_mappings_slice_type_and_internal_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _Provider()
+
+    with pytest.raises(TransformError, match="source slice must be a string"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr="layer.0.weight", slice_spec=object()),  # type: ignore[arg-type]
+            to_ref=TensorRef(model="dst", expr="copy.0.weight"),
+            provider=provider,
+            op_name="copy",
+        )
+
+    with pytest.raises(TransformError, match="destination slice must be a string"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr="layer.0.weight"),
+            to_ref=TensorRef(model="dst", expr="copy.0.weight", slice_spec=object()),  # type: ignore[arg-type]
+            provider=provider,
+            op_name="copy",
+        )
+
+    monkeypatch.setattr(name_mapping_module, "_resolve_name_mappings_regex", lambda **kwargs: [])
+    with pytest.raises(TransformError, match="resolved zero mappings"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr=r"layer\..*"),
+            to_ref=TensorRef(model="dst", expr=r"copy.\g<0>"),
+            provider=provider,
+            op_name="copy",
+        )
+
+    monkeypatch.setattr(name_mapping_module, "_resolve_name_mappings_structured", lambda **kwargs: [])
+    with pytest.raises(TransformError, match="resolved zero mappings"):
+        resolve_name_mappings(
+            from_ref=TensorRef(model="src", expr=["layer", "$i", "weight"]),
+            to_ref=TensorRef(model="dst", expr=["copy", "${i}", "weight"]),
+            provider=provider,
+            op_name="copy",
+        )
+
+
+def test_require_dest_present_rejects_missing_destination() -> None:
+    provider = _Provider()
+    mappings = resolve_name_mappings(
+        from_ref=TensorRef(model="src", expr=r"layer\.0\.weight"),
+        to_ref=TensorRef(model="dst", expr="missing.0.weight"),
+        provider=provider,
+        op_name="copy",
+    )
+    with pytest.raises(TransformError, match="destination missing"):
+        require_dest_present(mappings=mappings, provider=provider, op_name="copy")

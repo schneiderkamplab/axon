@@ -6,10 +6,14 @@ from pathlib import Path
 import brainsurgery
 import pytest
 
+import brainsurgery.cli.complete as complete_module
 from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
+    _completion_display_hook,
+    _configure_readline_completion_bindings,
     _infer_active_transform,
+    _is_transform_payload_start,
     _is_top_level_completion_position,
     _list_model_aliases,
     _match_payload_candidates,
@@ -387,3 +391,261 @@ def test_exit_completion_sequence() -> None:
         _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
         None,
     ) == candidate
+
+
+def test_list_model_aliases_handles_provider_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        complete_module,
+        "list_model_aliases_from_provider",
+        lambda provider: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert _list_model_aliases(object()) == set()
+
+
+def test_list_loaded_tensor_names_handles_provider_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        complete_module,
+        "list_loaded_tensor_names_from_provider",
+        lambda provider: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert complete_module._list_loaded_tensor_names(object()) == {}
+
+
+def test_extract_transform_name_handles_yaml_list_prefix_and_unknown_command() -> None:
+    assert complete_module._extract_transform_name("- copy: { from: a, to: b }") == "copy"
+    assert complete_module._extract_transform_name("unknown: {}") is None
+    assert complete_module._extract_transform_name(": {}") is None
+
+
+def test_is_top_level_completion_position_rejects_out_of_bounds_begidx() -> None:
+    assert _is_top_level_completion_position("copy", 999) is False
+
+
+def test_is_transform_payload_start_clamps_endidx_bounds() -> None:
+    assert _is_transform_payload_start(
+        line_buffer="copy: ",
+        begidx=0,
+        endidx=999,
+        active_transform="copy",
+    ) is True
+    assert _is_transform_payload_start(
+        line_buffer="copy: ",
+        begidx=0,
+        endidx=-2,
+        active_transform="copy",
+    ) is False
+
+
+class _FakeReadline:
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    def parse_and_bind(self, command: str) -> None:
+        self.commands.append(command)
+
+
+def test_configure_readline_completion_bindings_accepts_none() -> None:
+    complete_module._configure_readline_completion_bindings(None)
+
+
+def test_configure_readline_completion_bindings_ignores_parse_failures() -> None:
+    class _BrokenReadline:
+        def parse_and_bind(self, command: str) -> None:
+            del command
+            raise RuntimeError("broken")
+
+    complete_module._configure_readline_completion_bindings(_BrokenReadline())
+
+
+def test_completion_display_hook_prints_preview_and_redisplays(capsys: pytest.CaptureFixture[str]) -> None:
+    class _Readline:
+        def __init__(self) -> None:
+            self.called = False
+
+        def redisplay(self) -> None:
+            self.called = True
+
+    readline = _Readline()
+    _completion_display_hook("", ["a", "b"], 0, readline)
+    output = capsys.readouterr().out
+    assert "Completions: a  b" in output
+    assert readline.called is True
+
+
+def test_completion_display_hook_ignores_redisplay_errors() -> None:
+    class _BrokenReadline:
+        def redisplay(self) -> None:
+            raise RuntimeError("broken redisplay")
+
+    _completion_display_hook("", ["a"], 0, _BrokenReadline())
+
+
+def test_completion_display_hook_and_preview_empty_paths(capsys: pytest.CaptureFixture[str]) -> None:
+    _completion_display_hook("", [], 0, None)
+    assert capsys.readouterr().out == ""
+    assert complete_module._render_completion_preview([]) == ""
+
+
+def test_infer_active_transform_returns_none_when_unknown() -> None:
+    assert _infer_active_transform(["something without colon"], "also invalid") is None
+
+
+def test_collect_payload_candidates_handles_get_transform_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        complete_module,
+        "get_transform",
+        lambda name: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    candidates = _collect_payload_candidates(active_transform="copy", state_dict_provider=None)
+    assert "{ " in candidates
+
+
+def test_match_payload_candidates_covers_structural_prefix_and_any_context() -> None:
+    matches = _match_payload_candidates(
+        text="{",
+        line_buffer="copy: {",
+        begidx=len("copy: {"),
+        payload_candidates=["{ ", "}", "from: "],
+    )
+    assert matches == ["from: "]
+
+    any_ctx = _match_payload_candidates(
+        text="",
+        line_buffer="copy",
+        begidx=len("copy"),
+        payload_candidates=["x", "y"],
+    )
+    assert any_ctx == ["x", "y"]
+
+
+def test_match_payload_candidates_handles_negative_endidx_and_close_brace_prefix() -> None:
+    matches = _match_payload_candidates(
+        text="}",
+        line_buffer="copy: {",
+        begidx=0,
+        endidx=-1,
+        payload_candidates=["{ ", "}", "from: "],
+    )
+    assert matches == ["from: "]
+
+
+def test_match_payload_candidates_colon_prefix_key_context_spacing() -> None:
+    matches = _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { from",
+        begidx=len("copy: { "),
+        payload_candidates=["from: ", "to: "],
+        active_transform="copy",
+    )
+    assert matches == ["from: "]
+
+    comma_no_space = _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { x,",
+        begidx=len("copy: { x,"),
+        payload_candidates=["from: ", "to: "],
+    )
+    assert comma_no_space == [" from: "]
+
+
+def test_match_payload_candidates_with_custom_transform_key_candidates() -> None:
+    class _T:
+        def completion_key_candidates(self, before_cursor: str, prefix_text: str):
+            del before_cursor, prefix_text
+            return ["alpha: ", "}"]
+
+        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+            del value_key, prefix_text, model_aliases
+            return None
+
+        def completion_committed_next_candidates(self, value_key: str | None):
+            del value_key
+            return None
+
+        def completion_reference_keys(self):
+            return []
+
+        def completion_payload_start_candidates(self, prefix_text: str):
+            del prefix_text
+            return None
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(complete_module, "get_transform", lambda name: _T())
+    try:
+        start_with_brace = _match_payload_candidates(
+            text="{",
+            line_buffer="copy: {",
+            begidx=len("copy: "),
+            endidx=len("copy: {"),
+            payload_candidates=["x"],
+            active_transform="copy",
+        )
+        assert start_with_brace == ["{ alpha: "]
+
+        after_comma = _match_payload_candidates(
+            text=",",
+            line_buffer="copy: { x,",
+            begidx=len("copy: { x"),
+            endidx=len("copy: { x,"),
+            payload_candidates=["x"],
+            active_transform="copy",
+        )
+        assert "}" in after_comma
+    finally:
+        monkeypatch.undo()
+
+
+def test_match_payload_candidates_value_transform_override_and_reference_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _T:
+        def completion_key_candidates(self, before_cursor: str, prefix_text: str):
+            del before_cursor, prefix_text
+            return None
+
+        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+            del model_aliases
+            if value_key == "from":
+                return []
+            if value_key == "mode":
+                return ["alpha", "beta"]
+            return None
+
+        def completion_committed_next_candidates(self, value_key: str | None):
+            if value_key == "mode":
+                return [", from: ", "}"]
+            return None
+
+        def completion_reference_keys(self):
+            return ["from", "to"]
+
+        def completion_payload_start_candidates(self, prefix_text: str):
+            del prefix_text
+            return None
+
+    monkeypatch.setattr(complete_module, "get_transform", lambda name: _T())
+
+    empty_override = _match_payload_candidates(
+        text="x::",
+        line_buffer="copy: { from: x::",
+        begidx=len("copy: { from: x::"),
+        payload_candidates=["x::name"],
+        active_transform="copy",
+    )
+    assert empty_override == []
+
+    committed_filtered = _match_payload_candidates(
+        text="}",
+        line_buffer="copy: { mode: alpha ",
+        begidx=len("copy: { mode: alpha "),
+        payload_candidates=["from: ", "to: "],
+        active_transform="copy",
+    )
+    assert committed_filtered == []
+
+    fallback_values = _match_payload_candidates(
+        text="z",
+        line_buffer="copy: { other: z",
+        begidx=len("copy: { other: z"),
+        payload_candidates=["zeta", "other: ", "x::y"],
+        active_transform="copy",
+    )
+    assert "zeta" in fallback_values

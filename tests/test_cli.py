@@ -138,3 +138,83 @@ def test_run_wraps_provider_error_as_bad_parameter(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(typer.BadParameter, match="bad provider config"):
         cli.run(config_items=["plan.yaml"], log_level="info")
+
+
+def test_execute_configured_transforms_normalizes_specs(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+
+    def _fake_normalize(specs: object) -> list[dict[str, object]]:
+        called["specs"] = specs
+        return [{"help": {}}]
+
+    def _fake_execute(pairs: object, provider: object, interactive: bool) -> tuple[bool, list[dict[str, object]]]:
+        called["provider"] = provider
+        called["interactive"] = interactive
+        called["pairs"] = list(pairs)  # type: ignore[arg-type]
+        return True, [{"help": {}}]
+
+    monkeypatch.setattr(cli_module, "normalize_transform_specs", _fake_normalize)
+    monkeypatch.setattr(cli_module, "execute_transform_pairs", _fake_execute)
+
+    surgery_plan = SimpleNamespace(transforms=[object()])
+    should_continue, executed = cli_module._execute_configured_transforms(
+        raw_plan={"transforms": [{"help": {}}]},
+        surgery_plan=surgery_plan,
+        state_dict_provider="provider",
+    )
+
+    assert should_continue is True
+    assert executed == [{"help": {}}]
+    assert called["specs"] == [{"help": {}}]
+    assert called["interactive"] is False
+    assert called["provider"] == "provider"
+    assert len(called["pairs"]) == 1
+
+
+def test_build_interactive_raw_plan_prefers_alias_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "list_model_aliases", lambda _: {"z", "a"})
+
+    built = cli_module._build_interactive_raw_plan(
+        raw_plan={"inputs": ["orig::/tmp/in.safetensors"], "output": {"path": "/tmp/out"}},
+        state_dict_provider=object(),
+        extra_specs=[{"help": {}}],
+    )
+
+    assert built["inputs"] == ["a::/dev/null", "z::/dev/null"]
+    assert built["output"] == {"path": "/tmp/out"}
+    assert built["transforms"] == [{"help": {}}]
+
+
+def test_run_interactive_session_retries_on_compile_error_then_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts = iter([[{"help": {}}], [{"exit": {}}]])
+    calls: list[tuple[object, bool]] = []
+
+    monkeypatch.setattr(cli_module, "prompt_interactive_transform", lambda **_: next(prompts))
+    monkeypatch.setattr(
+        cli_module,
+        "_build_interactive_raw_plan",
+        lambda **kwargs: {"transforms": kwargs["extra_specs"]},
+    )
+
+    def _fake_compile(raw_plan: dict[str, object]) -> object:
+        if raw_plan["transforms"] == [{"help": {}}]:
+            raise RuntimeError("bad interactive input")
+        return SimpleNamespace(transforms=[object()])
+
+    monkeypatch.setattr(cli_module, "compile_plan", _fake_compile)
+
+    def _fake_execute(pairs: object, provider: object, interactive: bool) -> tuple[bool, list[dict[str, object]]]:
+        calls.append((list(pairs), interactive))  # type: ignore[arg-type]
+        return False, [{"exit": {}}]
+
+    monkeypatch.setattr(cli_module, "execute_transform_pairs", _fake_execute)
+
+    should_continue, executed = cli_module._run_interactive_session(
+        raw_plan={"inputs": [], "output": None},
+        state_dict_provider=object(),
+    )
+
+    assert should_continue is False
+    assert executed == [{"exit": {}}]
+    assert len(calls) == 1
+    assert calls[0][1] is True
