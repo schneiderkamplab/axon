@@ -14,6 +14,7 @@ from brainsurgery.cli.interactive import (
     _is_transform_payload_start,
     _match_payload_candidates,
     _payload_context,
+    _readline_safe_prompt,
     _render_completion_preview,
     _is_top_level_completion_position,
     parse_transform_block,
@@ -517,6 +518,20 @@ def test_prefixes_rename_from_value_completion_uses_aliases_not_tensor_refs() ->
 def test_render_completion_preview_compacts_and_limits() -> None:
     preview = _render_completion_preview(["a", "b", "c"], limit=2)
     assert preview == "a  b (+1 more)"
+
+
+def test_readline_safe_prompt_wraps_ansi_when_readline_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(interactive_module, "readline", object())
+    styled = "\x1b[36mbrainsurgery> \x1b[0m"
+    assert _readline_safe_prompt(styled) == "\001\x1b[36m\002brainsurgery> \001\x1b[0m\002"
+
+
+def test_readline_safe_prompt_leaves_prompt_unchanged_without_readline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(interactive_module, "readline", None)
+    styled = "\x1b[36mbrainsurgery> \x1b[0m"
+    assert _readline_safe_prompt(styled) == styled
 
 
 class _FakeReadline:
