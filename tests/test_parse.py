@@ -40,3 +40,17 @@ def test_parse_transform_block_parses_and_rejects_invalid_yaml() -> None:
     assert parse_transform_block("- help: {}\n- exit") == [{"help": {}}, {"exit": {}}]
     with pytest.raises(ValueError, match="invalid YAML"):
         parse_transform_block("help: [")
+
+
+def test_parse_transform_block_preserves_structured_output_template_tokens() -> None:
+    parsed = parse_transform_block(
+        'copy: { from: ["layer", "$i", "attn"], to: ["layer", "${i}", "attention"] }'
+    )
+    assert parsed == [
+        {
+            "copy": {
+                "from": ["layer", "$i", "attn"],
+                "to": ["layer", "${i}", "attention"],
+            }
+        }
+    ]
