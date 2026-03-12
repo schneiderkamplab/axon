@@ -655,8 +655,10 @@ def test_help_print_all_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module, "list_transforms", lambda: ["a", "b"])
     monkeypatch.setattr(module, "emit_line", lines.append)
     module.HelpTransform()._print_all_commands()
-    assert "Available commands:" in lines
-    assert "  a" in lines
-    assert "For help on a specific command:" in lines
-    assert "  YAML: help: <command>" in lines
-    assert "  OLY:  help: <command>" in lines
+    output = "\n".join(lines)
+    assert "Help for commands" in output
+    assert "Available commands:" in output
+    assert "a" in output
+    assert "For help on a specific command:" in output
+    assert "YAML: help: <command>" in output
+    assert "OLY:  help: <command>" in output

@@ -5,7 +5,7 @@ _module = import_module("brainsurgery.transforms.load")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 import pytest
 import torch
-from brainsurgery.engine import InMemoryStateDict, InMemoryStateDictProvider
+from brainsurgery.engine import InMemoryStateDict, InMemoryStateDictProvider, reset_runtime_flags, set_runtime_flag
 from brainsurgery.core import TensorRef
 
 
@@ -91,3 +91,32 @@ def test_load_apply_additional_error_paths(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(_module, "get_or_create_alias_state_dict", lambda *args, **kwargs: sd)
     with pytest.raises(LoadTransformError, match="destination already exists"):
         LoadTransform().apply(tensor_spec, provider)
+
+
+def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    reset_runtime_flags()
+    set_runtime_flag("dry_run", True)
+
+    calls: list[str] = []
+    sd = InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+
+    monkeypatch.setattr(provider, "load_state_dict_from_checkpoint_path", lambda path: (calls.append("checkpoint"), sd)[1])
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: (_ for _ in ()).throw(AssertionError("should not call load_alias_from_path")))
+
+    state_spec = LoadSpec(path=Path("/tmp/x.safetensors"), alias="a", tensor_name=None, format="auto")
+    result = LoadTransform().apply(state_spec, provider)
+    assert result.count == 1
+    assert calls == ["checkpoint"]
+    assert provider.has_model_alias("a") is False
+
+    tensor_spec = LoadSpec(path=Path("/tmp/t.npy"), alias="new_alias", tensor_name="x", format="numpy")
+    monkeypatch.setattr(_module, "load_tensor_from_path", lambda path, format: torch.zeros(1))
+    result = LoadTransform().apply(tensor_spec, provider)
+    assert result.count == 1
+    assert provider.has_model_alias("new_alias") is False
+
+    reset_runtime_flags()

@@ -62,7 +62,7 @@ MULTI_ALIAS_PROVIDER = _MiniProvider(
     },
 )
 
-_SPECIAL_TRANSFORMS = {"assert", "diff", "exit", "help", "prefixes"}
+_SPECIAL_TRANSFORMS = {"assert", "diff", "exit", "help", "prefixes", "set"}
 _PREFERRED_KEYS = {
     "add": "from_a",
     "add_": "from",

@@ -8,7 +8,7 @@ from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-from brainsurgery.engine import InMemoryStateDict, create_state_dict_provider
+from brainsurgery.engine import InMemoryStateDict, create_state_dict_provider, reset_runtime_flags
 from brainsurgery.core import TransformError
 import brainsurgery.transforms.dump as dump_module
 
@@ -46,6 +46,7 @@ def test_cross_compile_execute_copy_then_assert_equal() -> None:
             )
         }
     )
+    baseline_counts = provider.get_state_dict("model").access_counts("src")
 
     should_continue, executed = execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
@@ -290,6 +291,40 @@ def test_cross_prefixes_lists_available_aliases(capsys: pytest.CaptureFixture[st
     assert "  scratch::" in output
     assert should_continue is True
     assert executed == raw["transforms"]
+
+
+def test_cross_set_verbose_then_copy_emits_activity(capsys: pytest.CaptureFixture[str]) -> None:
+    raw = {
+        "inputs": ["/tmp/model.safetensors"],
+        "transforms": [
+            {"set": {"verbose": True}},
+            {"copy": {"from": "h.0.attn.bias", "to": "i.0.attn.bias"}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = _Provider(
+        {
+            "model": _make_state_dict(
+                {
+                    "h.0.attn.bias": torch.ones((1,), dtype=torch.float32),
+                }
+            )
+        }
+    )
+    baseline_counts = provider.get_state_dict("model").access_counts("src")
+
+    reset_runtime_flags()
+    should_continue, executed = execute_transform_pairs(
+        zip(raw["transforms"], plan.transforms, strict=False),
+        provider,
+        interactive=False,
+    )
+    output = capsys.readouterr().out
+    reset_runtime_flags()
+
+    assert should_continue is True
+    assert executed == raw["transforms"]
+    assert "copy: h.0.attn.bias -> i.0.attn.bias" in output
 
 
 def test_cross_prefixes_add_creates_empty_alias() -> None:
@@ -649,3 +684,45 @@ def test_cross_add__subtract__in_place_pipeline() -> None:
     assert len(executed) == len(raw["transforms"])
     model_sd = provider.get_state_dict("model")
     assert torch.equal(model_sd["base"], torch.tensor([2.0, 3.0], dtype=torch.float32))
+
+
+def test_cross_dry_run_executes_flow_without_persisting_changes_and_prefixes_verbose(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw = {
+        "inputs": ["/tmp/model.safetensors"],
+        "transforms": [
+            {"set": {"dry-run": True, "verbose": True}},
+            {"copy": {"from": "src", "to": "dst"}},
+            {"assert": {"equal": {"left": "src", "right": "dst"}}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = _Provider(
+        {
+            "model": _make_state_dict(
+                {
+                    "src": torch.tensor([1.0, 2.0], dtype=torch.float32),
+                }
+            )
+        }
+    )
+    baseline_counts = provider.get_state_dict("model").access_counts("src")
+
+    reset_runtime_flags()
+    should_continue, executed = execute_transform_pairs(
+        zip(raw["transforms"], plan.transforms, strict=False),
+        provider,
+        interactive=False,
+    )
+    output = capsys.readouterr().out
+
+    assert should_continue is True
+    assert len(executed) == len(raw["transforms"])
+    assert "dry-run copy: src -> dst" in output
+    assert "dry-run assert: ok" in output
+
+    reset_runtime_flags()
+    model_sd = provider.get_state_dict("model")
+    assert "dst" not in model_sd
+    assert model_sd.access_counts("src") == baseline_counts

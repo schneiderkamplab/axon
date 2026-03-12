@@ -1,4 +1,5 @@
 from importlib import import_module
+import builtins
 from types import SimpleNamespace
 
 import pytest
@@ -41,8 +42,10 @@ def test_help_print_command_help_emits_unavailable_metadata(monkeypatch: pytest.
 
     HelpTransform()._print_command_help("noop")
 
-    assert "Command: noop" in lines
-    assert "Key metadata: unavailable" in lines
+    output = "\n".join(lines)
+    assert "Help for noop" in output
+    assert "Command: noop" in output
+    assert "Key metadata: unavailable" in output
 
 
 def test_help_print_assert_expr_help_emits_required_optional_and_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,12 +65,14 @@ def test_help_print_assert_expr_help_emits_required_optional_and_allowed(monkeyp
 
     HelpTransform()._print_assert_expr_help("equal")
 
-    assert "Assert expression: equal" in lines
-    assert "Payload: mapping" in lines
-    assert "Required keys:" in lines
-    assert "  - left" in lines
-    assert "Optional keys:" in lines
-    assert "  - right" in lines
+    output = "\n".join(lines)
+    assert "Help for assert.equal" in output
+    assert "Assert expression: equal" in output
+    assert "Payload: mapping" in output
+    assert "Required keys:" in output
+    assert "- left" in output
+    assert "Optional keys:" in output
+    assert "- right" in output
 
 
 def test_help_compile_accepts_none_and_empty_mapping() -> None:
@@ -117,8 +122,10 @@ def test_help_print_assert_help_without_assert_transform(monkeypatch: pytest.Mon
     monkeypatch.setattr(_module, "emit_line", lines.append)
 
     HelpTransform()._print_assert_help()
-    assert "Command: assert" in lines
-    assert "  equal" in lines
+    output = "\n".join(lines)
+    assert "Help for assert" in output
+    assert "Command: assert" in output
+    assert "equal" in output
 
 
 def test_help_compile_rejects_blank_string_and_accepts_none_subpayload() -> None:
@@ -168,7 +175,33 @@ def test_help_print_command_help_unknown_and_with_help_text(monkeypatch: pytest.
     )
     monkeypatch.setattr(_module, "emit_line", lines.append)
     HelpTransform()._print_command_help("copy")
-    assert "help text" in lines
-    assert "Required keys: none" in lines
-    assert "Optional keys: none" in lines
-    assert "All allowed keys: none" in lines
+    output = "\n".join(lines)
+    assert "Help for copy" in output
+    assert "help text" in output
+    assert "Required keys: none" in output
+    assert "Optional keys: none" in output
+    assert "All allowed keys: none" in output
+
+
+def test_help_emit_panel_fallback_and_emit_key_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines: list[str] = []
+    monkeypatch.setattr(_module, "emit_line", lines.append)
+
+    original_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name in {"rich.console", "rich.panel"}:
+            raise ImportError("no rich")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    transform = HelpTransform()
+    transform._emit_help_panel("Fallback title", ["line 1", "line 2"])
+    transform._emit_key_metadata(required_keys={"a"}, allowed_keys={"a", "b"})
+
+    output = "\n".join(lines)
+    assert "Fallback title" in output
+    assert "line 1" in output
+    assert "Required keys:" in output
+    assert "- a" in output

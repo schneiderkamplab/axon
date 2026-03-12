@@ -54,11 +54,13 @@ def test_run_executes_configured_and_interactive_and_writes_summary(monkeypatch:
     )
     provider = _Provider()
     summary_calls: list[dict[str, object]] = []
+    reset_calls: list[bool] = []
 
     monkeypatch.setattr(cli_module, "load_cli_config", lambda _: raw_plan)
     monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "configure_history", lambda: None)
+    monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: reset_calls.append(True))
     monkeypatch.setattr(
         cli_module,
         "_execute_configured_transforms",
@@ -80,6 +82,7 @@ def test_run_executes_configured_and_interactive_and_writes_summary(monkeypatch:
     )
 
     assert provider.closed is True
+    assert reset_calls == [True]
     assert len(provider.save_calls) == 1
     assert len(summary_calls) == 1
     assert summary_calls[0]["transforms"] == [{"copy": {"from": "x", "to": "y"}}, {"exit": {}}]
@@ -139,6 +142,93 @@ def test_run_wraps_provider_error_as_bad_parameter(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(typer.BadParameter, match="bad provider config"):
         cli.run(config_items=["plan.yaml"], log_level="info")
+
+
+def test_run_skips_output_save_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_plan = {
+        "inputs": ["model::/tmp/in.safetensors"],
+        "output": {"path": "/tmp/out.safetensors"},
+        "transforms": [{"set": {"dry-run": True}}],
+    }
+    surgery_plan = SimpleNamespace(
+        inputs={"model": Path("/tmp/in.safetensors")},
+        transforms=[object()],
+        output=SimpleNamespace(path=Path("/tmp/out.safetensors")),
+    )
+    provider = _Provider()
+
+    monkeypatch.setattr(cli_module, "load_cli_config", lambda _: raw_plan)
+    monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
+    monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
+    monkeypatch.setattr(cli_module, "configure_history", lambda: None)
+    monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_execute_configured_transforms",
+        lambda **_: (True, [{"set": {"dry-run": True}}]),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "get_runtime_flags",
+        lambda: SimpleNamespace(dry_run=True, verbose=False),
+    )
+
+    cli.run(
+        config_items=["plan.yaml"],
+        interactive=False,
+        summarize=False,
+        log_level="info",
+    )
+
+    assert provider.closed is True
+    assert provider.save_calls == []
+
+
+def test_run_skips_summary_file_write_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_plan = {
+        "inputs": ["model::/tmp/in.safetensors"],
+        "output": None,
+        "transforms": [{"set": {"dry-run": True}}],
+    }
+    surgery_plan = SimpleNamespace(
+        inputs={"model": Path("/tmp/in.safetensors")},
+        transforms=[object()],
+        output=None,
+    )
+    provider = _Provider()
+    summary_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(cli_module, "load_cli_config", lambda _: raw_plan)
+    monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
+    monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
+    monkeypatch.setattr(cli_module, "configure_history", lambda: None)
+    monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_execute_configured_transforms",
+        lambda **_: (True, [{"set": {"dry-run": True}}]),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "get_runtime_flags",
+        lambda: SimpleNamespace(dry_run=True, verbose=False),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "write_executed_plan_summary",
+        lambda **kwargs: summary_calls.append(kwargs),
+    )
+
+    cli.run(
+        config_items=["plan.yaml"],
+        interactive=False,
+        summarize=True,
+        summarize_path=Path("/tmp/summary.yaml"),
+        log_level="info",
+    )
+
+    assert provider.closed is True
+    assert summary_calls == []
 
 
 def test_execute_configured_transforms_normalizes_specs(monkeypatch: pytest.MonkeyPatch) -> None:

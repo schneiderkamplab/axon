@@ -1,5 +1,7 @@
 from importlib import import_module
 
+from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+
 _module = import_module("brainsurgery.transforms.delete")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -44,3 +46,22 @@ def test_delete_apply_raises_for_missing_target() -> None:
         assert "disappeared" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected missing target error")
+
+
+def test_delete_apply_emits_verbose_activity_line(capsys) -> None:
+    class _Provider:
+        def __init__(self) -> None:
+            self._state_dict = {"x": object()}
+
+        def get_state_dict(self, model: str):
+            assert model == "model"
+            return self._state_dict
+
+    provider = _Provider()
+    spec = UnarySpec(target_ref=TensorRef(model="model", expr="x"))
+
+    reset_runtime_flags()
+    set_runtime_flag("verbose", True)
+    DeleteTransform().apply_to_target(spec, "x", provider)
+    assert "delete: x" in capsys.readouterr().out
+    reset_runtime_flags()
