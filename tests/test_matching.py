@@ -32,6 +32,12 @@ def test_structured_path_matcher_rejects_invalid_output_patterns() -> None:
         matcher.rewrite(["${missing}"], match)
     assert matcher.rewrite(["$name"], match) == "proj"
 
+    with pytest.raises(MatchError, match="unknown interpolation variable"):
+        matcher.rewrite(["$missing"], match)
+
+    with pytest.raises(MatchError, match="cannot interpolate non-scalar variable"):
+        matcher.rewrite(["$name"], StructuredMatch(bindings={"name": ["proj"]}))
+
 
 def test_structured_path_matcher_rejects_binding_count_mismatches() -> None:
     matcher = StructuredPathMatcher()

@@ -657,4 +657,6 @@ def test_help_print_all_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     module.HelpTransform()._print_all_commands()
     assert "Available commands:" in lines
     assert "  a" in lines
-    assert "For help on a specific command, run: help: <command>" in lines
+    assert "For help on a specific command:" in lines
+    assert "  YAML: help: <command>" in lines
+    assert "  OLY:  help: <command>" in lines

@@ -27,9 +27,9 @@ def test_parse_transform_block_accepts_canonical_help_mapping() -> None:
     assert parsed == [{"help": {"assert": "all"}}]
 
 
-def test_parse_transform_block_rejects_help_shorthand() -> None:
-    with pytest.raises(ValueError):
-        parse_transform_block("help: assert: all")
+def test_parse_transform_block_accepts_help_shorthand_via_oly() -> None:
+    parsed = parse_transform_block("help: assert: all")
+    assert parsed == [{"help": {"assert": "all"}}]
 
 
 @contextmanager

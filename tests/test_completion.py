@@ -81,9 +81,11 @@ _PREFERRED_KEYS = {
     "matmul": "from_a",
     "move": "from",
     "multiply": "from_a",
+    "ones": "target",
     "permute": "from",
     "phlora": "target",
     "phlora_": "target",
+    "rand": "target",
     "reshape": "from",
     "reshape_": "target",
     "save": "target",
@@ -92,6 +94,7 @@ _PREFERRED_KEYS = {
     "split": "from",
     "subtract": "from_a",
     "subtract_": "from",
+    "zeroes": "target",
 }
 
 _REFERENCE_TRANSFORMS = [

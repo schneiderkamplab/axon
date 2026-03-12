@@ -54,3 +54,18 @@ def test_parse_transform_block_preserves_structured_output_template_tokens() -> 
             }
         }
     ]
+
+
+def test_parse_transform_block_falls_back_to_oly_when_yaml_fails() -> None:
+    parsed = parse_transform_block("copy: from: [*prefix, $i], to: [*prefix, $i]")
+    assert parsed == [{"copy": {"from": ["*prefix", "$i"], "to": ["*prefix", "$i"]}}]
+
+
+def test_parse_transform_block_reports_yaml_and_oly_errors_when_both_fail() -> None:
+    with pytest.raises(ValueError, match=r"invalid YAML:[\s\S]*invalid OLY:"):
+        parse_transform_block("copy: from: [")
+
+
+def test_parse_transform_block_empty_input_reports_yaml_error_only() -> None:
+    with pytest.raises(ValueError, match="invalid YAML:"):
+        parse_transform_block("")
