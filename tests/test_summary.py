@@ -17,6 +17,7 @@ def test_build_raw_plan_and_derive_summary_path_cover_common_outputs(tmp_path) -
     directory = tmp_path / "dir"
     directory.mkdir()
     assert _derive_summary_path(directory) == directory / "executed-plan.yaml"
+    assert _derive_summary_path(tmp_path / "outdir") == tmp_path / "outdir.executed.yaml"
 
 
 def test_write_executed_plan_summary_writes_yaml(tmp_path, monkeypatch) -> None:

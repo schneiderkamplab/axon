@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import runpy
 from types import SimpleNamespace
 
 import pytest
@@ -218,3 +219,40 @@ def test_run_interactive_session_retries_on_compile_error_then_exits(monkeypatch
     assert executed == [{"exit": {}}]
     assert len(calls) == 1
     assert calls[0][1] is True
+
+
+def test_run_interactive_session_returns_when_prompt_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "prompt_interactive_transform", lambda **_: None)
+    should_continue, executed = cli_module._run_interactive_session(
+        raw_plan={"inputs": [], "output": None},
+        state_dict_provider=object(),
+    )
+    assert should_continue is True
+    assert executed == []
+
+
+def test_cli_module_main_guard_executes_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+    import sys
+    import typer
+
+    class _FakeTyper:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def command(self, *args, **kwargs):
+            del args, kwargs
+            return lambda fn: fn
+
+        def __call__(self, *args, **kwargs):
+            del args, kwargs
+            calls.append(True)
+
+    monkeypatch.setattr(typer, "Typer", _FakeTyper)
+    prior = sys.modules.pop("brainsurgery.cli.cli", None)
+    try:
+        runpy.run_module("brainsurgery.cli.cli", run_name="__main__")
+    finally:
+        if prior is not None:
+            sys.modules["brainsurgery.cli.cli"] = prior
+    assert calls == [True]

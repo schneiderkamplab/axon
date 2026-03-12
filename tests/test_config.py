@@ -36,6 +36,7 @@ def test_build_override_fragment_and_apply_override_merge_recursively() -> None:
     assert deep_merge_dicts({"a": [1, {"x": 1}]}, {"a": [None, {"y": 2}]}) == {
         "a": [1, {"x": 1, "y": 2}]
     }
+    assert deep_merge_dicts({"a": 1}, {"a": 2}) == {"a": 2}
 
 
 def test_load_cli_config_merges_yaml_and_overrides(tmp_path: Path) -> None:

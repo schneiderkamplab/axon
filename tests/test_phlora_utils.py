@@ -69,3 +69,15 @@ def test_resolve_effective_rank_caps_to_tensor_shape() -> None:
         op_name="phlora",
         tensor_name="model::w",
     ) == 2
+
+
+def test_resolve_effective_rank_rejects_zero_dim_matrix() -> None:
+    source = torch.ones((0, 3), dtype=torch.float32)
+    with pytest.raises(TransformError, match="rank became zero"):
+        _resolve_effective_rank(
+            source,
+            1,
+            error_type=TransformError,
+            op_name="phlora",
+            tensor_name="model::w",
+        )

@@ -649,3 +649,176 @@ def test_match_payload_candidates_value_transform_override_and_reference_filters
         active_transform="copy",
     )
     assert "zeta" in fallback_values
+
+
+def test_match_payload_candidates_additional_uncovered_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        complete_module,
+        "get_transform",
+        lambda name: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert _match_payload_candidates(
+        text="x",
+        line_buffer="copy: { from: x",
+        begidx=len("copy: { from: x"),
+        payload_candidates=["x::y"],
+        active_transform="copy",
+    ) == ["x::y"]
+
+    class _FlakyTransform:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def completion_key_candidates(self, before_cursor: str, prefix_text: str):
+            del before_cursor, prefix_text
+            return ["from: ", "}"]
+
+        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+            del value_key, prefix_text, model_aliases
+            return None
+
+        def completion_committed_next_candidates(self, value_key: str | None):
+            del value_key
+            return None
+
+        def completion_reference_keys(self):
+            self.calls += 1
+            if self.calls == 1:
+                return ["from"]
+            return ["to"]
+
+        def completion_payload_start_candidates(self, prefix_text: str):
+            del prefix_text
+            return None
+
+    flaky = _FlakyTransform()
+    monkeypatch.setattr(complete_module, "get_transform", lambda name: flaky)
+    assert _match_payload_candidates(
+        text="",
+        line_buffer="copy: { from: ",
+        begidx=len("copy: { from: "),
+        payload_candidates=["base::", "base::", "scratch::", "scratch::"],
+        active_transform="copy",
+        model_aliases=["base", "scratch"],
+    ) == ["base::", "scratch::"]
+
+    matches = _match_payload_candidates(
+        text="base::x",
+        line_buffer="copy: { from: base::x",
+        begidx=len("copy: { from: base::x"),
+        payload_candidates=["base::", "base::x", "from: "],
+        active_transform="copy",
+    )
+    assert matches == ["base::x"]
+
+    assert _match_payload_candidates(
+        text="{",
+        line_buffer="copy: {",
+        begidx=len("copy: "),
+        endidx=len("copy: "),
+        payload_candidates=["from: "],
+        active_transform="copy",
+    ) == ["{ "]
+
+    assert _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { x,",
+        begidx=len("copy: { x,"),
+        payload_candidates=["from: ", "}"],
+        active_transform="copy",
+    ) == [" from: ", "}"]
+
+    assert _match_payload_candidates(
+        text="",
+        line_buffer="copy: { x,",
+        begidx=len("copy: { x,"),
+        payload_candidates=["from: ", "to: "],
+    ) == [" from: ", " to: "]
+
+    assert _match_payload_candidates(
+        text="base::",
+        line_buffer="copy: { from: base::",
+        begidx=len("copy: { from: base::"),
+        payload_candidates=["base::x", "from: "],
+        active_transform="copy",
+    ) == ["base::x"]
+
+    assert _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { x,",
+        begidx=len("copy: { x"),
+        endidx=len("copy: { x,"),
+        payload_candidates=["from: "],
+    ) == [" from: "]
+
+    assert _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { f",
+        begidx=len("copy: { "),
+        payload_candidates=["from: "],
+    ) == ["from: "]
+
+    assert _match_payload_candidates(
+        text="f",
+        line_buffer="copy: { f",
+        begidx=len("copy: { f"),
+        payload_candidates=["from: ", "to: "],
+        active_transform=None,
+    ) == ["from: "]
+
+    assert _match_payload_candidates(
+        text="x",
+        line_buffer="copy: { mode: alpha ",
+        begidx=len("copy: { mode: alpha "),
+        payload_candidates=["from: ", "to: ", "}"],
+        active_transform=None,
+    ) == []
+
+
+def test_match_payload_candidates_hits_remaining_reference_and_key_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ChangingReferenceKeys:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def completion_key_candidates(self, before_cursor: str, prefix_text: str):
+            del before_cursor, prefix_text
+            return None
+
+        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+            del value_key, prefix_text, model_aliases
+            return None
+
+        def completion_committed_next_candidates(self, value_key: str | None):
+            del value_key
+            return None
+
+        def completion_reference_keys(self):
+            self.calls += 1
+            if self.calls == 1:
+                return ["from"]
+            return []
+
+        def completion_payload_start_candidates(self, prefix_text: str):
+            del prefix_text
+            return None
+
+    monkeypatch.setattr(complete_module, "get_transform", lambda name: _ChangingReferenceKeys())
+    assert _match_payload_candidates(
+        text="base::x",
+        line_buffer="copy: { from: base::x",
+        begidx=len("copy: { from: base::x"),
+        payload_candidates=["base::", "base::x"],
+        active_transform="copy",
+        model_aliases=["base"],
+    ) == ["base::x"]
+
+    assert _match_payload_candidates(
+        text="f",
+        line_buffer="copy: {",
+        begidx=len("copy: {"),
+        endidx=len("copy: {"),
+        payload_candidates=["from: ", "to: "],
+        active_transform=None,
+    ) == ["from: "]

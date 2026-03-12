@@ -84,3 +84,28 @@ def test_configure_history_ignores_readline_binding_failures(monkeypatch) -> Non
     monkeypatch.setattr(history, "readline", _BrokenReadline())
     monkeypatch.setattr(history, "atexit", SimpleNamespace(register=lambda fn: None))
     history.configure_history()
+
+
+def test_configure_history_write_failure_path(monkeypatch, tmp_path) -> None:
+    class _WriteFails(_Readline):
+        def write_history_file(self, path: str) -> None:
+            del path
+            raise RuntimeError("write failed")
+
+    readline = _WriteFails()
+    callbacks: list[object] = []
+    monkeypatch.setattr(history, "readline", readline)
+    monkeypatch.setattr(history, "_HISTORY_FILE", tmp_path / "history.txt")
+    monkeypatch.setattr(history, "atexit", SimpleNamespace(register=callbacks.append))
+    history.configure_history()
+    assert len(callbacks) == 1
+    callbacks[0]()
+
+
+def test_add_history_entry_exception_path(monkeypatch) -> None:
+    class _BrokenAdd(_Readline):
+        def get_current_history_length(self) -> int:
+            raise RuntimeError("broken")
+
+    monkeypatch.setattr(history, "readline", _BrokenAdd())
+    history._add_history_entry("x")

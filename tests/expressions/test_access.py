@@ -1,5 +1,6 @@
 from importlib import import_module
 
+import pytest
 import torch
 
 from brainsurgery.core import TransformError
@@ -115,3 +116,31 @@ def test_reads_evaluate_rejects_uninstrumented_state_dict() -> None:
         assert "instrumented state_dict backend" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected unsupported backend error")
+
+
+def test_reads_evaluate_reports_zero_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    state_dict = InMemoryStateDict()
+    state_dict["a"] = torch.ones(1)
+
+    class _Provider:
+        def get_state_dict(self, model: str):
+            assert model == "model"
+            return state_dict
+
+    monkeypatch.setattr(_module, "resolve_matches", lambda *_args, **_kwargs: [])
+    expr = TensorAccessExpr(
+        ref=TensorRef(model="model", expr="missing"),
+        field="reads",
+        comparison=ScalarComparison(exact=0, ge=None, gt=None, le=None, lt=None),
+    )
+    with pytest.raises(TransformError, match="matched zero tensors"):
+        expr.evaluate(_Provider())
+
+
+def test_tensor_access_collect_models() -> None:
+    expr = TensorAccessExpr(
+        ref=TensorRef(model="model", expr="x"),
+        field="reads",
+        comparison=ScalarComparison(exact=1, ge=None, gt=None, le=None, lt=None),
+    )
+    assert expr.collect_models() == {"model"}

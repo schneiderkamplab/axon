@@ -651,6 +651,100 @@ def test_interactive_completion_handles_restore_errors(monkeypatch: pytest.Monke
         assert callable(fake.get_completer())
 
 
+def test_interactive_completion_fallback_without_get_endidx(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NoEndidxReadline:
+        def __init__(self) -> None:
+            self._completer = None
+            self._delims = " \t\n"
+            self.line_buffer = "copy: "
+            self.begidx = len(self.line_buffer)
+
+        def get_completer(self):
+            return self._completer
+
+        def get_completer_delims(self) -> str:
+            return self._delims
+
+        def get_line_buffer(self) -> str:
+            return self.line_buffer
+
+        def get_begidx(self) -> int:
+            return self.begidx
+
+        def set_completer_delims(self, delims: str) -> None:
+            self._delims = delims
+
+        def set_completer(self, completer) -> None:
+            self._completer = completer
+
+    fake = _NoEndidxReadline()
+    monkeypatch.setattr(interactive_module, "readline", fake)
+    with interactive_module._interactive_completion(
+        top_level_candidates=["copy: "],
+        lines=[],
+        state_dict_provider=None,
+    ):
+        assert callable(fake.get_completer())
+        assert fake._completer("", 0) == "{ "
+
+
+def test_interactive_completion_top_level_falls_back_to_payload_and_non_top_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _CompletionReadline()
+    monkeypatch.setattr(interactive_module, "readline", fake)
+    monkeypatch.setattr(interactive_module, "_collect_payload_candidates", lambda **kwargs: ["from: ", "base::x"])
+    monkeypatch.setattr(interactive_module, "_match_payload_candidates", lambda **kwargs: ["from: "])
+    monkeypatch.setattr(interactive_module, "_list_model_aliases", lambda provider: {"base"})
+
+    with interactive_module._interactive_completion(
+        top_level_candidates=["help: "],
+        lines=[],
+        state_dict_provider=object(),
+    ):
+        fake.line_buffer = "copy: "
+        fake.begidx = len(fake.line_buffer)
+        fake.endidx = fake.begidx
+        assert fake._completer("", 0) == "from: "
+
+        fake.line_buffer = "copy: { f"
+        fake.begidx = len("copy: { f")
+        fake.endidx = fake.begidx
+        assert fake._completer("f", 0) == "from: "
+
+
+def test_interactive_completion_handles_readline_exception_and_top_level_colon_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BrokenLineReadline(_CompletionReadline):
+        def get_line_buffer(self) -> str:
+            raise RuntimeError("broken line buffer")
+
+    broken = _BrokenLineReadline()
+    monkeypatch.setattr(interactive_module, "readline", broken)
+    with interactive_module._interactive_completion(
+        top_level_candidates=["copy: "],
+        lines=[],
+        state_dict_provider=None,
+    ):
+        assert broken._completer("c", 0) == "copy: "
+
+    fake = _CompletionReadline()
+    monkeypatch.setattr(interactive_module, "readline", fake)
+    monkeypatch.setattr(interactive_module, "_collect_payload_candidates", lambda **kwargs: ["from: "])
+    monkeypatch.setattr(interactive_module, "_match_payload_candidates", lambda **kwargs: ["from: "])
+    monkeypatch.setattr(interactive_module, "_list_model_aliases", lambda provider: {"base"})
+    with interactive_module._interactive_completion(
+        top_level_candidates=["help: "],
+        lines=["copy: {"],
+        state_dict_provider=object(),
+    ):
+        fake.line_buffer = "- copy: "
+        fake.begidx = 2
+        fake.endidx = len(fake.line_buffer)
+        assert fake._completer("x", 0) == "from: "
+
+
 def test_prompt_interactive_transform_rejects_invalid_then_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = iter(["copy: [", "", "exit", ""])
     history_entries: list[str] = []
