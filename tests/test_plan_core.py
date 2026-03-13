@@ -32,6 +32,8 @@ def test_parse_input_entry_and_output_cover_validation_branches() -> None:
     assert output.path == Path("/tmp/out")
     assert output.format == "safetensors"
     assert output.shard == "1GB"
+    dcp_output = parse_output_mapping({"path": "/tmp/dcp_out", "format": "dcp"})
+    assert dcp_output.format == "dcp"
 
     with pytest.raises(PlanLoaderError, match="output.path is required"):
         parse_output_mapping({"format": "torch"})

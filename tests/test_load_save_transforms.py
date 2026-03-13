@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import json
+import warnings
 import pytest
 import torch
 from safetensors.torch import load_file as load_safetensors_file
@@ -11,6 +12,7 @@ from safetensors.torch import save_file as save_safetensors_file
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.engine import create_state_dict_provider
+from brainsurgery.engine.checkpoint_io import load_state_dict_from_path
 import brainsurgery.transforms.save as save_module
 
 try:
@@ -21,6 +23,25 @@ except Exception:  # pragma: no cover
 
 def _write_checkpoint(path: Path, values: dict[str, torch.Tensor]) -> None:
     save_safetensors_file(values, str(path))
+
+
+def _write_dcp_checkpoint(path: Path, values: dict[str, torch.Tensor]) -> None:
+    dcp = pytest.importorskip("torch.distributed.checkpoint")
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                r"torch\.distributed is disabled, unavailable or uninitialized, "
+                r"assuming the intent is to save in a single process\."
+            ),
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"TypedStorage is deprecated\..*",
+            category=UserWarning,
+        )
+        dcp.save(values, checkpoint_id=path, no_dist=True)
 
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
@@ -62,6 +83,174 @@ def test_load_state_dict_then_save_state_dict(provider_name: str, tmp_path: Path
     assert isinstance(saved, dict)
     assert "x" in saved
     assert torch.equal(saved["x"], torch.tensor([1.0, 2.0], dtype=torch.float32))
+
+
+@pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
+def test_yaml_plan_accepts_dcp_directory_in_inputs_default_model(provider_name: str, tmp_path: Path) -> None:
+    dcp_path = tmp_path / "model_dcp"
+    out_path = tmp_path / "saved_from_dcp.safetensors"
+    expected = {
+        "linear.weight": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "linear.bias": torch.tensor([1.0, 2.0], dtype=torch.float32),
+    }
+    _write_dcp_checkpoint(dcp_path, expected)
+
+    raw = {
+        "inputs": [str(dcp_path)],
+        "transforms": [
+            {"save": {"path": str(out_path), "format": "safetensors"}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = create_state_dict_provider(
+        provider=provider_name,
+        model_paths=plan.inputs,
+        max_io_workers=2,
+        arena_root=tmp_path / "arena",
+        arena_segment_size="1MB",
+    )
+    try:
+        should_continue, executed = execute_transform_pairs(
+            zip(raw["transforms"], plan.transforms, strict=False),
+            provider,
+            interactive=False,
+        )
+    finally:
+        provider.close()
+
+    assert should_continue is True
+    assert len(executed) == 1
+    saved = load_safetensors_file(str(out_path))
+    assert set(saved) == set(expected)
+    for key, tensor in expected.items():
+        assert torch.equal(saved[key], tensor)
+
+
+@pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
+def test_yaml_plan_accepts_dcp_directory_in_inputs_with_alias(provider_name: str, tmp_path: Path) -> None:
+    dcp_path = tmp_path / "aliased_dcp"
+    out_path = tmp_path / "saved_alias.pt"
+    expected = {
+        "a": torch.arange(4, dtype=torch.float32),
+        "b": torch.tensor([5.0], dtype=torch.float32),
+    }
+    _write_dcp_checkpoint(dcp_path, expected)
+
+    raw = {
+        "inputs": [f"base::{dcp_path}"],
+        "transforms": [
+            {"save": {"path": str(out_path), "alias": "base", "format": "torch"}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = create_state_dict_provider(
+        provider=provider_name,
+        model_paths=plan.inputs,
+        max_io_workers=2,
+        arena_root=tmp_path / "arena",
+        arena_segment_size="1MB",
+    )
+    try:
+        should_continue, executed = execute_transform_pairs(
+            zip(raw["transforms"], plan.transforms, strict=False),
+            provider,
+            interactive=False,
+        )
+    finally:
+        provider.close()
+
+    assert should_continue is True
+    assert len(executed) == 1
+    saved = torch.load(out_path, map_location="cpu")
+    assert isinstance(saved, dict)
+    assert set(saved) == set(expected)
+    for key, tensor in expected.items():
+        assert torch.equal(saved[key], tensor)
+
+
+@pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
+def test_save_state_dict_as_dcp_directory(provider_name: str, tmp_path: Path) -> None:
+    in_path = tmp_path / "in.safetensors"
+    out_dir = tmp_path / "out_dcp"
+    expected = {
+        "x": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "y": torch.tensor([1.0, 2.0], dtype=torch.float32),
+    }
+    _write_checkpoint(in_path, expected)
+
+    raw = {
+        "inputs": [str(in_path)],
+        "transforms": [
+            {"save": {"path": str(out_dir), "format": "dcp"}},
+        ],
+    }
+    plan = compile_plan(raw)
+    provider = create_state_dict_provider(
+        provider=provider_name,
+        model_paths=plan.inputs,
+        max_io_workers=2,
+        arena_root=tmp_path / "arena",
+        arena_segment_size="1MB",
+    )
+    try:
+        should_continue, executed = execute_transform_pairs(
+            zip(raw["transforms"], plan.transforms, strict=False),
+            provider,
+            interactive=False,
+        )
+    finally:
+        provider.close()
+
+    assert should_continue is True
+    assert len(executed) == 1
+    assert (out_dir / ".metadata").exists()
+    assert list(out_dir.glob("*.distcp"))
+    loaded: dict[str, torch.Tensor] = {}
+    load_state_dict_from_path(out_dir, loaded, max_io_workers=2)
+    assert set(loaded) == set(expected)
+    for key, tensor in expected.items():
+        assert torch.equal(loaded[key], tensor)
+
+
+def test_output_writes_dcp_directory(tmp_path: Path) -> None:
+    in_path = tmp_path / "in.safetensors"
+    out_dir = tmp_path / "output_dcp"
+    expected = {"x": torch.arange(5, dtype=torch.float32)}
+    _write_checkpoint(in_path, expected)
+
+    raw = {
+        "inputs": [str(in_path)],
+        "output": {"path": str(out_dir), "format": "dcp"},
+        "transforms": [{"copy": {"from": "model::x", "to": "model::x_copy"}}],
+    }
+    plan = compile_plan(raw)
+    provider = create_state_dict_provider(
+        provider="inmemory",
+        model_paths=plan.inputs,
+        max_io_workers=2,
+        arena_root=tmp_path / "arena",
+        arena_segment_size="1MB",
+    )
+    try:
+        should_continue, executed = execute_transform_pairs(
+            zip(raw["transforms"], plan.transforms, strict=False),
+            provider,
+            interactive=False,
+        )
+        assert should_continue is True
+        assert len(executed) == 1
+        written = provider.save_output(plan, default_shard_size="none", max_io_workers=2)
+    finally:
+        provider.close()
+
+    assert written == out_dir
+    assert (out_dir / ".metadata").exists()
+    assert list(out_dir.glob("*.distcp"))
+    loaded: dict[str, torch.Tensor] = {}
+    load_state_dict_from_path(out_dir, loaded, max_io_workers=2)
+    assert set(loaded) == {"x", "x_copy"}
+    assert torch.equal(loaded["x"], expected["x"])
+    assert torch.equal(loaded["x_copy"], expected["x"])
 
 
 @pytest.mark.skipif(np is None, reason="numpy not available")

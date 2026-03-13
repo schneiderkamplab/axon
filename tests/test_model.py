@@ -16,6 +16,8 @@ from brainsurgery.engine.checkpoint_io import (
     load_state_dict_from_directory,
     load_state_dict_from_torch_distributed_checkpoint,
     load_state_dict_from_file,
+    resolve_dcp_output_directory,
+    save_state_dict_to_path,
     resolve_safetensor_shards_from_index,
     save_sharded_safetensors,
 )
@@ -439,6 +441,40 @@ def test_load_dcp_via_conversion_unwraps_wrapped_state_dict(
 
     loaded = checkpoint_io._load_state_dict_from_torch_distributed_checkpoint_via_conversion(checkpoint_dir)
     assert set(loaded) == {"x"}
+
+
+def test_resolve_dcp_output_directory_rejects_file_and_extension(tmp_path: Path) -> None:
+    file_path = tmp_path / "out.pt"
+    file_path.write_text("x", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="directory path"):
+        resolve_dcp_output_directory(file_path)
+    with pytest.raises(RuntimeError, match="directory-style path"):
+        resolve_dcp_output_directory(tmp_path / "out.safetensors")
+
+
+def test_save_state_dict_to_path_dcp_rejects_file_path(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="directory-style path"):
+        save_state_dict_to_path(
+            {"x": torch.ones(1)},
+            tmp_path / "dcp.pt",
+            format="dcp",
+        )
+
+
+def test_save_state_dict_to_torch_distributed_checkpoint_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    original_import = builtins.__import__
+
+    def _raising_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name == "torch.distributed.checkpoint":
+            raise ImportError("missing dcp")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _raising_import)
+    with pytest.raises(RuntimeError, match="requires torch.distributed.checkpoint"):
+        checkpoint_io.save_state_dict_to_torch_distributed_checkpoint({"x": torch.ones(1)}, tmp_path / "dcp_out")
 
 
 def _save_realistic_dcp_checkpoint(path: Path, state_dict: dict[str, torch.Tensor]) -> None:

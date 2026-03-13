@@ -78,6 +78,13 @@ def test_save_compile_additional_validation_paths() -> None:
             {"path": "/tmp/x.safetensors", "target": "model::x", "format": "bad"},
             default_model="model",
         )
+    dcp_spec = SaveTransform().compile({"path": "/tmp/dcp_out", "format": "dcp"}, default_model="model")
+    assert dcp_spec.format == "dcp"
+    with pytest.raises(SaveTransformError, match="only supported for safetensors state_dict save"):
+        SaveTransform().compile(
+            {"path": "/tmp/dcp_out", "format": "dcp", "shard": "1MB"},
+            default_model="model",
+        )
 
 
 def test_save_apply_and_helper_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -30,6 +30,12 @@ def test_resolve_output_destination_infers_directory_and_explicit_torch(tmp_path
     )
     assert explicit == (tmp_path / "model.pt", "torch", None)
 
+    dcp_explicit = resolve_output_destination(
+        OutputSpec(path=tmp_path / "dcp_out", format="dcp"),
+        default_shard_size="none",
+    )
+    assert dcp_explicit == (tmp_path / "dcp_out", "dcp", None)
+
 
 def test_parse_shard_size_and_shard_state_dict_cover_boundaries() -> None:
     assert parse_shard_size("2KB") == 2048
@@ -87,6 +93,21 @@ def test_resolve_output_destination_rejects_torch_directory_path(tmp_path: Path)
         )
 
 
+def test_resolve_output_destination_rejects_dcp_file_style_path(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="directory-style path"):
+        resolve_output_destination(
+            OutputSpec(path=tmp_path / "out.pt", format="dcp"),
+            default_shard_size="none",
+        )
+    existing_file = tmp_path / "out_dcp"
+    existing_file.write_text("x", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="directory path, not a file"):
+        resolve_output_destination(
+            OutputSpec(path=existing_file, format="dcp"),
+            default_shard_size="none",
+        )
+
+
 def test_resolve_sharded_output_directory_rejects_file_style_path(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="directory-style output path"):
         resolve_sharded_output_directory(
@@ -105,7 +126,7 @@ def test_load_tensor_from_path_covers_npz_and_error_branches(tmp_path: Path, mon
     with pytest.raises(RuntimeError, match="exactly one array"):
         load_tensor_from_path(multi_npz)
 
-    monkeypatch.setattr("brainsurgery.engine.tensor_files.np.load", lambda *args, **kwargs: object())
+    monkeypatch.setattr("brainsurgery.io.npy.np.load", lambda *args, **kwargs: object())
     with pytest.raises(RuntimeError, match="unsupported numpy payload"):
         load_tensor_from_path(tmp_path / "x.npy")
 
@@ -125,13 +146,13 @@ def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
 
     torch_numpy = tmp_path / "array.pt"
     torch_numpy.write_bytes(b"placeholder")
-    monkeypatch.setattr("brainsurgery.engine.tensor_files.torch.load", lambda *args, **kwargs: np.array([1, 2], dtype=np.float32))
+    monkeypatch.setattr("brainsurgery.io.torch.torch.load", lambda *args, **kwargs: np.array([1, 2], dtype=np.float32))
     assert torch.equal(load_tensor_from_path(torch_numpy), torch.tensor([1.0, 2.0]))
 
     torch_many = tmp_path / "many.pt"
     torch_many.write_bytes(b"placeholder")
     monkeypatch.setattr(
-        "brainsurgery.engine.tensor_files.torch.load",
+        "brainsurgery.io.torch.torch.load",
         lambda *args, **kwargs: {"state_dict": {"a": torch.ones(1), "b": torch.zeros(1)}},
     )
     with pytest.raises(RuntimeError, match="exactly one tensor"):
@@ -139,7 +160,7 @@ def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
 
     bad = tmp_path / "bad.pt"
     bad.write_bytes(b"placeholder")
-    monkeypatch.setattr("brainsurgery.engine.tensor_files.torch.load", lambda *args, **kwargs: "bad")
+    monkeypatch.setattr("brainsurgery.io.torch.torch.load", lambda *args, **kwargs: "bad")
     with pytest.raises(RuntimeError, match="unsupported tensor payload"):
         load_tensor_from_path(bad)
 
@@ -171,6 +192,11 @@ def test_output_paths_additional_branches(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="only supported for safetensors"):
         resolve_output_destination(
             OutputSpec(path=tmp_path / "out.pt", format="torch", shard="1KB"),
+            default_shard_size="none",
+        )
+    with pytest.raises(RuntimeError, match="only supported for safetensors"):
+        resolve_output_destination(
+            OutputSpec(path=tmp_path / "dcp_out", format="dcp", shard="1KB"),
             default_shard_size="none",
         )
 
