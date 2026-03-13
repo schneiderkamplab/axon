@@ -20,7 +20,9 @@ YAML_EXAMPLES = [
 
 OLY_EXAMPLES = [
     "exit:",
+    "exit: {}",
     "help: assert: all",
+    "help: { assert: all }",
     "copy: from: ln_f.weight, to: ln_f_copy.weight",
     "copy: from: [*prefix, $i, attn, *suffix], to: [*prefix, $i, attention, *suffix]",
     "copy: from: [*prefix, $i, attn, *suffix], to: [*prefix, ${i}, attention, *suffix]",
@@ -98,13 +100,15 @@ def test_parse_oly_exercises_string_and_map_error_paths() -> None:
         parse_oly_line("copy")
     with pytest.raises(ValueError, match="expected value"):
         parse_oly_line("copy: from: , to: b")
+    with pytest.raises(ValueError, match="unexpected token after top-level map"):
+        parse_oly_line("copy: { from: a } junk")
 
 
 def test_oly_scalar_coercion_and_emit_branches() -> None:
     assert parse_oly_line("assert: a: true, b: false, c: null, d: ~, e: 1, f: 1.5") == {
         "assert": {"a": True, "b": False, "c": None, "d": None, "e": 1, "f": 1.5}
     }
-    assert emit_oly_line({"assert": {"a": None, "b": True, "c": False}}) == "assert: a: null, b: true, c: false"
+    assert emit_oly_line({"assert": {"a": None, "b": True, "c": False}}) == "assert: { a: null, b: true, c: false }"
     with pytest.raises(TypeError, match="unsupported OLY value type"):
         emit_oly_line({"copy": {"from": object()}})
     with pytest.raises(ValueError, match="exactly one transform"):
@@ -113,7 +117,7 @@ def test_oly_scalar_coercion_and_emit_branches() -> None:
         emit_oly_line({"1copy": {}})
     with pytest.raises(ValueError, match="payload must be a mapping"):
         emit_oly_line({"copy": []})  # type: ignore[arg-type]
-    assert emit_oly_line({"copy": None}) == "copy:"
+    assert emit_oly_line({"copy": None}) == "copy: {}"
 
 
 def test_parser_private_advance_and_expect_errors() -> None:

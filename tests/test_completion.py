@@ -825,3 +825,48 @@ def test_match_payload_candidates_hits_remaining_reference_and_key_paths(
         payload_candidates=["from: ", "to: "],
         active_transform=None,
     ) == ["from: "]
+
+
+def test_payload_cursor_state_handles_quoted_value_delimiters() -> None:
+    assert complete_module._payload_context('copy: from: "a,b:c"') == "value"
+    assert complete_module._current_value_key('copy: from: "a,b:c"') == "from"
+    assert complete_module._current_value_fragment('copy: from: "a,b:c"') == ' "a,b:c"'
+
+
+def test_match_payload_candidates_does_not_treat_nested_keys_as_used() -> None:
+    matches = _match_payload_candidates(
+        text="",
+        line_buffer="copy: { meta: { from: a }, ",
+        begidx=len("copy: { meta: { from: a }, "),
+        payload_candidates=["from: ", "to: "],
+    )
+    assert matches == ["from: ", "to: "]
+
+
+def test_cursor_helpers_cover_nested_quotes_and_invalid_keys() -> None:
+    segment = "'a:b' \"x\\\"y:z\" (u:v) [k:l] {m:n}: tail"
+    colon_index = complete_module._find_top_level_colon(segment)
+    assert colon_index is not None
+    assert segment[colon_index] == ":"
+    assert complete_module._parse_key_from_segment("from: x") == "from"
+    assert complete_module._parse_key_from_segment("1bad: x") is None
+
+
+def test_split_top_level_segments_handles_quotes_and_closing_brace_boundary() -> None:
+    completed, current = complete_module._split_top_level_segments(
+        '{ from: "x\\\"y,z", note: \'a,b\', paren: (u,v), arr: [k,l] } trailing'
+    )
+    assert any("from:" in segment for segment in completed)
+    assert any("note:" in segment for segment in completed)
+    assert any("paren:" in segment for segment in completed)
+    assert "arr:" in current
+
+
+def test_match_payload_candidates_any_context_falls_back_to_prefix_filter() -> None:
+    matches = _match_payload_candidates(
+        text="ab",
+        line_buffer="nonsense",
+        begidx=0,
+        payload_candidates=["abc", "zzz"],
+    )
+    assert matches == ["abc"]
