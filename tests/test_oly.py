@@ -19,6 +19,7 @@ YAML_EXAMPLES = [
 
 
 OLY_EXAMPLES = [
+    "exit",
     "exit:",
     "exit: {}",
     "help: assert: all",
@@ -96,8 +97,7 @@ def test_parse_oly_exercises_string_and_map_error_paths() -> None:
         parse_oly_line("   ")
     with pytest.raises(ValueError, match="expected ',' between key/value pairs"):
         parse_oly_line("copy: from: a, to: b !")
-    with pytest.raises(ValueError, match="expected ':'"):
-        parse_oly_line("copy")
+    assert parse_oly_line("copy") == {"copy": {}}
     with pytest.raises(ValueError, match="expected value"):
         parse_oly_line("copy: from: , to: b")
     with pytest.raises(ValueError, match="unexpected token after top-level map"):

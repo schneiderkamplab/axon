@@ -24,7 +24,9 @@ def test_dump_insert_tree_rejects_invalid_node_shape() -> None:
 
 def test_dump_compile_defaults() -> None:
     spec = DumpTransform().compile({}, default_model="model")
-    assert spec.target_ref.expr == ".*"
+    assert spec.target_ref is None
+    assert spec.dump_all_models is True
+    assert spec.default_model_hint == "model"
     assert spec.format == "compact"
     assert spec.verbosity == "shape"
 
@@ -40,3 +42,12 @@ def test_dump_apply_to_target_is_not_used() -> None:
         assert "overrides apply()" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected apply_to_target guard assertion")
+
+
+def test_dump_infer_output_model_rejected() -> None:
+    try:
+        DumpTransform().infer_output_model(object())
+    except DumpTransformError as exc:
+        assert "does not infer an output model" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected infer_output_model validation error")

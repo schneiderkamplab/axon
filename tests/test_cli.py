@@ -334,6 +334,10 @@ def test_cli_module_main_guard_executes_app(monkeypatch: pytest.MonkeyPatch) -> 
             del args, kwargs
             return lambda fn: fn
 
+        def callback(self, *args, **kwargs):
+            del args, kwargs
+            return lambda fn: fn
+
         def __call__(self, *args, **kwargs):
             del args, kwargs
             calls.append(True)

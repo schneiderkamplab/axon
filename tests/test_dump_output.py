@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -17,6 +18,23 @@ class _Provider:
     def get_state_dict(self, model: str):
         assert model == "model"
         return self._state_dict
+
+
+class _MultiProvider:
+    def __init__(self, state_dicts: dict[str, InMemoryStateDict]) -> None:
+        self.state_dicts = state_dicts
+        self.model_paths: dict[str, Path] = {}
+
+    def get_state_dict(self, model: str):
+        return self.state_dicts[model]
+
+    def list_model_aliases(self) -> set[str]:
+        return set(self.state_dicts)
+
+
+class _NoAliasProvider:
+    def get_state_dict(self, model: str):  # pragma: no cover - should never be called
+        raise AssertionError(f"unexpected state_dict access for {model!r}")
 
 
 @pytest.fixture
@@ -184,3 +202,76 @@ def test_dump_json_output_respects_verbosity(
         assert leaf0["values"] == [1.0, 2.0]
         assert leaf0["reads"] >= 1
         assert leaf0["writes"] == 1
+
+
+def test_dump_without_target_dumps_all_models_as_root_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = InMemoryStateDict()
+    base["ln_f.weight"] = torch.ones(2)
+    edited = InMemoryStateDict()
+    edited["ln_f.weight"] = torch.zeros(2)
+
+    provider = _MultiProvider({"base": base, "edited": edited})
+    transform = DumpTransform()
+    spec = transform.compile(
+        {"format": "json", "verbosity": "shape"},
+        default_model=None,
+    )
+
+    monkeypatch.setattr(dump_module, "tqdm", lambda iterable, **_: iterable)
+    result = transform.apply(spec, provider)
+    assert result.count == 2
+
+    lines = [line for line in capsys.readouterr().out.strip().splitlines() if line]
+    assert len(lines) == 2
+    payloads = [json.loads(line) for line in lines]
+    merged: dict[str, object] = {}
+    for payload in payloads:
+        assert len(payload) == 1
+        merged.update(payload)
+    assert set(merged.keys()) == {"base", "edited"}
+    assert merged["base"]["ln_f"]["weight"]["shape"] == [2]
+    assert merged["edited"]["ln_f"]["weight"]["shape"] == [2]
+
+
+def test_dump_without_target_and_no_aliases_is_empty_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    transform = DumpTransform()
+    spec = transform.compile(
+        {"format": "json", "verbosity": "shape"},
+        default_model=None,
+    )
+    monkeypatch.setattr(dump_module, "tqdm", lambda iterable, **_: iterable)
+    result = transform.apply(spec, _NoAliasProvider())
+    assert result.count == 0
+    assert json.loads(capsys.readouterr().out.strip()) == {}
+
+
+def test_dump_without_target_text_does_not_connect_model_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = InMemoryStateDict()
+    base["w"] = torch.ones(1)
+    edited = InMemoryStateDict()
+    edited["w"] = torch.zeros(1)
+    provider = _MultiProvider({"model": base, "orig": edited})
+
+    transform = DumpTransform()
+    spec = transform.compile(
+        {"format": "compact", "verbosity": "shape"},
+        default_model=None,
+    )
+    monkeypatch.setattr(dump_module, "tqdm", lambda iterable, **_: iterable)
+    result = transform.apply(spec, provider)
+    assert result.count == 2
+
+    output = capsys.readouterr().out.strip()
+    assert "└── model" in output
+    assert "└── orig" in output
+    assert "├── orig" not in output
+    assert "\n\n└── orig" in output
