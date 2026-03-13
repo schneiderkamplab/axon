@@ -843,6 +843,46 @@ def test_match_payload_candidates_does_not_treat_nested_keys_as_used() -> None:
     assert matches == ["from: ", "to: "]
 
 
+def test_load_path_completion_suggests_matching_filesystem_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "models").mkdir()
+    (tmp_path / "model.safetensors").write_text("", encoding="utf-8")
+    (tmp_path / "meta.txt").write_text("", encoding="utf-8")
+
+    matches = _match_payload_candidates(
+        text="mo",
+        line_buffer="load: { path: mo",
+        begidx=len("load: { path: "),
+        payload_candidates=[],
+        active_transform="load",
+    )
+    assert "model.safetensors" in matches
+    assert "models/" in matches
+    assert "meta.txt" not in matches
+
+
+def test_save_path_completion_supports_quoted_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "out_dir").mkdir()
+    (tmp_path / "out.pt").write_text("", encoding="utf-8")
+
+    matches = _match_payload_candidates(
+        text='"o',
+        line_buffer='save: { path: "o',
+        begidx=len("save: { path: "),
+        payload_candidates=[],
+        active_transform="save",
+    )
+    assert '"out_dir/' in matches
+    assert '"out.pt' in matches
+
+
 def test_cursor_helpers_cover_nested_quotes_and_invalid_keys() -> None:
     segment = "'a:b' \"x\\\"y:z\" (u:v) [k:l] {m:n}: tail"
     colon_index = complete_module._find_top_level_colon(segment)
