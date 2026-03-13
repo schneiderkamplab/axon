@@ -788,3 +788,21 @@ def test_prompt_interactive_transform_ignores_leading_blank_lines(monkeypatch: p
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert prompt_interactive_transform() == [{"exit": {}}]
+
+
+def test_prompt_interactive_transform_executes_single_line_oly_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(["exit:"])
+    history_entries: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        del prompt
+        return next(responses)
+
+    monkeypatch.setattr("brainsurgery.cli.interactive._interactive_completion", _no_completion)
+    monkeypatch.setattr("brainsurgery.cli.interactive._add_history_entry", history_entries.append)
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert prompt_interactive_transform() == [{"exit": {}}]
+    assert history_entries == ["exit:"]
