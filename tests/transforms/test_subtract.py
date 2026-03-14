@@ -3,17 +3,17 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import TensorRef
-from brainsurgery.engine import InMemoryStateDict
+
 from brainsurgery.core import TernaryMappingSpec
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 _module = import_module("brainsurgery.transforms.subtract")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
-
 
 def test_subtract_apply_success() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = InMemoryStateDict()
+            self._state_dict = _InMemoryStateDict()
             self._state_dict["a"] = torch.tensor([5.0, 7.0])
             self._state_dict["b"] = torch.tensor([1.0, 2.0])
             self._state_dict["dst"] = torch.tensor([0.0, 0.0])
@@ -42,11 +42,10 @@ def test_subtract_apply_success() -> None:
     SubtractTransform().apply_item(spec, item, provider)
     assert provider._state_dict["dst"].tolist() == [4.0, 5.0]
 
-
 def test_subtract_shape_mismatch() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = InMemoryStateDict()
+            self._state_dict = _InMemoryStateDict()
             self._state_dict["a"] = torch.tensor([1.0, 2.0])
             self._state_dict["b"] = torch.tensor([1.0])
             self._state_dict["dst"] = torch.tensor([0.0, 0.0])
@@ -77,7 +76,6 @@ def test_subtract_shape_mismatch() -> None:
         assert "shape mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch")
-
 
 def test_subtract_compile_slices_allowed() -> None:
     spec = SubtractTransform().compile(

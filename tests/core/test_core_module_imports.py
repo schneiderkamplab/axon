@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 
-
 def test_core_modules_import_core_symbols_from_concrete_modules() -> None:
     core_dir = Path("brainsurgery/core")
     offenders: list[str] = []

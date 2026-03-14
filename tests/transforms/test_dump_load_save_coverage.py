@@ -5,8 +5,10 @@ from pathlib import Path
 import pytest
 import torch
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.engine.providers import InMemoryStateDictProvider
 from brainsurgery.core import TensorRef
-from brainsurgery.engine import InMemoryStateDict, InMemoryStateDictProvider, reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 from brainsurgery.transforms.dump import (
     DumpTransform,
     DumpTransformError,
@@ -16,7 +18,6 @@ from brainsurgery.transforms.dump import (
 )
 from brainsurgery.transforms.load import LoadSpec, LoadTransform
 from brainsurgery.transforms.save import SaveSpec, SaveTransform, SaveTransformError
-
 
 def test_dump_apply_all_formats_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_runtime_flags()
@@ -56,7 +57,6 @@ def test_dump_apply_all_formats_and_helpers(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(DumpTransformError, match="dump.verbosity must be a non-empty string"):
         DumpTransform().build_spec(None, {"format": "tree", "verbosity": 1})  # type: ignore[arg-type]
 
-
 def test_insert_into_tree_numeric_paths_and_error_branches() -> None:
     root: dict[str, object] = {}
     insert_into_tree(root, ["h", "0", "weight"], {"shape": [1]})
@@ -67,7 +67,6 @@ def test_insert_into_tree_numeric_paths_and_error_branches() -> None:
     with pytest.raises(DumpTransformError, match="invalid tree structure"):
         insert_into_tree({"h": [1]}, ["h", "0", "x"], 1)
 
-
 def test_load_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     tr = LoadTransform()
     assert tr.completion_reference_keys() == ["to"]
@@ -77,14 +76,14 @@ def test_load_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyP
 
     provider = InMemoryStateDictProvider({}, max_io_workers=1)
     called = {"alias": False}
-    sd = InMemoryStateDict()
+    sd = _InMemoryStateDict()
     sd["x"] = torch.ones(1)
     monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: (called.__setitem__("alias", True), sd)[1])
     state_spec = LoadSpec(path=Path("/tmp/m.safetensors"), alias="model", tensor_name=None, format="auto")
     result = tr.apply(state_spec, provider)
     assert called["alias"] is True
     assert result.count == 1
-    assert tr.infer_output_model(state_spec) == "model"
+    assert tr._infer_output_model(state_spec) == "model"
 
     reset_runtime_flags()
     set_runtime_flag("dry_run", True)
@@ -93,7 +92,6 @@ def test_load_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyP
     result = tr.apply(tensor_spec, provider)
     assert result.count == 1
     reset_runtime_flags()
-
 
 def test_save_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     tr = SaveTransform()
@@ -128,4 +126,4 @@ def test_save_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyP
     assert saved == [Path("/tmp/out.npy")]
 
     with pytest.raises(SaveTransformError, match="cannot infer output model"):
-        tr.infer_output_model(SaveSpec(path=Path("/tmp/o"), alias=None, tensor_name=None, format=None, shard_size=None))
+        tr._infer_output_model(SaveSpec(path=Path("/tmp/o"), alias=None, tensor_name=None, format=None, shard_size=None))

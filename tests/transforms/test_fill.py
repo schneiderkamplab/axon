@@ -3,7 +3,6 @@ from importlib import import_module
 _module = import_module("brainsurgery.transforms.fill")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_fill_compile_requires_mode_specific_payload() -> None:
     try:
         FillTransform().compile(
@@ -15,7 +14,6 @@ def test_fill_compile_requires_mode_specific_payload() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected fill.value validation error")
 
-
 def test_fill_tensor_mode_broadcasts_values() -> None:
     template = torch.zeros((2, 2), dtype=torch.float32)
     config = parse_fill_config(
@@ -25,7 +23,6 @@ def test_fill_tensor_mode_broadcasts_values() -> None:
     )
     out = build_filled_tensor_like(template, config, TransformError)
     assert out.tolist() == [[1.0, 2.0], [1.0, 2.0]]
-
 
 def test_fill_rand_mode_is_seeded() -> None:
     template = torch.zeros((3,), dtype=torch.float32)

@@ -13,25 +13,25 @@ import brainsurgery.engine.provider_utils as provider_utils_module
 import brainsurgery.engine.providers as providers_module
 import brainsurgery.engine.arena as arena_module
 from brainsurgery.core import CompiledTransform, TransformError
-from brainsurgery.engine import InMemoryStateDict, InMemoryStateDictProvider
-from brainsurgery.engine.arena import ArenaSegment, ProviderError, SegmentedFileBackedArena, torch_element_size
-from brainsurgery.engine.output_model import infer_output_model
-from brainsurgery.engine.plan import OutputSpec, SurgeryPlan, parse_output
+
+from brainsurgery.engine.arena import ArenaSegment, ProviderError, _SegmentedFileBackedArena, torch_element_size
+from brainsurgery.engine.output_model import _infer_output_model
+from brainsurgery.engine.plan import _OutputSpec, _SurgeryPlan, parse_output
 from brainsurgery.engine.render import _shape_only, render_tree, summarize_tensor
-from brainsurgery.engine.state_dicts import ArenaStateDict
+from brainsurgery.engine.state_dicts import _ArenaStateDict
 
-
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.engine.providers import InMemoryStateDictProvider
 class _OutputModelProvider:
     def __init__(self) -> None:
         self.state_dicts = {
-            "model": InMemoryStateDict(),
-            "other": InMemoryStateDict(),
+            "model": _InMemoryStateDict(),
+            "other": _InMemoryStateDict(),
         }
         self.state_dicts["model"]["w"] = torch.ones(1)
 
-    def get_state_dict(self, model: str) -> InMemoryStateDict:
+    def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
-
 
 @dataclass(frozen=True)
 class _Spec:
@@ -40,7 +40,6 @@ class _Spec:
     def collect_models(self) -> set[str]:
         return {self.model}
 
-
 class _Transform:
     name = "x"
 
@@ -48,20 +47,18 @@ class _Transform:
         del spec
         return True
 
-    def infer_output_model(self, spec: object) -> str:
+    def _infer_output_model(self, spec: object) -> str:
         assert isinstance(spec, _Spec)
         return spec.model
 
-
 class _FallbackTransform(_Transform):
-    def infer_output_model(self, spec: object) -> str:
+    def _infer_output_model(self, spec: object) -> str:
         del spec
         raise TransformError("fallback needed")
 
-
 def test_engine_output_model_uncovered_paths() -> None:
     provider = _OutputModelProvider()
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[
@@ -69,14 +66,14 @@ def test_engine_output_model_uncovered_paths() -> None:
             CompiledTransform(_Transform(), _Spec("other")),
         ],
     )
-    assert infer_output_model(plan, provider) == "model"
+    assert _infer_output_model(plan, provider) == "model"
 
     class _BadSpec:
         collect_models = 1
 
     with pytest.raises(TransformError, match="fallback needed"):
-        infer_output_model(
-            SurgeryPlan(inputs={}, output=None, transforms=[CompiledTransform(_FallbackTransform(), _BadSpec())]),
+        _infer_output_model(
+            _SurgeryPlan(inputs={}, output=None, transforms=[CompiledTransform(_FallbackTransform(), _BadSpec())]),
             provider,
         )
 
@@ -87,8 +84,8 @@ def test_engine_output_model_uncovered_paths() -> None:
 
     provider.state_dicts["other"]["w"] = torch.ones(1)
     with pytest.raises(TransformError, match="fallback needed"):
-        infer_output_model(
-            SurgeryPlan(
+        _infer_output_model(
+            _SurgeryPlan(
                 inputs={},
                 output=None,
                 transforms=[CompiledTransform(_FallbackTransform(), _TwoModelsSpec())],
@@ -103,9 +100,8 @@ def test_engine_output_model_uncovered_paths() -> None:
 
     assert output_model_module._has_any_tensor(_BrokenProvider(), "x") is False
 
-
 def test_engine_state_dict_uncovered_paths(tmp_path: Path) -> None:
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["w"] = torch.ones(2)
     assert list(iter(state_dict)) == ["w"]
     assert list(state_dict.values())[0].shape == (2,)
@@ -120,16 +116,15 @@ def test_engine_state_dict_uncovered_paths(tmp_path: Path) -> None:
     with pytest.raises(ProviderError, match="not a tensor"):
         state_dict.bind_slot("w", object())  # type: ignore[arg-type]
 
-    arena = SegmentedFileBackedArena(tmp_path, segment_size_bytes=128, alignment=8)
-    arena_sd = ArenaStateDict(arena)
+    arena = _SegmentedFileBackedArena(tmp_path, segment_size_bytes=128, alignment=8)
+    arena_sd = _ArenaStateDict(arena)
     with pytest.raises(ProviderError, match="not a tensor"):
         arena_sd["bad"] = object()  # type: ignore[assignment]
-    with pytest.raises(ProviderError, match="not a TensorSlot"):
+    with pytest.raises(ProviderError, match="not a _TensorSlot"):
         arena_sd.bind_slot("bad", object())  # type: ignore[arg-type]
     with pytest.raises(KeyError, match="missing"):
         arena_sd.slot("missing")
     arena.close()
-
 
 def test_engine_render_uncovered_paths() -> None:
     empty = summarize_tensor(
@@ -150,7 +145,6 @@ def test_engine_render_uncovered_paths() -> None:
     assert "leaf  3" in render_tree({"leaf": 3}, compact=True)
     assert render_tree({"items": [None, None]}, compact=True).splitlines() == ["└── items"]
 
-
 def test_engine_arena_uncovered_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ProviderError, match="positive"):
         ArenaSegment(tmp_path / "bad.bin", 0)
@@ -159,11 +153,11 @@ def test_engine_arena_uncovered_paths(tmp_path: Path, monkeypatch: pytest.Monkey
     segment.close()
 
     with pytest.raises(ProviderError, match="segment_size_bytes must be positive"):
-        SegmentedFileBackedArena(tmp_path, segment_size_bytes=0, alignment=8)
+        _SegmentedFileBackedArena(tmp_path, segment_size_bytes=0, alignment=8)
     with pytest.raises(ProviderError, match="alignment must be positive"):
-        SegmentedFileBackedArena(tmp_path, segment_size_bytes=64, alignment=0)
+        _SegmentedFileBackedArena(tmp_path, segment_size_bytes=64, alignment=0)
 
-    with SegmentedFileBackedArena(tmp_path, segment_size_bytes=64, alignment=8) as arena:
+    with _SegmentedFileBackedArena(tmp_path, segment_size_bytes=64, alignment=8) as arena:
         arena.flush()
         with pytest.raises(ProviderError, match="negative bytes"):
             arena.allocate(-1)
@@ -197,7 +191,6 @@ def test_engine_arena_uncovered_paths(tmp_path: Path, monkeypatch: pytest.Monkey
     with pytest.raises(ProviderError, match="unsupported dtype"):
         torch_element_size(torch.complex64)
 
-
 def test_engine_provider_utils_and_providers_uncovered_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -217,17 +210,17 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
 
     base_provider = InMemoryStateDictProvider({}, max_io_workers=1)
     assert provider_utils_module._has_model_alias(base_provider, "x") is False
-    assert provider_utils_module._list_loaded_tensor_names(base_provider) == {}
+    assert provider_utils_module.list_loaded_tensor_names(base_provider) == {}
 
     class _ProviderWithBadStateDicts:
         state_dicts = []
 
-    assert provider_utils_module._list_loaded_tensor_names(_ProviderWithBadStateDicts()) == {}
+    assert provider_utils_module.list_loaded_tensor_names(_ProviderWithBadStateDicts()) == {}
 
     class _ProviderWithNonCallableKeys:
         state_dicts = {"a": object()}
 
-    assert provider_utils_module._list_loaded_tensor_names(_ProviderWithNonCallableKeys()) == {}
+    assert provider_utils_module.list_loaded_tensor_names(_ProviderWithNonCallableKeys()) == {}
 
     base = providers_module.BaseStateDictProvider({}, max_io_workers=1)
     with pytest.raises(NotImplementedError):
@@ -235,27 +228,27 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
     with pytest.raises(NotImplementedError):
         base.create_state_dict()
 
-    base.state_dicts["x"] = InMemoryStateDict()
+    base.state_dicts["x"] = _InMemoryStateDict()
     with pytest.raises(ProviderError, match="already exists"):
         base.load_alias_from_path("x", tmp_path / "m.safetensors")
 
     with pytest.raises(ProviderError, match="save_output requires plan.output"):
-        base.save_output(SurgeryPlan(inputs={}, output=None, transforms=[]), default_shard_size="1MB", max_io_workers=1)
+        base.save_output(_SurgeryPlan(inputs={}, output=None, transforms=[]), default_shard_size="1MB", max_io_workers=1)
 
     class _P(providers_module.BaseStateDictProvider):
         def get_state_dict(self, model: str):
             return self.state_dicts[model]
 
         def create_state_dict(self):
-            return InMemoryStateDict()
+            return _InMemoryStateDict()
 
     p = _P({}, max_io_workers=1)
-    p.state_dicts["model"] = InMemoryStateDict()
+    p.state_dicts["model"] = _InMemoryStateDict()
     p.state_dicts["model"]["w"] = torch.ones(1)
-    monkeypatch.setattr(providers_module, "infer_output_model", lambda plan, provider: "model")
+    monkeypatch.setattr(providers_module, "_infer_output_model", lambda plan, provider: "model")
     monkeypatch.setattr(
         providers_module,
-        "resolve_output_destination",
+        "_resolve_output_destination",
         lambda output, default_shard_size: (output.path, "safetensors", 1),
     )
     monkeypatch.setattr(
@@ -264,7 +257,7 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
         lambda state_dict, **kwargs: kwargs["output_path"],
     )
     written = p.save_output(
-        SurgeryPlan(inputs={}, output=OutputSpec(path=tmp_path / "out"), transforms=[]),
+        _SurgeryPlan(inputs={}, output=_OutputSpec(path=tmp_path / "out"), transforms=[]),
         default_shard_size="1MB",
         max_io_workers=1,
     )
@@ -280,7 +273,6 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
             arena_segment_size="none",
         )
 
-
 def test_engine_output_paths_plan_and_checkpoint_edges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -293,11 +285,11 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
     assert file_path == tmp_path / "m.safetensors"
     assert file_fmt == "safetensors"
 
-    out = OutputSpec(path=tmp_path / "folder", format="safetensors")
+    out = _OutputSpec(path=tmp_path / "folder", format="safetensors")
     (tmp_path / "folder").mkdir()
     assert output_paths_module._is_directory_style_output(out) is True
-    assert output_paths_module.resolve_output_destination(
-        OutputSpec(path=tmp_path / "newdir"),
+    assert output_paths_module._resolve_output_destination(
+        _OutputSpec(path=tmp_path / "newdir"),
         default_shard_size="1MB",
     )[:2] == (tmp_path / "newdir" / "model.safetensors", "safetensors")
 
@@ -308,7 +300,7 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
         "safetensors",
     )
 
-    assert parse_output({"path": str(tmp_path / "x.safetensors")}) == OutputSpec(path=tmp_path / "x.safetensors")
+    assert parse_output({"path": str(tmp_path / "x.safetensors")}) == _OutputSpec(path=tmp_path / "x.safetensors")
 
     with pytest.raises(RuntimeError, match="max_shard_size must be positive"):
         checkpoint_io_module.shard_state_dict({"a": torch.ones(1)}, 0)
@@ -329,9 +321,9 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
         )
 
     with pytest.raises(RuntimeError, match="does not exist"):
-        checkpoint_io_module.load_state_dict_from_path(
+        checkpoint_io_module._load_state_dict_from_path(
             tmp_path / "missing",
-            InMemoryStateDict(),
+            _InMemoryStateDict(),
             max_io_workers=1,
         )
 
@@ -345,7 +337,7 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
     monkeypatch.setattr(checkpoint_io_module, "load_state_dict_from_directory", _fake_dir_loader)
     root_dir = tmp_path / "root_dir"
     root_dir.mkdir()
-    checkpoint_io_module.load_state_dict_from_path(root_dir, InMemoryStateDict(), max_io_workers=1)
+    checkpoint_io_module._load_state_dict_from_path(root_dir, _InMemoryStateDict(), max_io_workers=1)
     assert called["dir"] is True
     monkeypatch.setattr(checkpoint_io_module, "load_state_dict_from_directory", real_dir_loader)
 
@@ -354,7 +346,7 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
     with pytest.raises(RuntimeError, match="no supported checkpoint files"):
         checkpoint_io_module.load_state_dict_from_directory(
             empty_dir,
-            InMemoryStateDict(),
+            _InMemoryStateDict(),
             max_io_workers=1,
         )
 
@@ -365,19 +357,19 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
 
     wrapped_path = tmp_path / "wrapped.pt"
     torch.save({"state_dict": {"w": torch.ones(1)}}, wrapped_path)
-    global_sd = InMemoryStateDict()
+    global_sd = _InMemoryStateDict()
     loaded_count = checkpoint_io_module.load_state_dict_from_file(wrapped_path, global_sd)
     assert loaded_count == 1
 
     mismatch_dir = tmp_path / "mismatch_ckpt"
     mismatch_dir.mkdir()
     torch.save({"w": torch.ones(1)}, mismatch_dir / "one.pt")
-    monkeypatch.setattr(checkpoint_io_module, "choose_num_io_workers", lambda n, max_io_workers: 1)
-    monkeypatch.setattr(checkpoint_io_module, "run_threadpool_tasks_with_progress", lambda **kwargs: None)
+    monkeypatch.setattr(checkpoint_io_module, "_choose_num_io_workers", lambda n, max_io_workers: 1)
+    monkeypatch.setattr(checkpoint_io_module, "_run_threadpool_tasks_with_progress", lambda **kwargs: None)
     with pytest.raises(RuntimeError, match="progress count mismatch"):
         checkpoint_io_module.load_state_dict_from_directory(
             mismatch_dir,
-            InMemoryStateDict(),
+            _InMemoryStateDict(),
             max_io_workers=1,
         )
 
@@ -387,10 +379,10 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
         for file_path in files:
             on_result(file_path, 1)
 
-    monkeypatch.setattr(checkpoint_io_module, "run_threadpool_tasks_with_progress", _fake_progress)
+    monkeypatch.setattr(checkpoint_io_module, "_run_threadpool_tasks_with_progress", _fake_progress)
     with pytest.raises(RuntimeError, match="merged tensor count mismatch"):
         checkpoint_io_module.load_state_dict_from_directory(
             mismatch_dir,
-            InMemoryStateDict(),
+            _InMemoryStateDict(),
             max_io_workers=1,
         )

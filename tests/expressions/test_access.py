@@ -4,12 +4,12 @@ import pytest
 import torch
 
 from brainsurgery.core import TransformError
-from brainsurgery.engine import InMemoryStateDict
+
 from brainsurgery.core import TensorRef
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 _module = import_module("brainsurgery.expressions.access")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
-
 
 def test_reads_compile_requires_comparison() -> None:
     try:
@@ -19,7 +19,6 @@ def test_reads_compile_requires_comparison() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected reads comparison validation error")
 
-
 def test_writes_compile_rejects_contradictory_bounds() -> None:
     try:
         compile_writes_expr({"of": "x", "gt": 2, "lt": 2}, default_model="model")
@@ -27,7 +26,6 @@ def test_writes_compile_rejects_contradictory_bounds() -> None:
         assert "contradictory bounds" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected writes bounds validation error")
-
 
 def test_reads_compile_accepts_generalized_comparators_and_aliases() -> None:
     expr = compile_reads_expr(
@@ -38,9 +36,8 @@ def test_reads_compile_accepts_generalized_comparators_and_aliases() -> None:
     assert expr.comparison.lt == 3
     assert expr.comparison.le == 2
 
-
 def test_reads_evaluate_supports_ge() -> None:
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones(1)
     state_dict["b"] = torch.ones(1)
     _ = state_dict["a"]
@@ -58,9 +55,8 @@ def test_reads_evaluate_supports_ge() -> None:
     )
     expr.evaluate(_Provider())
 
-
 def test_writes_evaluate_supports_lt() -> None:
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones(1)
 
     class _Provider:
@@ -75,9 +71,8 @@ def test_writes_evaluate_supports_lt() -> None:
     )
     expr.evaluate(_Provider())
 
-
 def test_writes_evaluate_reports_mismatch() -> None:
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones(1)
 
     class _Provider:
@@ -98,7 +93,6 @@ def test_writes_evaluate_reports_mismatch() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected writes mismatch")
 
-
 def test_reads_evaluate_rejects_uninstrumented_state_dict() -> None:
     class _Provider:
         def get_state_dict(self, model: str):
@@ -117,9 +111,8 @@ def test_reads_evaluate_rejects_uninstrumented_state_dict() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected unsupported backend error")
 
-
 def test_reads_evaluate_reports_zero_matches(monkeypatch: pytest.MonkeyPatch) -> None:
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones(1)
 
     class _Provider:
@@ -135,7 +128,6 @@ def test_reads_evaluate_reports_zero_matches(monkeypatch: pytest.MonkeyPatch) ->
     )
     with pytest.raises(TransformError, match="matched zero tensors"):
         expr.evaluate(_Provider())
-
 
 def test_tensor_access_collect_models() -> None:
     expr = TensorAccessExpr(

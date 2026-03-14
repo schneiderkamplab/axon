@@ -3,17 +3,17 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import TensorRef
-from brainsurgery.engine import InMemoryStateDict
+
 from brainsurgery.core import BinaryMappingSpec
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 _module = import_module("brainsurgery.transforms.subtract")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
-
 
 def test_subtract_in_place_apply_success() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = InMemoryStateDict()
+            self._state_dict = _InMemoryStateDict()
             self._state_dict["src"] = torch.tensor([1.0, 2.0], dtype=torch.float32)
             self._state_dict["dst"] = torch.tensor([5.0, 7.0], dtype=torch.float32)
 
@@ -37,11 +37,10 @@ def test_subtract_in_place_apply_success() -> None:
     SubtractInPlaceTransform().apply_item(spec, item, provider)
     assert provider._state_dict["dst"].tolist() == [4.0, 5.0]
 
-
 def test_subtract_in_place_dtype_mismatch() -> None:
     class _Provider:
         def __init__(self) -> None:
-            self._state_dict = InMemoryStateDict()
+            self._state_dict = _InMemoryStateDict()
             self._state_dict["src"] = torch.tensor([1.0, 2.0], dtype=torch.float16)
             self._state_dict["dst"] = torch.tensor([5.0, 7.0], dtype=torch.float32)
 
@@ -67,7 +66,6 @@ def test_subtract_in_place_dtype_mismatch() -> None:
         assert "dtype mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dtype mismatch")
-
 
 def test_subtract_in_place_compile_accepts_slices() -> None:
     spec = SubtractInPlaceTransform().compile(

@@ -3,7 +3,6 @@ from importlib import import_module
 _module = import_module("brainsurgery.expressions.shape")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_shape_compile_rejects_non_integer_shape() -> None:
     try:
         compile_shape_expr({"of": "x", "is": [1, "2"]}, default_model="model")
@@ -12,7 +11,6 @@ def test_shape_compile_rejects_non_integer_shape() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected shape integer validation error")
 
-
 def test_shape_evaluate_success() -> None:
     class _Provider:
         def get_state_dict(self, model: str):
@@ -20,7 +18,6 @@ def test_shape_evaluate_success() -> None:
             return {"x": torch.ones((2, 3))}
 
     ShapeExpr(ref=TensorRef(model="model", expr="x"), is_value=(2, 3)).evaluate(_Provider())
-
 
 def test_shape_evaluate_mismatch() -> None:
     class _Provider:
@@ -34,7 +31,6 @@ def test_shape_evaluate_mismatch() -> None:
         assert "has shape (2, 3), expected (3, 2)" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch")
-
 
 def test_shape_evaluate_pattern_checks_all_matches() -> None:
     class _Provider:

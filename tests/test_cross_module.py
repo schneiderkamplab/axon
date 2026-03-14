@@ -8,25 +8,23 @@ from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-from brainsurgery.engine import InMemoryStateDict, create_state_dict_provider, reset_runtime_flags
+from brainsurgery.engine import create_state_dict_provider, reset_runtime_flags
 from brainsurgery.core import TransformError
 import brainsurgery.transforms.dump as dump_module
 
-
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 class _Provider:
-    def __init__(self, state_dicts: dict[str, InMemoryStateDict]) -> None:
+    def __init__(self, state_dicts: dict[str, _InMemoryStateDict]) -> None:
         self._state_dicts = state_dicts
 
-    def get_state_dict(self, model: str) -> InMemoryStateDict:
+    def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self._state_dicts[model]
 
-
-def _make_state_dict(values: dict[str, torch.Tensor]) -> InMemoryStateDict:
-    sd = InMemoryStateDict()
+def _make_state_dict(values: dict[str, torch.Tensor]) -> _InMemoryStateDict:
+    sd = _InMemoryStateDict()
     for key, tensor in values.items():
         sd[key] = tensor
     return sd
-
 
 def test_cross_compile_execute_copy_then_assert_equal() -> None:
     raw = {
@@ -58,7 +56,6 @@ def test_cross_compile_execute_copy_then_assert_equal() -> None:
     assert len(executed) == 2
     model_sd = provider.get_state_dict("model")
     assert torch.equal(model_sd["src"], model_sd["dst"])
-
 
 def test_cross_execute_interactive_stops_current_block_on_failure() -> None:
     raw = {
@@ -93,7 +90,6 @@ def test_cross_execute_interactive_stops_current_block_on_failure() -> None:
     assert "tmp" in model_sd
     assert "after_fail" not in model_sd
 
-
 def test_cross_execute_non_interactive_raises_on_failure() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -119,7 +115,6 @@ def test_cross_execute_non_interactive_raises_on_failure() -> None:
             provider,
             interactive=False,
         )
-
 
 def test_cross_structured_mapping_with_copy_transform() -> None:
     raw = {
@@ -156,7 +151,6 @@ def test_cross_structured_mapping_with_copy_transform() -> None:
     model_sd = provider.get_state_dict("model")
     assert torch.equal(model_sd["backup.0.weight"], model_sd["block.0.weight"])
     assert torch.equal(model_sd["backup.1.weight"], model_sd["block.1.weight"])
-
 
 def test_cross_assert_transform_covers_all_expression_ops() -> None:
     raw = {
@@ -198,7 +192,6 @@ def test_cross_assert_transform_covers_all_expression_ops() -> None:
     assert should_continue is True
     assert len(executed) == len(raw["transforms"])
 
-
 def test_cross_assert_equal_with_eps() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -226,7 +219,6 @@ def test_cross_assert_equal_with_eps() -> None:
 
     assert should_continue is True
     assert len(executed) == 1
-
 
 def test_cross_help_dump_exit_in_single_flow(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     raw = {
@@ -263,7 +255,6 @@ def test_cross_help_dump_exit_in_single_flow(monkeypatch: pytest.MonkeyPatch, ca
     assert executed == raw["transforms"][:3]
     assert "x_copy_should_not_exist" not in provider.get_state_dict("model")
 
-
 def test_cross_prefixes_lists_available_aliases(capsys: pytest.CaptureFixture[str]) -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -291,7 +282,6 @@ def test_cross_prefixes_lists_available_aliases(capsys: pytest.CaptureFixture[st
     assert "  scratch::" in output
     assert should_continue is True
     assert executed == raw["transforms"]
-
 
 def test_cross_set_verbose_then_copy_emits_activity(capsys: pytest.CaptureFixture[str]) -> None:
     raw = {
@@ -326,7 +316,6 @@ def test_cross_set_verbose_then_copy_emits_activity(capsys: pytest.CaptureFixtur
     assert executed == raw["transforms"]
     assert "copy: h.0.attn.bias -> i.0.attn.bias" in output
 
-
 def test_cross_prefixes_add_creates_empty_alias() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -352,7 +341,6 @@ def test_cross_prefixes_add_creates_empty_alias() -> None:
     assert set(provider._state_dicts.keys()) == {"model", "scratch"}
     assert len(provider._state_dicts["scratch"]) == 0
     assert provider._state_dicts["scratch"] is not provider._state_dicts["model"]
-
 
 def test_cross_prefixes_rename_remove_mutate_aliases() -> None:
     raw = {
@@ -380,7 +368,6 @@ def test_cross_prefixes_rename_remove_mutate_aliases() -> None:
     assert executed == raw["transforms"]
     assert set(provider._state_dicts.keys()) == {"model"}
 
-
 def _write_checkpoint(path: Path) -> None:
     save_safetensors_file(
         {
@@ -390,7 +377,6 @@ def _write_checkpoint(path: Path) -> None:
         },
         str(path),
     )
-
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_cross_provider_backends_load_execute_and_save(provider_name: str, tmp_path: Path) -> None:
@@ -438,7 +424,6 @@ def test_cross_provider_backends_load_execute_and_save(provider_name: str, tmp_p
     assert written == out_path
     assert out_path.exists()
 
-
 def test_cross_scale_creates_new_tensor() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -470,7 +455,6 @@ def test_cross_scale_creates_new_tensor() -> None:
     model_sd = provider.get_state_dict("model")
     assert torch.equal(model_sd["scaled"], torch.tensor([2.0, 4.0], dtype=torch.float32))
     assert torch.equal(model_sd["src"], torch.tensor([1.0, 2.0], dtype=torch.float32))
-
 
 def test_cross_cast_creates_new_tensor() -> None:
     raw = {
@@ -504,7 +488,6 @@ def test_cross_cast_creates_new_tensor() -> None:
     assert model_sd["src"].dtype == torch.float32
     assert model_sd["src_fp16"].dtype == torch.float16
 
-
 def test_cross_cast__casts_in_place() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -534,7 +517,6 @@ def test_cross_cast__casts_in_place() -> None:
     assert len(executed) == len(raw["transforms"])
     model_sd = provider.get_state_dict("model")
     assert model_sd["src"].dtype == torch.float16
-
 
 def test_cross_add_subtract_multiply_pipeline() -> None:
     raw = {
@@ -575,7 +557,6 @@ def test_cross_add_subtract_multiply_pipeline() -> None:
     assert torch.equal(model_sd["sum"], torch.tensor([6.0, 8.0], dtype=torch.float32))
     assert torch.equal(model_sd["back_x"], model_sd["x"])
     assert torch.equal(model_sd["prod"], model_sd["expected_prod"])
-
 
 def test_cross_structured_mapping_with_add_transform() -> None:
     raw = {
@@ -624,7 +605,6 @@ def test_cross_structured_mapping_with_add_transform() -> None:
         torch.tensor([33.0, 44.0], dtype=torch.float32),
     )
 
-
 def test_cross_add_requires_existing_destination() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -650,7 +630,6 @@ def test_cross_add_requires_existing_destination() -> None:
             provider,
             interactive=False,
         )
-
 
 def test_cross_add__subtract__in_place_pipeline() -> None:
     raw = {
@@ -684,7 +663,6 @@ def test_cross_add__subtract__in_place_pipeline() -> None:
     assert len(executed) == len(raw["transforms"])
     model_sd = provider.get_state_dict("model")
     assert torch.equal(model_sd["base"], torch.tensor([2.0, 3.0], dtype=torch.float32))
-
 
 def test_cross_dry_run_executes_flow_without_persisting_changes_and_prefixes_verbose(
     capsys: pytest.CaptureFixture[str],

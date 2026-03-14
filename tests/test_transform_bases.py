@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from brainsurgery.engine import InMemoryStateDict
 from brainsurgery.core import TensorRef
 from brainsurgery.core import TernaryMappingSpec, TernaryMappingTransform
 from brainsurgery.core import TransformError
@@ -13,13 +12,13 @@ from brainsurgery.core import BinaryMappingSpec, BinaryMappingTransform
 from brainsurgery.core import DestinationPolicy
 from brainsurgery.core import UnarySpec, UnaryTransform
 
-
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 class _Provider:
     def __init__(self) -> None:
         self.state_dicts = {
-            "src": InMemoryStateDict(),
-            "other": InMemoryStateDict(),
-            "dst": InMemoryStateDict(),
+            "src": _InMemoryStateDict(),
+            "other": _InMemoryStateDict(),
+            "dst": _InMemoryStateDict(),
         }
         self.state_dicts["src"]["layer.0.weight"] = torch.ones(2, 2)
         self.state_dicts["src"]["layer.1.weight"] = torch.zeros(2, 2)
@@ -27,9 +26,8 @@ class _Provider:
         self.state_dicts["other"]["peer.1.weight"] = torch.zeros(2, 2)
         self.state_dicts["dst"]["copy.0.weight"] = torch.ones(2, 2)
 
-    def get_state_dict(self, model: str) -> InMemoryStateDict:
+    def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
-
 
 class _Binary(BinaryMappingTransform[BinaryMappingSpec]):
     name = "binary"
@@ -42,7 +40,6 @@ class _Binary(BinaryMappingTransform[BinaryMappingSpec]):
     def apply_mapping(self, item, provider) -> None:
         del item, provider
 
-
 class _Unary(UnaryTransform[UnarySpec]):
     name = "unary"
     spec_type = UnarySpec
@@ -51,11 +48,9 @@ class _Unary(UnaryTransform[UnarySpec]):
     def apply_to_target(self, spec: UnarySpec, name: str, provider) -> None:
         del spec, name, provider
 
-
 @dataclass(frozen=True)
 class _TernarySpec(TernaryMappingSpec):
     pass
-
 
 class _Ternary(TernaryMappingTransform[_TernarySpec]):
     name = "ternary"
@@ -68,7 +63,6 @@ class _Ternary(TernaryMappingTransform[_TernarySpec]):
     def apply_mapping(self, item, provider) -> None:
         del item, provider
 
-
 def test_binary_mapping_transform_compile_and_destination_policy() -> None:
     transform = _Binary()
     spec = transform.compile({"from": "src::layer\\.(\\d+)\\.weight", "to": "dst::copy.\\1.weight"}, None)
@@ -78,14 +72,12 @@ def test_binary_mapping_transform_compile_and_destination_policy() -> None:
     with pytest.raises(TransformError, match="destination already exists"):
         transform.validate_resolved_items(spec, transform.resolve_items(spec, _Provider()), _Provider())
 
-
 def test_unary_transform_compile_allows_slices_and_resolves_targets() -> None:
     transform = _Unary()
     spec = transform.compile({"target": "src::layer\\..*::[:1]"}, None)
 
     assert spec.target_ref == TensorRef(model="src", expr="layer\\..*", slice_spec="[:1]")
     assert transform.resolve_targets(spec, _Provider()) == ["layer.0.weight", "layer.1.weight"]
-
 
 def test_ternary_mapping_transform_resolves_regex_triples_and_requires_existing_destination() -> None:
     transform = _Ternary()

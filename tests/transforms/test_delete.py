@@ -5,7 +5,6 @@ from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 _module = import_module("brainsurgery.transforms.delete")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_delete_compile_rejects_sliced_target() -> None:
     try:
         DeleteTransform().compile({"target": "x::[:]"}, default_model="model")
@@ -13,7 +12,6 @@ def test_delete_compile_rejects_sliced_target() -> None:
         assert "target must not be sliced" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected sliced target error")
-
 
 def test_delete_apply_removes_target() -> None:
     class _Provider:
@@ -28,7 +26,6 @@ def test_delete_apply_removes_target() -> None:
     spec = UnarySpec(target_ref=TensorRef(model="model", expr="x"))
     DeleteTransform().apply_to_target(spec, "x", provider)
     assert "x" not in provider._state_dict
-
 
 def test_delete_apply_raises_for_missing_target() -> None:
     class _Provider:
@@ -46,7 +43,6 @@ def test_delete_apply_raises_for_missing_target() -> None:
         assert "disappeared" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected missing target error")
-
 
 def test_delete_apply_emits_verbose_activity_line(capsys) -> None:
     class _Provider:

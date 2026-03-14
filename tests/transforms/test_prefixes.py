@@ -2,12 +2,10 @@ import brainsurgery.transforms.prefixes as prefixes_module
 from brainsurgery.transforms.prefixes import PrefixesSpec, PrefixesTransform, PrefixesTransformError
 import pytest
 
-
 def test_prefixes_compile_accepts_none_and_empty_mapping() -> None:
     transform = PrefixesTransform()
     assert isinstance(transform.compile(None, default_model=None), PrefixesSpec)
     assert isinstance(transform.compile({}, default_model=None), PrefixesSpec)
-
 
 def test_prefixes_compile_add_mode() -> None:
     spec = PrefixesTransform().compile(
@@ -17,7 +15,6 @@ def test_prefixes_compile_add_mode() -> None:
     assert spec.mode == "add"
     assert spec.alias == "scratch"
 
-
 def test_prefixes_compile_rejects_invalid_mode() -> None:
     try:
         PrefixesTransform().compile({"mode": "explode"}, default_model=None)
@@ -26,14 +23,12 @@ def test_prefixes_compile_rejects_invalid_mode() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected prefixes mode error")
 
-
 def test_prefixes_list_aliases_from_provider_state() -> None:
     class _Provider:
         model_paths = {"base": object()}
         state_dicts = {"scratch": object()}
 
     assert prefixes_module._list_aliases(_Provider()) == {"base", "scratch"}
-
 
 def test_prefixes_compile_and_apply_additional_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     transform = PrefixesTransform()
@@ -69,7 +64,6 @@ def test_prefixes_compile_and_apply_additional_paths(monkeypatch: pytest.MonkeyP
         prefixes_module._require_only_keys({"mode": "list", "x": 1}, allowed={"mode"})
     assert prefixes_module._prefixes_mode("prefixes: {}") is None
 
-
 def test_prefixes_alias_edit_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Provider:
         def __init__(self) -> None:
@@ -100,7 +94,6 @@ def test_prefixes_alias_edit_error_paths(monkeypatch: pytest.MonkeyPatch) -> Non
         prefixes_module._rename_alias(provider, source="base", dest="base")
     with pytest.raises(PrefixesTransformError, match="already exists"):
         prefixes_module._rename_alias(provider, source="base", dest="scratch")
-
 
 def test_prefixes_completion_unknown_mode_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     transform = PrefixesTransform()

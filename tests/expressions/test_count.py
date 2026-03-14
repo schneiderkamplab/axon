@@ -3,7 +3,6 @@ from importlib import import_module
 _module = import_module("brainsurgery.expressions.count")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_count_compile_rejects_non_int_is() -> None:
     try:
         compile_count_expr({"of": "x", "is": "1"}, default_model="model")
@@ -11,7 +10,6 @@ def test_count_compile_rejects_non_int_is() -> None:
         assert "count.is must be an integer" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected count.is integer validation error")
-
 
 def test_count_evaluate_exact_match() -> None:
     class _Provider:
@@ -21,7 +19,6 @@ def test_count_evaluate_exact_match() -> None:
 
     expr = CountExpr(ref=TensorRef(model="model", expr="[ab]"), is_value=2)
     expr.evaluate(_Provider())
-
 
 def test_count_evaluate_mismatch_raises() -> None:
     class _Provider:

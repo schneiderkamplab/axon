@@ -14,9 +14,7 @@ from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.transforms.copy import CopyTransform
 
-
 _GPT2_MODEL_URL = "https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors"
-
 
 def _ensure_gpt2_model_path() -> Path:
     if shutil.which("curl") is None:
@@ -47,7 +45,6 @@ def _ensure_gpt2_model_path() -> Path:
 
     return model_path
 
-
 def test_download_gpt2_model_and_run_example_yaml() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     _ensure_gpt2_model_path()
@@ -73,7 +70,6 @@ def test_download_gpt2_model_and_run_example_yaml() -> None:
     )
 
     assert (repo_root / "models" / "test" / "model.safetensors.index.json").exists()
-
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_gpt2_copy_tracks_access_counts_for_real_providers(tmp_path: Path, provider_name: str) -> None:
@@ -107,7 +103,6 @@ def test_gpt2_copy_tracks_access_counts_for_real_providers(tmp_path: Path, provi
             assert copied.access_counts(name) == {"reads": 0, "writes": 1}
     finally:
         provider.close()
-
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(

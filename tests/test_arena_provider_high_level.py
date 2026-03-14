@@ -11,7 +11,6 @@ from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
-
 def _toy_tensors() -> dict[str, torch.Tensor]:
     return {
         "wte.weight": torch.arange(24, dtype=torch.float32).reshape(6, 4),
@@ -24,10 +23,8 @@ def _toy_tensors() -> dict[str, torch.Tensor]:
         "mat.right": torch.arange(6, dtype=torch.float32).reshape(3, 2),
     }
 
-
 def _write_checkpoint(path: Path, tensors: dict[str, torch.Tensor] | None = None) -> None:
     save_safetensors_file(_toy_tensors() if tensors is None else tensors, str(path))
-
 
 def _execute_plan(
     provider_name: str,
@@ -72,7 +69,6 @@ def _execute_plan(
         provider.close()
         raise
 
-
 def test_arena_temp_files_are_deleted_after_provider_lifecycle(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model.safetensors"
     _write_checkpoint(checkpoint)
@@ -91,7 +87,6 @@ def test_arena_temp_files_are_deleted_after_provider_lifecycle(tmp_path: Path) -
     del provider
     gc.collect()
     assert not arena_root.exists()
-
 
 def test_arena_and_inmemory_match_after_global_read_write_sequence(tmp_path: Path) -> None:
     checkpoint = tmp_path / "global_ops.safetensors"
@@ -119,7 +114,6 @@ def test_arena_and_inmemory_match_after_global_read_write_sequence(tmp_path: Pat
     for name in sorted(inmemory_snap["work"]):
         assert torch.equal(inmemory_snap["work"][name], arena_snap["work"][name]), name
 
-
 def test_arena_and_inmemory_have_same_access_counts_after_sequence(tmp_path: Path) -> None:
     checkpoint = tmp_path / "counts.safetensors"
     _write_checkpoint(checkpoint)
@@ -140,7 +134,6 @@ def test_arena_and_inmemory_have_same_access_counts_after_sequence(tmp_path: Pat
     p_arena.close()
 
     assert inmemory_counts["work"]["wte.weight"] == arena_counts["work"]["wte.weight"]
-
 
 def test_arena_rolls_over_to_multiple_segments_for_large_writes(tmp_path: Path) -> None:
     checkpoint = tmp_path / "large.safetensors"
@@ -168,7 +161,6 @@ def test_arena_rolls_over_to_multiple_segments_for_large_writes(tmp_path: Path) 
     provider.close()
     assert len(segment_files) >= 2
     assert torch.equal(snapshots["work"]["big.weight"], tensors["big.weight"])
-
 
 def test_arena_alias_isolation_matches_inmemory_for_move_delete(tmp_path: Path) -> None:
     checkpoint = tmp_path / "isolation.safetensors"

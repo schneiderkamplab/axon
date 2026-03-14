@@ -8,9 +8,8 @@ import pytest
 import torch
 
 from brainsurgery.core import ResolvedMapping, TensorRef, TransformError
-from brainsurgery.engine import InMemoryStateDict
 
-
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 def _provider_for(*, model: str, state_dict) -> object:
     class _Provider:
         def get_state_dict(self, selected: str):
@@ -18,7 +17,6 @@ def _provider_for(*, model: str, state_dict) -> object:
             return state_dict
 
     return _Provider()
-
 
 def test_assign_validate_refs_parses_slices() -> None:
     module = import_module("brainsurgery.transforms.assign")
@@ -28,13 +26,11 @@ def test_assign_validate_refs_parses_slices() -> None:
         TensorRef(model="m", expr="b", slice_spec="[:1]"),
     )
 
-
 def test_assert_completion_payload_start_candidates_non_empty_prefix() -> None:
     module = import_module("brainsurgery.transforms.assert_")
     out = module.AssertTransform().completion_payload_start_candidates("e")
     assert out is not None
     assert "{ " not in out
-
 
 def test_clamp_compile_rejects_min_gt_max() -> None:
     module = import_module("brainsurgery.transforms.clamp")
@@ -43,7 +39,6 @@ def test_clamp_compile_rejects_min_gt_max() -> None:
             {"from": "x", "to": "y", "min": 2, "max": 1},
             default_model="m",
         )
-
 
 def test_concat_error_branches_and_validation_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.concat")
@@ -111,7 +106,6 @@ def test_concat_error_branches_and_validation_helpers(monkeypatch: pytest.Monkey
             dim=0,
         )
 
-
 def test_concat_apply_rejects_existing_destination_and_source_match_count() -> None:
     module = import_module("brainsurgery.transforms.concat")
     transform = module.ConcatTransform()
@@ -120,7 +114,7 @@ def test_concat_apply_rejects_existing_destination_and_source_match_count() -> N
         to_ref=TensorRef(model="m", expr="dst"),
         dim=0,
     )
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["left"] = torch.ones(1, 2)
     state_dict["right"] = torch.ones(1, 2)
     state_dict["dst"] = torch.zeros(2, 2)
@@ -129,7 +123,7 @@ def test_concat_apply_rejects_existing_destination_and_source_match_count() -> N
     with pytest.raises(module.ConcatTransformError, match="destination already exists"):
         transform.apply(spec, provider)
 
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["left"] = torch.ones(1, 2)
     state_dict["right"] = torch.ones(1, 2)
     provider = _provider_for(model="m", state_dict=state_dict)
@@ -138,17 +132,15 @@ def test_concat_apply_rejects_existing_destination_and_source_match_count() -> N
     with pytest.raises(module.ConcatTransformError, match="exactly one tensor"):
         transform._resolve_source_tensor(TensorRef(model="m", expr=".*"), provider)
 
-
 def test_copy_apply_slice_and_destination_exists_branch() -> None:
     module = import_module("brainsurgery.transforms.copy")
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["src"] = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
     state_dict["dst"] = torch.tensor([0.0], dtype=torch.float32)
     provider = _provider_for(model="m", state_dict=state_dict)
     item = ResolvedMapping("m", "src", (slice(0, 1),), "m", "dst", None)
     with pytest.raises(TransformError, match="destination already exists"):
         module._copy_apply(module.BinaryMappingSpec(TensorRef("m", "src"), TensorRef("m", "dst")), item, provider)
-
 
 def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.diff")
@@ -168,14 +160,14 @@ def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch)
         transform.compile({"left": "m::x", "right": "m::x", "eps": -1}, default_model=None)
 
     with pytest.raises(module.DiffTransformError, match="does not infer an output model"):
-        transform.infer_output_model(object())
+        transform._infer_output_model(object())
 
     spec = transform.compile({"left": "m::x::[:1]", "right": "m::x::[:1]"}, default_model=None)
     assert spec.left_ref.slice_spec == "[:1]"
 
     with pytest.raises(module.DiffTransformError, match="boom"):
         monkeypatch.setattr(module, "match_expr_names", lambda **_: (_ for _ in ()).throw(TransformError("boom")))
-        state_dict = InMemoryStateDict()
+        state_dict = _InMemoryStateDict()
         state_dict["x"] = torch.ones(1)
         module._resolve_names(TensorRef(model="m", expr="x"), _provider_for(model="m", state_dict=state_dict))
 
@@ -198,14 +190,12 @@ def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch)
     assert module._diff_mode("left: x") is None
     assert module._compile_eps(None) is None
 
-
 def test_diff_complex_eps_branch() -> None:
     module = import_module("brainsurgery.transforms.diff")
     left = torch.tensor([1 + 1j], dtype=torch.complex64)
     right = torch.tensor([2 + 1j], dtype=torch.complex64)
     reason = module._difference_reason(left, right, eps=0.1)
     assert "max_abs_diff" in str(reason)
-
 
 def test_diff_remaining_completion_and_spec_helpers() -> None:
     module = import_module("brainsurgery.transforms.diff")
@@ -226,7 +216,6 @@ def test_diff_remaining_completion_and_spec_helpers() -> None:
     assert transform.completion_key_candidates("mode: refs left: x", "z") == []
     assert transform.completion_key_candidates("mode: refs left: x right: y eps: 1", "") == ["}"]
     assert module._diff_mode("mode: ALIASES left_alias: a") == "aliases"
-
 
 def test_dump_remaining_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.dump")
@@ -253,11 +242,9 @@ def test_dump_remaining_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     assert module._maybe_get_access_counts(SimpleNamespace(access_counts={}), "x", verbosity="full") is None
     monkeypatch.setattr(module, "emit_line", lambda _line: None)
 
-
 def test_exit_contributes_output_model_false() -> None:
     module = import_module("brainsurgery.transforms.exit")
     assert module.ExitTransform().contributes_output_model(object()) is False
-
 
 def test_fill_parse_config_and_build_error_branches() -> None:
     module = import_module("brainsurgery.transforms.fill")
@@ -318,10 +305,9 @@ def test_fill_parse_config_and_build_error_branches() -> None:
     with pytest.raises(TransformError, match="cannot broadcast"):
         module.build_filled_tensor_like(torch.zeros((2, 2), dtype=torch.float32), bad, TransformError)
 
-
 def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.matmul")
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.tensor([[1.0]], dtype=torch.float32)
     state_dict["b"] = torch.tensor([[1.0]], dtype=torch.float16)
     provider = _provider_for(model="m", state_dict=state_dict)
@@ -346,14 +332,13 @@ def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
                 provider,
             )
 
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones((2, 3), dtype=torch.float32)
     state_dict["b"] = torch.ones((4, 2), dtype=torch.float32)
     provider = _provider_for(model="m", state_dict=state_dict)
     item = module.ResolvedTernaryMapping("m", "a", None, "m", "b", None, "m", "c", None)
     with pytest.raises(TransformError, match="shape mismatch"):
         module._matmul_apply(module.TernaryMappingSpec(TensorRef("m", "a"), TensorRef("m", "b"), TensorRef("m", "c")), item, provider)
-
 
 def test_move_apply_error_branches() -> None:
     module = import_module("brainsurgery.transforms.move")
@@ -392,13 +377,12 @@ def test_move_apply_error_branches() -> None:
             _provider_for(model="m", state_dict=_StickyDeleteStateDict({"src": torch.ones(1)})),
         )
 
-
 def test_permute_rank_permutation_and_order_type_errors() -> None:
     module = import_module("brainsurgery.transforms.permute")
     with pytest.raises(TransformError, match="non-empty list of integers"):
         module._parse_order([0, "1"])
 
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["x"] = torch.ones((2, 3))
     provider = _provider_for(model="m", state_dict=state_dict)
     with pytest.raises(TransformError, match="rank mismatch"):
@@ -413,7 +397,6 @@ def test_permute_rank_permutation_and_order_type_errors() -> None:
             ResolvedMapping("m", "x", None, "m", "y", None),
             provider,
         )
-
 
 def test_phlora_remaining_error_branches() -> None:
     module = import_module("brainsurgery.transforms.phlora")
@@ -448,7 +431,7 @@ def test_phlora_remaining_error_branches() -> None:
         )
 
     with pytest.raises(module.PhloraTransformError, match="output model missing"):
-        transform.infer_output_model(
+        transform._infer_output_model(
             module.PhloraSpec(
                 source_ref=TensorRef(model=None, expr="x"),
                 factor_b_ref=TensorRef(model="m", expr="x.b"),
@@ -458,7 +441,7 @@ def test_phlora_remaining_error_branches() -> None:
                 require_missing_outputs=True,
             )
         )
-    assert transform.infer_output_model(spec) == "m1"
+    assert transform._infer_output_model(spec) == "m1"
 
     with pytest.raises(module.PhloraTransformError, match="must be a boolean"):
         module._require_boolean({"x": "nope"}, op_name="phlora", key="x", default=True)
@@ -472,9 +455,9 @@ def test_phlora_remaining_error_branches() -> None:
 
     class _Provider:
         def __init__(self) -> None:
-            self.src = InMemoryStateDict()
-            self.a = InMemoryStateDict()
-            self.b = InMemoryStateDict()
+            self.src = _InMemoryStateDict()
+            self.a = _InMemoryStateDict()
+            self.b = _InMemoryStateDict()
 
         def get_state_dict(self, model: str):
             return {"src": self.src, "a": self.a, "b": self.b}[model]
@@ -522,7 +505,6 @@ def test_phlora_remaining_error_branches() -> None:
             provider,
         )
 
-
 def test_reshape_parse_and_runtime_error_branches() -> None:
     module = import_module("brainsurgery.transforms.reshape")
     with pytest.raises(TransformError, match="non-empty list of integers"):
@@ -532,7 +514,7 @@ def test_reshape_parse_and_runtime_error_branches() -> None:
     with pytest.raises(TransformError, match="positive integers or -1"):
         module._parse_shape([0, 2], op_name="reshape", error_type=TransformError)
 
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["x"] = torch.arange(5)
     provider = _provider_for(model="m", state_dict=state_dict)
     with pytest.raises(TransformError, match="reshape failed"):
@@ -547,7 +529,6 @@ def test_reshape_parse_and_runtime_error_branches() -> None:
             "x",
             provider,
         )
-
 
 def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.split")
@@ -601,7 +582,7 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(module.SplitTransformError, match="non-empty list of positive integers"):
         module._parse_sizes([1, 0])
 
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["x"] = torch.ones((2, 2))
     state_dict["z"] = torch.ones((2, 2))
     provider = _provider_for(model="m", state_dict=state_dict)
@@ -627,7 +608,7 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
             provider,
         )
 
-    state_dict = InMemoryStateDict()
+    state_dict = _InMemoryStateDict()
     state_dict["x"] = torch.tensor([1.0, 2.0, 3.0, 4.0])
     state_dict["a"] = torch.tensor([0.0, 0.0])
     provider = _provider_for(model="m", state_dict=state_dict)
@@ -636,7 +617,6 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
             module.SplitSpec(TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [2, 2], 0),
             provider,
         )
-
 
 def test_transforms_package_skips_private_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
@@ -647,7 +627,6 @@ def test_transforms_package_skips_private_modules(monkeypatch: pytest.MonkeyPatc
     package = import_module("brainsurgery.transforms")
     reload(package)
     assert calls == ["brainsurgery.transforms.x"]
-
 
 def test_help_print_all_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.help")

@@ -5,7 +5,6 @@ import torch
 _module = import_module("brainsurgery.transforms.reshape")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_reshape_compile_rejects_multiple_infer_dims() -> None:
     try:
         ReshapeTransform().compile({"from": "x", "to": "y", "shape": [-1, -1]}, default_model="m")
@@ -13,7 +12,6 @@ def test_reshape_compile_rejects_multiple_infer_dims() -> None:
         assert "at most one '-1'" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected reshape.shape validation error")
-
 
 def test_reshape_apply_success() -> None:
     class _Provider:

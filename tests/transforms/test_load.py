@@ -1,19 +1,19 @@
 from importlib import import_module
 from pathlib import Path
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.engine.providers import InMemoryStateDictProvider
 _module = import_module("brainsurgery.transforms.load")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 import pytest
 import torch
-from brainsurgery.engine import InMemoryStateDict, InMemoryStateDictProvider, reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 from brainsurgery.core import TensorRef
-
 
 def test_load_compile_defaults_alias_to_model_without_context() -> None:
     spec = LoadTransform().compile({"path": "/tmp/x.safetensors"}, default_model=None)
     assert spec.alias == "model"
     assert spec.tensor_name is None
-
 
 def test_load_compile_to_conflict_raises() -> None:
     try:
@@ -26,7 +26,6 @@ def test_load_compile_to_conflict_raises() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected alias conflict error")
 
-
 def test_load_rejects_non_auto_format_for_state_dict() -> None:
     try:
         LoadTransform().compile(
@@ -37,7 +36,6 @@ def test_load_rejects_non_auto_format_for_state_dict() -> None:
         assert "only supported for tensor loads" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected load.format validation error")
-
 
 def test_load_compile_additional_validation_paths() -> None:
     spec = LoadTransform().compile("/tmp/x.safetensors", default_model=None)
@@ -60,7 +58,6 @@ def test_load_compile_additional_validation_paths() -> None:
             LoadTransform().compile({"path": "/tmp/x.safetensors", "to": "a::x"}, default_model=None)
     finally:
         _module.parse_model_expr = original_parse_model_expr
-
 
 def test_load_apply_additional_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     state_spec = LoadSpec(path=Path("/tmp/x.safetensors"), alias="a", tensor_name=None, format="auto")
@@ -85,13 +82,12 @@ def test_load_apply_additional_error_paths(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(LoadTransformError, match="bad tensor"):
         LoadTransform().apply(tensor_spec, provider)
 
-    sd = InMemoryStateDict()
+    sd = _InMemoryStateDict()
     sd["x"] = torch.ones(1)
     monkeypatch.setattr(_module, "load_tensor_from_path", lambda path, format: torch.zeros(1))
     monkeypatch.setattr(_module, "get_or_create_alias_state_dict", lambda *args, **kwargs: sd)
     with pytest.raises(LoadTransformError, match="destination already exists"):
         LoadTransform().apply(tensor_spec, provider)
-
 
 def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     monkeypatch: pytest.MonkeyPatch,
@@ -101,7 +97,7 @@ def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     set_runtime_flag("dry_run", True)
 
     calls: list[str] = []
-    sd = InMemoryStateDict()
+    sd = _InMemoryStateDict()
     sd["x"] = torch.ones(1)
 
     monkeypatch.setattr(provider, "load_state_dict_from_checkpoint_path", lambda path: (calls.append("checkpoint"), sd)[1])

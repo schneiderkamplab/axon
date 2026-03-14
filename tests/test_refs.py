@@ -14,7 +14,6 @@ from brainsurgery.core import (
 from brainsurgery.core import TransformError
 from brainsurgery.core.refs import _looks_like_slice, _validate_expr_kind
 
-
 def test_parse_model_expr_supports_default_model_explicit_model_and_slices() -> None:
     assert parse_model_expr("weight", default_model="base") == TensorRef(
         model="base",
@@ -32,7 +31,6 @@ def test_parse_model_expr_supports_default_model_explicit_model_and_slices() -> 
         expr=["layer", "$idx"],
         slice_spec=None,
     )
-
 
 def test_parse_model_expr_rejects_invalid_shapes() -> None:
     with pytest.raises(TransformError, match="missing model alias"):
@@ -59,7 +57,6 @@ def test_parse_model_expr_rejects_invalid_shapes() -> None:
     with pytest.raises(TransformError, match="invalid reference syntax"):
         parse_model_expr("a::b::[:1]::extra")
 
-
 def test_parse_slice_parses_indices_and_ranges() -> None:
     assert parse_slice("[:]") == (slice(None, None, None),)
     assert parse_slice("[1, 2:5, ::-1]") == (
@@ -67,7 +64,6 @@ def test_parse_slice_parses_indices_and_ranges() -> None:
         slice(2, 5, None),
         slice(None, None, -1),
     )
-
 
 def test_parse_slice_rejects_empty_component() -> None:
     with pytest.raises(TransformError, match="empty slice component"):
@@ -84,14 +80,12 @@ def test_parse_slice_rejects_empty_component() -> None:
     with pytest.raises(TransformError, match="invalid integer"):
         parse_slice("[x]")
 
-
 def test_select_tensor_applies_slice_and_wraps_failures() -> None:
     tensor = torch.arange(12).reshape(3, 4)
     assert torch.equal(select_tensor(tensor, (slice(None), 1)), tensor[:, 1])
 
     with pytest.raises(TransformError, match="failed to apply slice"):
         select_tensor(tensor, (slice(None), 1, 2))
-
 
 def test_validate_expr_kind_and_helpers() -> None:
     _validate_expr_kind(expr="layer.*", op_name="copy", role="source")

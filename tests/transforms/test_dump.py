@@ -5,7 +5,6 @@ import pytest
 _module = import_module("brainsurgery.transforms.dump")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_dump_compile_rejects_unknown_format() -> None:
     try:
         DumpTransform().compile({"target": "x", "format": "xml"}, default_model="model")
@@ -14,7 +13,6 @@ def test_dump_compile_rejects_unknown_format() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected dump.format validation error")
 
-
 def test_dump_insert_tree_rejects_invalid_node_shape() -> None:
     try:
         insert_into_tree([], ["x"], 1)  # type: ignore[arg-type]
@@ -22,7 +20,6 @@ def test_dump_insert_tree_rejects_invalid_node_shape() -> None:
         assert "invalid tree structure" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected invalid tree structure error")
-
 
 def test_dump_compile_defaults() -> None:
     spec = DumpTransform().compile({}, default_model="model")
@@ -36,7 +33,6 @@ def test_dump_compile_defaults() -> None:
     spec_no_default = DumpTransform().compile({}, default_model=None)
     assert spec_no_default.collect_models() == set()
 
-
 def test_dump_apply_to_target_is_not_used() -> None:
     try:
         DumpTransform().apply_to_target(
@@ -49,15 +45,13 @@ def test_dump_apply_to_target_is_not_used() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected apply_to_target guard assertion")
 
-
 def test_dump_infer_output_model_rejected() -> None:
     try:
-        DumpTransform().infer_output_model(object())
+        DumpTransform()._infer_output_model(object())
     except DumpTransformError as exc:
         assert "does not infer an output model" in str(exc)
     else:  # pragma: no cover
-        raise AssertionError("expected infer_output_model validation error")
-
+        raise AssertionError("expected _infer_output_model validation error")
 
 def test_dump_apply_rejects_missing_target_when_not_dumping_all_models() -> None:
     spec = DumpTransform().build_spec(

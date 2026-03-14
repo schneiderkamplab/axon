@@ -5,21 +5,22 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from brainsurgery.engine.plan import SurgeryPlan
-from brainsurgery.engine import InMemoryStateDict
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.engine.plan import _SurgeryPlan
+
 from brainsurgery.core import (
     TransformError,
 )
 from brainsurgery.core import (
     BaseTransform,
     CompiledTransform,
-    REGISTRY,
     TransformResult,
     get_transform,
     list_transforms,
     register_transform,
 )
-from brainsurgery.engine.output_model import infer_output_model
+from brainsurgery.core.transform import REGISTRY
+from brainsurgery.engine.output_model import _infer_output_model
 from brainsurgery.core.validation import (
     ensure_mapping_payload,
     require_expr,
@@ -31,14 +32,12 @@ from brainsurgery.transforms.copy import CopyTransform
 from brainsurgery.transforms.help import HelpTransform
 from brainsurgery.transforms.save import SaveTransform
 
-
 @dataclass(frozen=True)
 class _Spec:
     model: str
 
     def collect_models(self) -> set[str]:
         return {self.model, "other"}
-
 
 class _Transform(BaseTransform):
     name = "dummy"
@@ -51,35 +50,31 @@ class _Transform(BaseTransform):
         del spec, provider
         return TransformResult(name=self.name, count=1)
 
-    def infer_output_model(self, spec: object) -> str:
+    def _infer_output_model(self, spec: object) -> str:
         assert isinstance(spec, _Spec)
         return spec.model
-
 
 class _FallbackTransform(_Transform):
     name = "fallback"
 
-    def infer_output_model(self, spec: object) -> str:
+    def _infer_output_model(self, spec: object) -> str:
         del spec
         raise TransformError("needs provider")
-
 
 class _Provider:
     def __init__(self) -> None:
         self.state_dicts = {
-            "model": InMemoryStateDict(),
-            "other": InMemoryStateDict(),
+            "model": _InMemoryStateDict(),
+            "other": _InMemoryStateDict(),
         }
         self.state_dicts["model"]["w"] = torch.ones(1)
 
-    def get_state_dict(self, model: str) -> InMemoryStateDict:
+    def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
-
 
 class _SpecBadCollect:
     def collect_models(self) -> list[str]:
         return ["model"]
-
 
 def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
     original_registry = dict(REGISTRY)
@@ -97,18 +92,16 @@ def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
         REGISTRY.clear()
         REGISTRY.update(original_registry)
 
-
 def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
     )
-    assert infer_output_model(plan, _Provider()) == "model"
-
+    assert _infer_output_model(plan, _Provider()) == "model"
 
 def test_infer_output_model_skips_non_contributing_transforms() -> None:
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[
@@ -124,23 +117,21 @@ def test_infer_output_model_skips_non_contributing_transforms() -> None:
         ],
     )
 
-    assert infer_output_model(plan, _Provider()) == "model"
-
+    assert _infer_output_model(plan, _Provider()) == "model"
 
 def test_infer_output_model_raises_when_no_destination_model() -> None:
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[CompiledTransform(HelpTransform(), HelpTransform().compile({}, default_model=None))],
     )
     with pytest.raises(TransformError, match="cannot infer output model uniquely"):
-        infer_output_model(plan, _Provider())
-
+        _infer_output_model(plan, _Provider())
 
 def test_infer_output_model_raises_when_multiple_destination_models() -> None:
     provider = _Provider()
     provider.state_dicts["other"]["w"] = torch.ones(1)
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[
@@ -149,28 +140,25 @@ def test_infer_output_model_raises_when_multiple_destination_models() -> None:
         ],
     )
     with pytest.raises(TransformError, match="cannot infer output model uniquely"):
-        infer_output_model(plan, provider)
-
+        _infer_output_model(plan, provider)
 
 def test_infer_output_model_fallback_requires_provider() -> None:
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
     )
     with pytest.raises(TransformError, match="needs provider"):
-        infer_output_model(plan, None)
-
+        _infer_output_model(plan, None)
 
 def test_infer_output_model_fallback_rejects_non_set_collect_models() -> None:
-    plan = SurgeryPlan(
+    plan = _SurgeryPlan(
         inputs={},
         output=None,
         transforms=[CompiledTransform(_FallbackTransform(), _SpecBadCollect())],
     )
     with pytest.raises(TransformError, match="needs provider"):
-        infer_output_model(plan, _Provider())
-
+        _infer_output_model(plan, _Provider())
 
 def test_validate_payload_helpers_cover_required_unknown_and_type_errors() -> None:
     validate_payload_keys({"from": "a"}, op_name="copy", allowed_keys={"from"}, required_keys={"from"})

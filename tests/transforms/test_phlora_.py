@@ -2,7 +2,6 @@ import torch
 
 from brainsurgery.transforms.phlora import PhloraInPlaceTransform, PhloraInPlaceTransformError
 
-
 def test_phlora_in_place_compile_rejects_non_integral_rank() -> None:
     try:
         PhloraInPlaceTransform().compile({"target": "x", "rank": 3.5}, default_model="model")
@@ -10,7 +9,6 @@ def test_phlora_in_place_compile_rejects_non_integral_rank() -> None:
         assert "positive integer" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected rank validation error")
-
 
 def test_phlora_in_place_rewrites_target_with_ranked_matrix() -> None:
     class _Provider:
@@ -31,7 +29,6 @@ def test_phlora_in_place_rewrites_target_with_ranked_matrix() -> None:
     assert "w" in provider._state_dict
     assert provider._state_dict["w"].shape == (2, 2)
     assert torch.allclose(provider._state_dict["w"], torch.tensor([[3.0, 0.0], [0.0, 0.0]]))
-
 
 def test_phlora_in_place_rejects_non_2d_target() -> None:
     class _Provider:

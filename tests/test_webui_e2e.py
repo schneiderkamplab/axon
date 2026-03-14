@@ -18,12 +18,10 @@ import torch
 import brainsurgery  # noqa: F401
 
 from brainsurgery.engine import create_state_dict_provider
-from brainsurgery.webui.handler import handler_factory
-from brainsurgery.webui.session import SessionState
-
+from brainsurgery.webui.handler import _handler_factory
+from brainsurgery.webui.session import _SessionState
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
 
 def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
@@ -42,7 +40,6 @@ def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, A
     assert isinstance(decoded, dict)
     return decoded
 
-
 def _get_json(base_url: str, path: str) -> dict[str, Any]:
     req = request.Request(
         url=base_url + path,
@@ -54,7 +51,6 @@ def _get_json(base_url: str, path: str) -> dict[str, Any]:
     assert isinstance(decoded, dict)
     return decoded
 
-
 @contextmanager
 def _running_webui(tmp_path: Path) -> Iterator[str]:
     provider = create_state_dict_provider(
@@ -64,7 +60,7 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
         arena_root=Path(".brainsurgery"),
         arena_segment_size="1GB",
     )
-    session = SessionState(
+    session = _SessionState(
         provider=provider,
         lock=threading.Lock(),
         upload_root=tmp_path / "uploads",
@@ -72,7 +68,7 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
     session.upload_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_factory(session))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_factory(session))
     except PermissionError as exc:
         provider.close()
         pytest.skip(f"local webui bind is not permitted in this environment: {exc}")
@@ -86,7 +82,6 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
         server.server_close()
         thread.join(timeout=5)
         provider.close()
-
 
 def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
     tmp_path: Path,
@@ -120,7 +115,7 @@ def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
             assert isinstance(transform_name, str)
             apply_resp = _post_json(
                 base_url,
-                "/api/apply_transform",
+                "/api/_apply_transform",
                 {
                     "transform": transform_name,
                     "payload": payload,
@@ -130,7 +125,7 @@ def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
 
         exit_resp = _post_json(
             base_url,
-            "/api/apply_transform",
+            "/api/_apply_transform",
             {"transform": "exit", "payload": {}},
         )
         assert exit_resp.get("ok") is True, exit_resp.get("error")
@@ -143,7 +138,6 @@ def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
     expected_transforms = [{"load": {"path": model_input, "alias": "model"}}, *transforms, {"exit": {}}]
     assert summary_obj == {"transforms": expected_transforms}
 
-
 def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) -> None:
     with _running_webui(tmp_path) as base_url:
         state_before = _get_json(base_url, "/api/state")
@@ -155,7 +149,7 @@ def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) 
 
         set_resp = _post_json(
             base_url,
-            "/api/apply_transform",
+            "/api/_apply_transform",
             {
                 "transform": "set",
                 "payload": {"dry-run": True, "verbose": True},
@@ -172,7 +166,6 @@ def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) 
         assert isinstance(flags_after_state, dict)
         assert flags_after_state.get("dry_run") is True
         assert flags_after_state.get("verbose") is True
-
 
 def test_webui_e2e_transforms_and_upload_dump_and_save_flows(tmp_path: Path) -> None:
     tiny_path = tmp_path / "tiny.safetensors"
@@ -251,7 +244,7 @@ def test_webui_e2e_transforms_and_upload_dump_and_save_flows(tmp_path: Path) -> 
         server_out = tmp_path / "server_saved.safetensors"
         save_server = _post_json(
             base_url,
-            "/api/apply_transform",
+            "/api/_apply_transform",
             {
                 "transform": "save",
                 "payload": {

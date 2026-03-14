@@ -5,16 +5,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from brainsurgery.engine.checkpoint_io import validate_state_dict_mapping as validate_checkpoint_mapping
 from brainsurgery.io import dcp as dcp_io
 from brainsurgery.io import safetensors as safetensors_io
 from brainsurgery.io import torch as torch_io
 
-
 @pytest.mark.parametrize(
     "validator",
     [
-        validate_checkpoint_mapping,
         dcp_io._validate_state_dict_mapping,
         safetensors_io._validate_state_dict_mapping,
         torch_io._validate_state_dict_mapping,

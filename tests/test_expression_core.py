@@ -14,7 +14,6 @@ from brainsurgery.core import (
 )
 from brainsurgery.core import TensorRef
 
-
 class _Expr:
     def __init__(self, model: str) -> None:
         self.model = model
@@ -22,12 +21,10 @@ class _Expr:
     def collect_models(self) -> set[str]:
         return {self.model}
 
-
 def test_assert_expression_registry_exposes_known_ops() -> None:
     names = get_assert_expr_names()
     assert "equal" in names
     assert get_assert_expr_help("equal").name == "equal"
-
 
 def test_compile_assert_expr_and_helpers_validate_payloads() -> None:
     expr = compile_assert_expr({"exists": "base::weight"}, default_model=None)
@@ -47,7 +44,6 @@ def test_compile_assert_expr_and_helpers_validate_payloads() -> None:
 
     with pytest.raises(TransformError, match="must be a list of integers"):
         compile_shape([2, "3"])
-
 
 def test_compile_tensor_ref_expr_rejects_invalid_payload() -> None:
     with pytest.raises(TransformError, match="non-empty string reference"):

@@ -5,7 +5,6 @@ import torch
 _module = import_module("brainsurgery.transforms.reshape")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_reshape_in_place_apply_success() -> None:
     class _Provider:
         def __init__(self) -> None:

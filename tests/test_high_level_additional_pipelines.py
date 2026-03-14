@@ -10,7 +10,6 @@ from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
-
 def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dict[str, object]]]:
     plan = compile_plan(raw_plan)
     return execute_transform_pairs(
@@ -19,13 +18,11 @@ def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dic
         interactive=False,
     )
 
-
 def _assert_no_diff_output(output: str) -> None:
     assert "No differences found." in output
     assert "Missing on left:\n  (none)\n" in output
     assert "Missing on right:\n  (none)\n" in output
     assert "Differing:\n  (none)\n" in output
-
 
 def _toy_tensors() -> dict[str, torch.Tensor]:
     return {
@@ -42,10 +39,8 @@ def _toy_tensors() -> dict[str, torch.Tensor]:
         "x.square": torch.arange(16, dtype=torch.float32).reshape(4, 4),
     }
 
-
 def _write_toy_checkpoint(path: Path) -> None:
     save_safetensors_file(_toy_tensors(), str(path))
-
 
 def test_sharded_hf_style_migration_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -133,7 +128,6 @@ def test_sharded_hf_style_migration_roundtrip_has_no_diff(
     assert "Missing on left:\n  (none)\n" in output
     assert "Missing on right:\n  (none)\n" in output
     assert "Differing:\n  (none)\n" in output
-
 
 def test_reversible_arithmetic_pipeline_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -230,7 +224,6 @@ def test_reversible_arithmetic_pipeline_roundtrip_has_no_diff(
     output = capsys.readouterr().out
     _assert_no_diff_output(output)
 
-
 def test_prefix_rename_remove_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -288,7 +281,6 @@ def test_prefix_rename_remove_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
-
 
 def test_split_concat_permute_reshape_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -359,7 +351,6 @@ def test_split_concat_permute_reshape_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
-
 def test_cast_and_dtype_assert_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -422,7 +413,6 @@ def test_cast_and_dtype_assert_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
-
 def test_matmul_multiply_sidepath_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -482,7 +472,6 @@ def test_matmul_multiply_sidepath_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
-
 def test_assign_slice_restore_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -540,7 +529,6 @@ def test_assign_slice_restore_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
-
 
 def test_tensor_save_load_reinject_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -601,7 +589,6 @@ def test_tensor_save_load_reinject_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
-
 
 def test_expression_gated_pipeline_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -669,7 +656,6 @@ def test_expression_gated_pipeline_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
-
 
 def test_sharded_save_load_provider_mix_roundtrip_has_no_diff(
     tmp_path: Path,

@@ -7,35 +7,35 @@ import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.engine.tensor_files import infer_tensor_file_format, load_tensor_from_path, save_tensor_to_path
+from brainsurgery.io import infer_tensor_file_format
+from brainsurgery.io import torch as torch_io
+from brainsurgery.engine.tensor_files import load_tensor_from_path, save_tensor_to_path
 from brainsurgery.engine.output_paths import (
     parse_shard_size,
-    resolve_output_destination,
-    resolve_sharded_output_directory,
+    _resolve_output_destination,
+    _resolve_sharded_output_directory,
 )
-from brainsurgery.engine.checkpoint_io import shard_state_dict, validate_state_dict_mapping
-from brainsurgery.engine.plan import OutputSpec
-
+from brainsurgery.engine.checkpoint_io import shard_state_dict
+from brainsurgery.engine.plan import _OutputSpec
 
 def test_resolve_output_destination_infers_directory_and_explicit_torch(tmp_path: Path) -> None:
     directory = tmp_path / "outdir"
     directory.mkdir()
 
-    resolved = resolve_output_destination(OutputSpec(path=directory), default_shard_size="none")
+    resolved = _resolve_output_destination(_OutputSpec(path=directory), default_shard_size="none")
     assert resolved == (directory / "model.safetensors", "safetensors", None)
 
-    explicit = resolve_output_destination(
-        OutputSpec(path=tmp_path / "model.pt", format="torch"),
+    explicit = _resolve_output_destination(
+        _OutputSpec(path=tmp_path / "model.pt", format="torch"),
         default_shard_size="none",
     )
     assert explicit == (tmp_path / "model.pt", "torch", None)
 
-    dcp_explicit = resolve_output_destination(
-        OutputSpec(path=tmp_path / "dcp_out", format="dcp"),
+    dcp_explicit = _resolve_output_destination(
+        _OutputSpec(path=tmp_path / "dcp_out", format="dcp"),
         default_shard_size="none",
     )
     assert dcp_explicit == (tmp_path / "dcp_out", "dcp", None)
-
 
 def test_parse_shard_size_and_shard_state_dict_cover_boundaries() -> None:
     assert parse_shard_size("2KB") == 2048
@@ -51,7 +51,6 @@ def test_parse_shard_size_and_shard_state_dict_cover_boundaries() -> None:
 
     with pytest.raises(RuntimeError, match="expected values like"):
         parse_shard_size("5XB")
-
 
 def test_load_tensor_from_path_supports_numpy_safetensors_and_torch(tmp_path: Path) -> None:
     numpy_path = tmp_path / "tensor.npy"
@@ -69,52 +68,46 @@ def test_load_tensor_from_path_supports_numpy_safetensors_and_torch(tmp_path: Pa
     assert torch.equal(load_tensor_from_path(torch_path), torch.arange(3))
     assert infer_tensor_file_format(torch_path) == "torch"
 
-
 def test_validate_state_dict_mapping_rejects_non_tensor_values(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="plain tensor state_dict"):
-        validate_state_dict_mapping({"bad": 1}, tmp_path / "bad.pt")
-
+        torch_io._validate_state_dict_mapping({"bad": 1}, tmp_path / "bad.pt")
 
 def test_resolve_output_destination_rejects_incompatible_explicit_safetensors(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="incompatible"):
-        resolve_output_destination(
-            OutputSpec(path=tmp_path / "model.pt", format="safetensors"),
+        _resolve_output_destination(
+            _OutputSpec(path=tmp_path / "model.pt", format="safetensors"),
             default_shard_size="none",
         )
-
 
 def test_resolve_output_destination_rejects_torch_directory_path(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     with pytest.raises(RuntimeError, match="requires a file path"):
-        resolve_output_destination(
-            OutputSpec(path=output_dir, format="torch"),
+        _resolve_output_destination(
+            _OutputSpec(path=output_dir, format="torch"),
             default_shard_size="none",
         )
 
-
 def test_resolve_output_destination_rejects_dcp_file_style_path(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="directory-style path"):
-        resolve_output_destination(
-            OutputSpec(path=tmp_path / "out.pt", format="dcp"),
+        _resolve_output_destination(
+            _OutputSpec(path=tmp_path / "out.pt", format="dcp"),
             default_shard_size="none",
         )
     existing_file = tmp_path / "out_dcp"
     existing_file.write_text("x", encoding="utf-8")
     with pytest.raises(RuntimeError, match="directory path, not a file"):
-        resolve_output_destination(
-            OutputSpec(path=existing_file, format="dcp"),
+        _resolve_output_destination(
+            _OutputSpec(path=existing_file, format="dcp"),
             default_shard_size="none",
         )
 
-
 def test_resolve_sharded_output_directory_rejects_file_style_path(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="directory-style output path"):
-        resolve_sharded_output_directory(
+        _resolve_sharded_output_directory(
             original_path=tmp_path / "model.safetensors",
             resolved_path=tmp_path / "model.safetensors",
         )
-
 
 def test_load_tensor_from_path_covers_npz_and_error_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     npz_path = tmp_path / "one.npz"
@@ -129,7 +122,6 @@ def test_load_tensor_from_path_covers_npz_and_error_branches(tmp_path: Path, mon
     monkeypatch.setattr("brainsurgery.io.npy.np.load", lambda *args, **kwargs: object())
     with pytest.raises(RuntimeError, match="unsupported numpy payload"):
         load_tensor_from_path(tmp_path / "x.npy")
-
 
 def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
     tmp_path: Path,
@@ -164,7 +156,6 @@ def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
     with pytest.raises(RuntimeError, match="unsupported tensor payload"):
         load_tensor_from_path(bad)
 
-
 def test_save_tensor_to_path_covers_all_formats(tmp_path: Path) -> None:
     tensor = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     torch_out = tmp_path / "x.pt"
@@ -180,35 +171,34 @@ def test_save_tensor_to_path_covers_all_formats(tmp_path: Path) -> None:
     save_tensor_to_path("x", tensor, safe_out, format="safetensors")
     assert torch.equal(load_tensor_from_path(safe_out, format="safetensors"), tensor)
 
-
 def test_output_paths_additional_branches(tmp_path: Path) -> None:
     out_file = tmp_path / "model.bin"
-    resolved = resolve_output_destination(OutputSpec(path=out_file), default_shard_size="none")
+    resolved = _resolve_output_destination(_OutputSpec(path=out_file), default_shard_size="none")
     assert resolved == (out_file, "torch", None)
 
     with pytest.raises(RuntimeError, match="unsupported output format"):
-        resolve_output_destination(OutputSpec(path=tmp_path / "out.abc"), default_shard_size="none")
+        _resolve_output_destination(_OutputSpec(path=tmp_path / "out.abc"), default_shard_size="none")
 
     with pytest.raises(RuntimeError, match="only supported for safetensors"):
-        resolve_output_destination(
-            OutputSpec(path=tmp_path / "out.pt", format="torch", shard="1KB"),
+        _resolve_output_destination(
+            _OutputSpec(path=tmp_path / "out.pt", format="torch", shard="1KB"),
             default_shard_size="none",
         )
     with pytest.raises(RuntimeError, match="only supported for safetensors"):
-        resolve_output_destination(
-            OutputSpec(path=tmp_path / "dcp_out", format="dcp", shard="1KB"),
+        _resolve_output_destination(
+            _OutputSpec(path=tmp_path / "dcp_out", format="dcp", shard="1KB"),
             default_shard_size="none",
         )
 
     dir_style = tmp_path / "dirstyle"
-    assert resolve_output_destination(
-        OutputSpec(path=dir_style, format="safetensors"),
+    assert _resolve_output_destination(
+        _OutputSpec(path=dir_style, format="safetensors"),
         default_shard_size="none",
     ) == (dir_style / "model.safetensors", "safetensors", None)
 
     with pytest.raises(RuntimeError, match="requires a .pt, .pth, or .bin"):
-        resolve_output_destination(
-            OutputSpec(path=tmp_path / "out.safetensors", format="torch"),
+        _resolve_output_destination(
+            _OutputSpec(path=tmp_path / "out.safetensors", format="torch"),
             default_shard_size="none",
         )
 
@@ -217,4 +207,4 @@ def test_output_paths_additional_branches(tmp_path: Path) -> None:
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    assert resolve_sharded_output_directory(out_dir, out_dir / "model.safetensors") == out_dir
+    assert _resolve_sharded_output_directory(out_dir, out_dir / "model.safetensors") == out_dir

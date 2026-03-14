@@ -8,7 +8,6 @@ import torch
 from brainsurgery.core import TransformError
 from brainsurgery.transforms.cast import CastTransform
 
-
 def test_cast_compile_rejects_unknown_dtype() -> None:
     with pytest.raises(TransformError, match="cast.dtype"):
         CastTransform().compile(
@@ -16,11 +15,9 @@ def test_cast_compile_rejects_unknown_dtype() -> None:
             default_model="model",
         )
 
-
 def test_cast_compile_requires_dtype_key() -> None:
     with pytest.raises(TransformError, match="cast.dtype is required"):
         CastTransform().compile({"from": "x", "to": "y"}, default_model="model")
-
 
 def test_cast_compile_rejects_sliced_destination() -> None:
     with pytest.raises(TransformError, match="destination must not be sliced"):
@@ -28,7 +25,6 @@ def test_cast_compile_rejects_sliced_destination() -> None:
             {"from": "x", "to": "y::[:]", "dtype": "float16"},
             default_model="model",
         )
-
 
 def test_cast_apply_creates_new_tensor_with_new_dtype(
     single_model_provider: Callable[[dict[str, torch.Tensor], str], object]
@@ -44,7 +40,6 @@ def test_cast_apply_creates_new_tensor_with_new_dtype(
 
     assert provider.state_dict["x"].dtype == torch.float32
     assert provider.state_dict["y"].dtype == torch.float16
-
 
 def test_cast_apply_honors_source_slice(
     single_model_provider: Callable[[dict[str, torch.Tensor], str], object]

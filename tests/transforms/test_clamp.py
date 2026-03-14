@@ -5,7 +5,6 @@ import torch
 _module = import_module("brainsurgery.transforms.clamp")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
-
 def test_clamp_compile_requires_bound() -> None:
     try:
         ClampTransform().compile({"from": "x", "to": "y"}, default_model="m")
@@ -13,7 +12,6 @@ def test_clamp_compile_requires_bound() -> None:
         assert "at least one of: min, max" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected clamp min/max validation error")
-
 
 def test_clamp_apply_success() -> None:
     class _Provider:

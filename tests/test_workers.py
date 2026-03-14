@@ -4,22 +4,19 @@ from dataclasses import dataclass
 
 import pytest
 
-from brainsurgery.engine.workers import choose_num_io_workers, run_threadpool_tasks_with_progress
-
+from brainsurgery.engine.workers import _choose_num_io_workers, _run_threadpool_tasks_with_progress
 
 def test_choose_num_io_workers_validates_inputs() -> None:
     with pytest.raises(ValueError, match="num_items"):
-        choose_num_io_workers(-1, 1)
+        _choose_num_io_workers(-1, 1)
     with pytest.raises(ValueError, match="max_io_workers"):
-        choose_num_io_workers(1, 0)
-
+        _choose_num_io_workers(1, 0)
 
 def test_choose_num_io_workers_bounds_to_items() -> None:
-    assert choose_num_io_workers(0, 8) == 1
-    assert choose_num_io_workers(1, 8) == 1
-    assert choose_num_io_workers(4, 8) == 4
-    assert choose_num_io_workers(8, 4) == 4
-
+    assert _choose_num_io_workers(0, 8) == 1
+    assert _choose_num_io_workers(1, 8) == 1
+    assert _choose_num_io_workers(4, 8) == 4
+    assert _choose_num_io_workers(8, 4) == 4
 
 @dataclass
 class _Progress:
@@ -36,7 +33,6 @@ class _Progress:
     def close(self) -> None:
         self.closed = True
 
-
 def test_run_threadpool_tasks_with_progress_reports_results() -> None:
     progress_items: list[_Progress] = []
     seen_results: list[tuple[int, int]] = []
@@ -46,7 +42,7 @@ def test_run_threadpool_tasks_with_progress_reports_results() -> None:
         progress_items.append(progress)
         return progress
 
-    run_threadpool_tasks_with_progress(
+    _run_threadpool_tasks_with_progress(
         items=[1, 2, 3],
         worker=lambda item: item * 2,
         num_workers=2,

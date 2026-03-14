@@ -1,14 +1,14 @@
 from importlib import import_module
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 _module = import_module("brainsurgery.transforms.save")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 from pathlib import Path
 
 import pytest
 import torch
-from brainsurgery.engine import InMemoryStateDict
-from brainsurgery.core import TensorRef
 
+from brainsurgery.core import TensorRef
 
 def test_save_compile_defaults_to_default_model() -> None:
     spec = SaveTransform().compile({"path": "/tmp/x.safetensors"}, default_model="model")
@@ -16,7 +16,6 @@ def test_save_compile_defaults_to_default_model() -> None:
     assert spec.format is None
     assert spec.tensor_name is None
     assert spec.shard_size is None
-
 
 def test_save_compile_rejects_tensor_format_for_state_dict() -> None:
     try:
@@ -29,7 +28,6 @@ def test_save_compile_rejects_tensor_format_for_state_dict() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected save.format validation error")
 
-
 def test_save_compile_rejects_alias_conflict() -> None:
     try:
         SaveTransform().compile(
@@ -41,7 +39,6 @@ def test_save_compile_rejects_alias_conflict() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected alias conflict error")
 
-
 def test_save_compile_rejects_shard_for_tensor_save() -> None:
     try:
         SaveTransform().compile(
@@ -52,7 +49,6 @@ def test_save_compile_rejects_shard_for_tensor_save() -> None:
         assert "state_dict save" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected save.shard validation error")
-
 
 def test_save_compile_additional_validation_paths() -> None:
     spec = SaveTransform().compile("/tmp/x.safetensors", default_model="model")
@@ -86,14 +82,13 @@ def test_save_compile_additional_validation_paths() -> None:
             default_model="model",
         )
 
-
 def test_save_apply_and_helper_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Provider:
         def __init__(self) -> None:
-            self.sd = InMemoryStateDict()
+            self.sd = _InMemoryStateDict()
             self.sd["x"] = torch.ones(1)
 
-        def get_state_dict(self, model: str) -> InMemoryStateDict:
+        def get_state_dict(self, model: str) -> _InMemoryStateDict:
             del model
             return self.sd
 

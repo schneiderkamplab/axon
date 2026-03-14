@@ -5,24 +5,22 @@ import torch
 
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-from brainsurgery.engine import InMemoryStateDict
+
 from brainsurgery.core import TransformError
 
-
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 class _Provider:
-    def __init__(self, state_dicts: dict[str, InMemoryStateDict]) -> None:
+    def __init__(self, state_dicts: dict[str, _InMemoryStateDict]) -> None:
         self._state_dicts = state_dicts
 
-    def get_state_dict(self, model: str) -> InMemoryStateDict:
+    def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self._state_dicts[model]
 
-
-def _make_state_dict(values: dict[str, torch.Tensor]) -> InMemoryStateDict:
-    sd = InMemoryStateDict()
+def _make_state_dict(values: dict[str, torch.Tensor]) -> _InMemoryStateDict:
+    sd = _InMemoryStateDict()
     for key, tensor in values.items():
         sd[key] = tensor
     return sd
-
 
 def test_split_and_concat_roundtrip() -> None:
     raw = {
@@ -43,7 +41,6 @@ def test_split_and_concat_roundtrip() -> None:
     assert len(executed) == 2
     model_sd = provider.get_state_dict("model")
     assert torch.equal(model_sd["x_rebuilt"], model_sd["x"])
-
 
 def test_matmul_creates_destination() -> None:
     raw = {
@@ -74,7 +71,6 @@ def test_matmul_creates_destination() -> None:
         provider.get_state_dict("model")["out"],
         torch.tensor([[50.0], [110.0]], dtype=torch.float32),
     )
-
 
 def test_permute_reshape_and_reshape_in_place() -> None:
     raw = {
@@ -107,7 +103,6 @@ def test_permute_reshape_and_reshape_in_place() -> None:
     assert model_sd["flat"].shape == (6,)
     assert model_sd["x"].shape == (3, 2)
 
-
 def test_fill_modes_and_clamp_variants() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -136,7 +131,6 @@ def test_fill_modes_and_clamp_variants() -> None:
     assert torch.equal(model_sd["rand_a"], model_sd["rand_b"])
     assert torch.equal(model_sd["const_clamped"], torch.tensor([2.0, 2.0], dtype=torch.float32))
     assert torch.equal(model_sd["x"], torch.tensor([1.0, -1.0], dtype=torch.float32))
-
 
 def test_split_rejects_size_mismatch() -> None:
     raw = {

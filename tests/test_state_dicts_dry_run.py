@@ -3,13 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.engine import ArenaStateDict, InMemoryStateDict, reset_runtime_flags, set_runtime_flag
-from brainsurgery.engine.arena import SegmentedFileBackedArena
+from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine.arena import _SegmentedFileBackedArena
 
-
+from brainsurgery.engine.state_dicts import _ArenaStateDict
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 def test_inmemory_dry_run_overlay_paths() -> None:
     reset_runtime_flags()
-    sd = InMemoryStateDict()
+    sd = _InMemoryStateDict()
     sd["x"] = torch.tensor([1.0])
 
     set_runtime_flag("dry_run", True)
@@ -42,11 +43,10 @@ def test_inmemory_dry_run_overlay_paths() -> None:
     assert "y" not in sd
     assert "z" not in sd
 
-
 def test_arena_dry_run_overlay_paths(tmp_path) -> None:
     reset_runtime_flags()
-    arena = SegmentedFileBackedArena(tmp_path, segment_size_bytes=1024, alignment=16)
-    sd = ArenaStateDict(arena)
+    arena = _SegmentedFileBackedArena(tmp_path, segment_size_bytes=1024, alignment=16)
+    sd = _ArenaStateDict(arena)
     sd["x"] = torch.tensor([1.0])
 
     set_runtime_flag("dry_run", True)

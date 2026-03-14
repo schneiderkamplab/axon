@@ -5,7 +5,6 @@ from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 
 module = import_module("brainsurgery.engine.verbosity")
 
-
 def test_emit_verbose_ternary_and_event_without_detail(capsys) -> None:
     reset_runtime_flags()
     set_runtime_flag("verbose", True)
@@ -31,7 +30,6 @@ def test_emit_verbose_ternary_and_event_without_detail(capsys) -> None:
     assert "exit" in out
 
     reset_runtime_flags()
-
 
 def test_emit_verbose_helpers_prefix_dry_run(capsys) -> None:
     reset_runtime_flags()

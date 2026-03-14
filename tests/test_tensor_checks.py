@@ -3,7 +3,6 @@ import torch
 from brainsurgery.core.validation import require_same_shape_dtype_device, require_same_shape_dtype_device3
 from brainsurgery.core import TransformError
 
-
 def test_require_same_shape_dtype_device_accepts_matching_tensors() -> None:
     left = torch.ones((2,), dtype=torch.float32)
     right = torch.ones((2,), dtype=torch.float32)
@@ -14,7 +13,6 @@ def test_require_same_shape_dtype_device_accepts_matching_tensors() -> None:
         left_name="a",
         right_name="b",
     )
-
 
 def test_require_same_shape_dtype_device3_rejects_shape_mismatch() -> None:
     try:

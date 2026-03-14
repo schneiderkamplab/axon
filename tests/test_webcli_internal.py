@@ -12,16 +12,14 @@ import typer
 from brainsurgery.engine import ProviderError
 import brainsurgery.webcli.cli as webcli_cli
 import brainsurgery.webcli.handler as webcli_handler
-from brainsurgery.webcli.models import WebRunResult
+from brainsurgery.webcli.models import _WebRunResult
 import brainsurgery.webcli.runner as webcli_runner
 import brainsurgery.webcli.server as webcli_server
-
 
 def test_webcli_configure_logging_and_bad_level() -> None:
     webcli_cli.configure_logging("debug")
     with pytest.raises(typer.BadParameter):
         webcli_cli.configure_logging("bogus")
-
 
 def test_webcli_callback_handles_browser_error_and_wildcard_host(monkeypatch: pytest.MonkeyPatch) -> None:
     served: list[tuple[str, int]] = []
@@ -32,14 +30,12 @@ def test_webcli_callback_handles_browser_error_and_wildcard_host(monkeypatch: py
         raise RuntimeError("browser failed")
 
     monkeypatch.setattr(webcli_cli.webbrowser, "open", _boom)
-    monkeypatch.setattr(webcli_cli, "serve_webcli", lambda *, host, port: served.append((host, port)))
+    monkeypatch.setattr(webcli_cli, "_serve_webcli", lambda *, host, port: served.append((host, port)))
     webcli_cli.webcli(host="0.0.0.0", port=8123, log_level="info", open_browser=True)
     assert served == [("0.0.0.0", 8123)]
 
-
 def _make_handler_for_read() -> type:
-    return webcli_handler.handler_factory()
-
+    return webcli_handler._handler_factory()
 
 def test_webcli_handler_read_json_body_validation() -> None:
     handler_cls = _make_handler_for_read()
@@ -60,7 +56,6 @@ def test_webcli_handler_read_json_body_validation() -> None:
     valid.headers = {"Content-Length": "8"}
     valid.rfile = io.BytesIO(b'{"x": 1}')
     assert handler_cls._read_json_body(valid) == {"x": 1}
-
 
 def test_webcli_handler_send_helpers_and_log_message(monkeypatch: pytest.MonkeyPatch) -> None:
     handler_cls = _make_handler_for_read()
@@ -84,7 +79,6 @@ def test_webcli_handler_send_helpers_and_log_message(monkeypatch: pytest.MonkeyP
     handler_cls.log_message(h, "hello %s", "world")
     assert seen and seen[0] == "webcli request: hello world"
 
-
 def test_webcli_handler_do_get_and_post_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     handler_cls = _make_handler_for_read()
     h = object.__new__(handler_cls)
@@ -99,8 +93,8 @@ def test_webcli_handler_do_get_and_post_paths(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         webcli_handler,
-        "run_web_plan",
-        lambda **_kwargs: WebRunResult(
+        "_run_web_plan",
+        lambda **_kwargs: _WebRunResult(
             ok=True,
             logs=["a"],
             output_lines=["b"],
@@ -127,7 +121,6 @@ def test_webcli_handler_do_get_and_post_paths(monkeypatch: pytest.MonkeyPatch) -
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is True
 
-
 @pytest.mark.parametrize(
     ("exc", "needle"),
     [
@@ -147,13 +140,12 @@ def test_webcli_handler_do_post_error_branches(
     h.path = "/api/run"
     h._send_json = lambda payload, status=200: h._json.append((status, payload))
     h._read_json_body = lambda: {"plan_yaml": "{}"}
-    monkeypatch.setattr(webcli_handler, "run_web_plan", lambda **_kwargs: (_ for _ in ()).throw(exc))
+    monkeypatch.setattr(webcli_handler, "_run_web_plan", lambda **_kwargs: (_ for _ in ()).throw(exc))
     handler_cls.do_POST(h)
     assert h._json
     payload = h._json[-1][1]
     assert payload["ok"] is False
     assert needle in payload["error"]
-
 
 def test_webcli_handler_cast_helpers() -> None:
     assert webcli_handler._as_string("x", "k") == "x"
@@ -163,11 +155,10 @@ def test_webcli_handler_cast_helpers() -> None:
     with pytest.raises(ValueError):
         webcli_handler._as_int(True, "k")
 
-
 def test_webcli_runner_configure_logging_and_list_log_handler() -> None:
-    webcli_runner.configure_logging(log_level="info")
+    webcli_runner._configure_logging(log_level="info")
     with pytest.raises(ValueError):
-        webcli_runner.configure_logging(log_level="bad")
+        webcli_runner._configure_logging(log_level="bad")
 
     sink: list[str] = []
     h = webcli_runner._ListLogHandler(sink)
@@ -175,10 +166,9 @@ def test_webcli_runner_configure_logging_and_list_log_handler() -> None:
     h.emit(logging.LogRecord("x", logging.INFO, __file__, 1, "hello", (), None))
     assert sink == ["hello"]
 
-
 def test_webcli_runner_rejects_non_mapping_yaml() -> None:
     with pytest.raises(ValueError, match="root must be a mapping"):
-        webcli_runner.run_web_plan(
+        webcli_runner._run_web_plan(
             plan_yaml="- x\n",
             shard_size="5GB",
             num_workers=1,
@@ -188,7 +178,6 @@ def test_webcli_runner_rejects_non_mapping_yaml() -> None:
             summarize=True,
             log_level="info",
         )
-
 
 def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _FakeProvider:
@@ -210,7 +199,7 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
             self.output = output
 
     fake_provider = _FakeProvider()
-    monkeypatch.setattr(webcli_runner, "configure_logging", lambda *, log_level: None)
+    monkeypatch.setattr(webcli_runner, "_configure_logging", lambda *, log_level: None)
     monkeypatch.setattr(webcli_runner, "compile_plan", lambda raw: _FakePlan(output=raw.get("output")))
     monkeypatch.setattr(webcli_runner, "create_state_dict_provider", lambda **_kwargs: fake_provider)
     monkeypatch.setattr(webcli_runner, "normalize_transform_specs", lambda _t: [])
@@ -227,7 +216,7 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setattr(webcli_runner, "use_output_emitter", lambda _sink: _Ctx())
     monkeypatch.setattr(webcli_runner, "get_runtime_flags", lambda: SimpleNamespace(dry_run=True))
 
-    res_no_output = webcli_runner.run_web_plan(
+    res_no_output = webcli_runner._run_web_plan(
         plan_yaml="{}",
         shard_size="5GB",
         num_workers=2,
@@ -244,7 +233,7 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     fake_provider2 = _FakeProvider()
     monkeypatch.setattr(webcli_runner, "create_state_dict_provider", lambda **_kwargs: fake_provider2)
     monkeypatch.setattr(webcli_runner, "get_runtime_flags", lambda: SimpleNamespace(dry_run=False))
-    res_save = webcli_runner.run_web_plan(
+    res_save = webcli_runner._run_web_plan(
         plan_yaml="output: model::/tmp/out\n",
         shard_size="1GB",
         num_workers=3,
@@ -261,7 +250,7 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     fake_provider3 = _FakeProvider()
     monkeypatch.setattr(webcli_runner, "create_state_dict_provider", lambda **_kwargs: fake_provider3)
     monkeypatch.setattr(webcli_runner, "get_runtime_flags", lambda: SimpleNamespace(dry_run=True))
-    res_dry = webcli_runner.run_web_plan(
+    res_dry = webcli_runner._run_web_plan(
         plan_yaml="output: model::/tmp/out\n",
         shard_size="1GB",
         num_workers=3,
@@ -275,7 +264,7 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
     fake_provider4 = _FakeProvider()
     monkeypatch.setattr(webcli_runner, "create_state_dict_provider", lambda **_kwargs: fake_provider4)
-    res_null = webcli_runner.run_web_plan(
+    res_null = webcli_runner._run_web_plan(
         plan_yaml="null\n",
         shard_size="1GB",
         num_workers=3,
@@ -286,7 +275,6 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
         log_level="info",
     )
     assert res_null.ok is True
-
 
 def test_webcli_server_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
@@ -304,6 +292,6 @@ def test_webcli_server_loop(monkeypatch: pytest.MonkeyPatch) -> None:
             events.append("close")
 
     monkeypatch.setattr(webcli_server, "ThreadingHTTPServer", _Server)
-    monkeypatch.setattr(webcli_server, "handler_factory", lambda: object)
-    webcli_server.serve_webcli(host="127.0.0.1", port=9001)
+    monkeypatch.setattr(webcli_server, "_handler_factory", lambda: object)
+    webcli_server._serve_webcli(host="127.0.0.1", port=9001)
     assert events == ["serve", "close"]

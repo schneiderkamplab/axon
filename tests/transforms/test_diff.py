@@ -2,22 +2,19 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.engine import InMemoryStateDict
-
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 _module = import_module("brainsurgery.transforms.diff")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
-
 
 class _Provider:
     def __init__(self) -> None:
         self._state_dicts = {
-            "base": InMemoryStateDict(),
-            "edited": InMemoryStateDict(),
+            "base": _InMemoryStateDict(),
+            "edited": _InMemoryStateDict(),
         }
 
-    def get_state_dict(self, model: str) -> InMemoryStateDict:
+    def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self._state_dicts[model]
-
 
 def test_diff_compile_refs_mode() -> None:
     spec = DiffTransform().compile(
@@ -30,7 +27,6 @@ def test_diff_compile_refs_mode() -> None:
     assert spec.right_ref.model == "edited"
     assert spec.eps == 1e-6
 
-
 def test_diff_compile_alias_mode() -> None:
     spec = DiffTransform().compile(
         {"mode": "aliases", "left_alias": "base", "right_alias": "edited"},
@@ -40,7 +36,6 @@ def test_diff_compile_alias_mode() -> None:
     assert spec.mode == "aliases"
     assert spec.left_ref == TensorRef(model="base", expr=".*")
     assert spec.right_ref == TensorRef(model="edited", expr=".*")
-
 
 def test_diff_compile_rejects_wrong_keys_for_alias_mode() -> None:
     try:
@@ -53,7 +48,6 @@ def test_diff_compile_rejects_wrong_keys_for_alias_mode() -> None:
         assert "unknown keys for this mode" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected alias-mode key validation error")
-
 
 def test_diff_apply_reports_missing_and_differing(capsys) -> None:
     provider = _Provider()
@@ -78,7 +72,6 @@ def test_diff_apply_reports_missing_and_differing(capsys) -> None:
     assert "  - shape: shape (2,) != (1, 2)\n" in output
     assert "  - dtype: dtype torch.float32 != torch.float16\n" in output
     assert "  - value: values differ\n" in output
-
 
 def test_diff_apply_alias_mode_uses_all_tensors_and_eps(capsys) -> None:
     provider = _Provider()

@@ -14,17 +14,15 @@ from brainsurgery.cli.config import (
     deep_merge_lists,
     is_yaml_file_arg,
     is_yaml_like_arg,
-    load_cli_config,
+    _load_cli_config,
     parse_override_path,
     parse_override_value,
 )
-
 
 def test_parse_override_path_and_value_support_nested_structures() -> None:
     assert parse_override_path("a.b[2].c") == ["a", "b", 2, "c"]
     assert parse_override_value("3") == "3"
     assert parse_override_value("[1, 2]") == "[1, 2]"
-
 
 def test_build_override_fragment_and_apply_override_merge_recursively() -> None:
     fragment = build_override_fragment(["a", "b", 1], 5)
@@ -38,19 +36,16 @@ def test_build_override_fragment_and_apply_override_merge_recursively() -> None:
     }
     assert deep_merge_dicts({"a": 1}, {"a": 2}) == {"a": 2}
 
-
 def test_load_cli_config_merges_yaml_and_overrides(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("a:\n  b: 1\nitems:\n  - x\n", encoding="utf-8")
 
-    loaded = load_cli_config([str(config_path), "a.c=2", "items[1]=y"])
+    loaded = _load_cli_config([str(config_path), "a.c=2", "items[1]=y"])
     assert loaded == {"a": {"b": 1, "c": "2"}, "items": ["x", "y"]}
-
 
 def test_load_cli_config_rejects_missing_yaml_like_file() -> None:
     with pytest.raises(typer.BadParameter, match="does not exist"):
-        load_cli_config(["missing.yaml"])
-
+        _load_cli_config(["missing.yaml"])
 
 def test_parse_override_path_rejects_invalid_paths() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
@@ -60,18 +55,15 @@ def test_parse_override_path_rejects_invalid_paths() -> None:
     with pytest.raises(ValueError, match="invalid override path syntax"):
         parse_override_path("a b")
 
-
 def test_apply_override_rejects_missing_equals_and_top_level_list_fragment() -> None:
     with pytest.raises(ValueError, match="key=value"):
         apply_override({}, "x")
     with pytest.raises(ValueError, match="top-level override must produce a mapping"):
         apply_override({}, "[0]=x")
 
-
 def test_deep_merge_lists_covers_nested_list_and_none_fill() -> None:
     assert deep_merge_lists([1, [10, 11]], [None, [20]]) == [1, [20, 11]]
     assert deep_merge_lists([], [None, None]) == [None, None]
-
 
 def test_parse_override_value_falls_back_on_parse_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -88,7 +80,6 @@ def test_parse_override_value_falls_back_on_parse_failure(monkeypatch: pytest.Mo
     )
     assert parse_override_value("x") == "x"
 
-
 def test_parse_override_value_returns_raw_when_container_not_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         config_module,
@@ -104,14 +95,12 @@ def test_parse_override_value_returns_raw_when_container_not_mapping(monkeypatch
     )
     assert parse_override_value("x") == "x"
 
-
 def test_yaml_arg_helpers(tmp_path: Path) -> None:
     file_path = tmp_path / "a.yaml"
     file_path.write_text("x: 1\n", encoding="utf-8")
     assert is_yaml_file_arg(str(file_path)) is True
     assert is_yaml_file_arg(str(tmp_path / "missing.yaml")) is False
     assert is_yaml_like_arg("x.yml") is True
-
 
 def test_load_cli_config_handles_empty_and_non_mapping_yaml(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     empty_path = tmp_path / "empty.yaml"
@@ -138,11 +127,10 @@ def test_load_cli_config_handles_empty_and_non_mapping_yaml(monkeypatch: pytest.
     monkeypatch.setattr(config_module.OmegaConf, "load", _fake_load)
     monkeypatch.setattr(config_module.OmegaConf, "to_container", _fake_to_container)
 
-    assert load_cli_config([str(empty_path)]) == {}
+    assert _load_cli_config([str(empty_path)]) == {}
     with pytest.raises(typer.BadParameter, match="must contain a mapping"):
-        load_cli_config([str(bad_path)])
-
+        _load_cli_config([str(bad_path)])
 
 def test_load_cli_config_wraps_invalid_override_errors() -> None:
     with pytest.raises(typer.BadParameter, match="Invalid override"):
-        load_cli_config(["a..b=1"])
+        _load_cli_config(["a..b=1"])

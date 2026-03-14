@@ -5,9 +5,8 @@ from pathlib import Path
 import pytest
 
 from brainsurgery.engine.arena import ProviderError
-from brainsurgery.engine import InMemoryStateDictProvider
 
-
+from brainsurgery.engine.providers import InMemoryStateDictProvider
 def test_get_state_dict_rejects_unknown_model_alias(tmp_path: Path) -> None:
     provider = InMemoryStateDictProvider({"known": tmp_path / "model.safetensors"}, max_io_workers=1)
     with pytest.raises(ProviderError, match="unknown model alias"):

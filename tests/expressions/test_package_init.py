@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pkgutil
 import pytest
 
-
 def test_expressions_package_skips_private_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(

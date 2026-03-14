@@ -8,7 +8,6 @@ from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.execution import execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
-
 @pytest.fixture
 def gpt_model_path() -> Path:
     repo_root = Path(__file__).resolve().parents[1]
@@ -21,7 +20,6 @@ def gpt_model_path() -> Path:
             return candidate
     pytest.skip("missing models/gpt/model.safetensors (or models/gpt2/model.safetensors)")
 
-
 def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dict[str, object]]]:
     plan = compile_plan(raw_plan)
     return execute_transform_pairs(
@@ -29,7 +27,6 @@ def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dic
         provider,
         interactive=False,
     )
-
 
 def test_gpt_hf_style_rename_roundtrip_and_diff_no_changes(
     gpt_model_path: Path,
@@ -119,7 +116,6 @@ def test_gpt_hf_style_rename_roundtrip_and_diff_no_changes(
     assert "Missing on left:\n  (none)\n" in output
     assert "Missing on right:\n  (none)\n" in output
     assert "Differing:\n  (none)\n" in output
-
 
 def test_gpt_reversible_add_and_scale_roundtrip_has_no_diff(
     gpt_model_path: Path,

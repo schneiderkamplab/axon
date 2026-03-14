@@ -6,7 +6,6 @@ import pytest
 
 from brainsurgery.engine.plan import PlanLoaderError, compile_plan
 
-
 def test_compile_plan_allows_missing_inputs_for_non_tensor_transforms_and_load() -> None:
     plan = compile_plan(
         {
@@ -21,18 +20,15 @@ def test_compile_plan_allows_missing_inputs_for_non_tensor_transforms_and_load()
     assert plan.inputs == {}
     assert len(plan.transforms) == 4
 
-
 def test_compile_plan_allows_empty_inputs_list() -> None:
     plan = compile_plan({"inputs": [], "transforms": [{"help": {}}]})
     assert plan.inputs == {}
     assert len(plan.transforms) == 1
 
-
 def test_compile_plan_allows_missing_transforms() -> None:
     plan = compile_plan({"inputs": ["model::/tmp/model.safetensors"]})
     assert plan.inputs == {"model": Path("/tmp/model.safetensors")}
     assert plan.transforms == []
-
 
 def test_compile_plan_rejects_non_basic_transform_without_inputs() -> None:
     with pytest.raises(PlanLoaderError, match="missing model alias in reference"):
@@ -43,7 +39,6 @@ def test_compile_plan_rejects_non_basic_transform_without_inputs() -> None:
                 ]
             }
         )
-
 
 @pytest.mark.parametrize(
     ("inputs", "output"),

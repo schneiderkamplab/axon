@@ -6,7 +6,6 @@ import pytest
 
 from brainsurgery.core.completion import complete_filesystem_paths
 
-
 def test_complete_filesystem_paths_quotes_and_filters(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x")
     (tmp_path / "adir").mkdir()
@@ -14,7 +13,6 @@ def test_complete_filesystem_paths_quotes_and_filters(tmp_path: Path) -> None:
     assert any(item.startswith("'") for item in out)
     assert any(item.endswith("a.txt") for item in out)
     assert any(item.endswith("adir/") for item in out)
-
 
 def test_complete_filesystem_paths_include_switches_and_limit(tmp_path: Path) -> None:
     for idx in range(5):
@@ -31,7 +29,6 @@ def test_complete_filesystem_paths_include_switches_and_limit(tmp_path: Path) ->
     missing = complete_filesystem_paths(f"{tmp_path.as_posix()}/does-not-exist/")
     assert missing == []
 
-
 def test_complete_filesystem_paths_handles_os_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _BadBase:
         def exists(self) -> bool:
@@ -45,7 +42,6 @@ def test_complete_filesystem_paths_handles_os_errors(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr("brainsurgery.core.completion.Path", lambda *_args, **_kwargs: _BadBase())  # type: ignore[misc]
     assert complete_filesystem_paths("x") == []
-
 
 def test_complete_filesystem_paths_entry_filtering_and_entry_is_dir_errors(
     monkeypatch: pytest.MonkeyPatch,
