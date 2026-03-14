@@ -9,7 +9,7 @@ import torch
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.checkpoint_io import _load_state_dict_from_path
@@ -65,7 +65,7 @@ def test_load_state_dict_then_save_state_dict(provider_name: str, tmp_path: Path
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -106,7 +106,7 @@ def test_yaml_plan_accepts_dcp_directory_in_inputs_default_model(provider_name: 
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -146,7 +146,7 @@ def test_yaml_plan_accepts_dcp_directory_in_inputs_with_alias(provider_name: str
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -187,7 +187,7 @@ def test_save_state_dict_as_dcp_directory(provider_name: str, tmp_path: Path) ->
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -225,7 +225,7 @@ def test_output_writes_dcp_directory(tmp_path: Path) -> None:
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -272,7 +272,7 @@ def test_load_tensor_npy_then_save_tensor_npy(provider_name: str, tmp_path: Path
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -311,7 +311,7 @@ def test_save_requires_alias_when_multiple_models(tmp_path: Path) -> None:
     )
     try:
         with pytest.raises(RuntimeError, match="save.alias is required"):
-            execute_transform_pairs(
+            _execute_transform_pairs(
                 zip(raw["transforms"], plan.transforms, strict=False),
                 provider,
                 interactive=False,
@@ -339,7 +339,7 @@ def test_save_default_format_is_safetensors(tmp_path: Path) -> None:
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -380,7 +380,7 @@ def test_save_state_dict_sharded_writes_index(provider_name: str, tmp_path: Path
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -464,7 +464,7 @@ def test_save_shard_uses_provider_max_io_workers(monkeypatch: pytest.MonkeyPatch
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,

@@ -16,7 +16,7 @@ from brainsurgery.core import CompiledTransform, TransformError
 
 from brainsurgery.engine.arena import ArenaSegment, ProviderError, _SegmentedFileBackedArena, torch_element_size
 from brainsurgery.engine.output_model import _infer_output_model
-from brainsurgery.engine.plan import _OutputSpec, _SurgeryPlan, parse_output
+from brainsurgery.engine.plan import _OutputSpec, PlanStep, SurgeryPlan, parse_output
 from brainsurgery.engine.render import _shape_only, render_tree, summarize_tensor
 from brainsurgery.engine.state_dicts import _ArenaStateDict
 
@@ -56,15 +56,21 @@ class _FallbackTransform(_Transform):
         del spec
         raise TransformError("fallback needed")
 
+
+def _plan_with(compiled: list[CompiledTransform], *, output: _OutputSpec | None = None) -> SurgeryPlan:
+    return SurgeryPlan(
+        inputs={},
+        output=output,
+        steps=[PlanStep(raw={}, compiled=item) for item in compiled],
+    )
+
 def test_engine_output_model_uncovered_paths() -> None:
     provider = _OutputModelProvider()
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[
+    plan = _plan_with(
+        [
             CompiledTransform(_Transform(), _Spec("model")),
             CompiledTransform(_Transform(), _Spec("other")),
-        ],
+        ]
     )
     assert _infer_output_model(plan, provider) == "model"
 
@@ -73,7 +79,7 @@ def test_engine_output_model_uncovered_paths() -> None:
 
     with pytest.raises(TransformError, match="fallback needed"):
         _infer_output_model(
-            _SurgeryPlan(inputs={}, output=None, transforms=[CompiledTransform(_FallbackTransform(), _BadSpec())]),
+            _plan_with([CompiledTransform(_FallbackTransform(), _BadSpec())]),
             provider,
         )
 
@@ -85,11 +91,7 @@ def test_engine_output_model_uncovered_paths() -> None:
     provider.state_dicts["other"]["w"] = torch.ones(1)
     with pytest.raises(TransformError, match="fallback needed"):
         _infer_output_model(
-            _SurgeryPlan(
-                inputs={},
-                output=None,
-                transforms=[CompiledTransform(_FallbackTransform(), _TwoModelsSpec())],
-            ),
+            _plan_with([CompiledTransform(_FallbackTransform(), _TwoModelsSpec())]),
             provider,
         )
 
@@ -233,7 +235,7 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
         base.load_alias_from_path("x", tmp_path / "m.safetensors")
 
     with pytest.raises(ProviderError, match="save_output requires plan.output"):
-        base.save_output(_SurgeryPlan(inputs={}, output=None, transforms=[]), default_shard_size="1MB", max_io_workers=1)
+        base.save_output(SurgeryPlan(inputs={}, output=None), default_shard_size="1MB", max_io_workers=1)
 
     class _P(providers_module.BaseStateDictProvider):
         def get_state_dict(self, model: str):
@@ -257,7 +259,7 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
         lambda state_dict, **kwargs: kwargs["output_path"],
     )
     written = p.save_output(
-        _SurgeryPlan(inputs={}, output=_OutputSpec(path=tmp_path / "out"), transforms=[]),
+        SurgeryPlan(inputs={}, output=_OutputSpec(path=tmp_path / "out")),
         default_shard_size="1MB",
         max_io_workers=1,
     )

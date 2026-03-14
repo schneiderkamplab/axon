@@ -10,7 +10,7 @@ import torch
 
 from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.transforms.copy import CopyTransform
 
@@ -164,7 +164,7 @@ def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
         baseline_keys = set(loaded.keys())
 
         reset_runtime_flags()
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,

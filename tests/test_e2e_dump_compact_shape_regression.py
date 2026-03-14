@@ -7,7 +7,7 @@ import torch
 
 import brainsurgery.transforms.dump as dump_module
 
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
@@ -188,7 +188,7 @@ def test_e2e_multi_transform_dump_compact_shape_regression(
     plan = compile_plan(raw)
     monkeypatch.setattr(dump_module, "tqdm", lambda iterable, **_: iterable)
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         _Provider(case.state_dict),
         interactive=False,

@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
-from brainsurgery.engine.plan import _SurgeryPlan
+from brainsurgery.engine.plan import PlanStep, SurgeryPlan
 
 from brainsurgery.core import (
     TransformError,
@@ -76,6 +76,14 @@ class _SpecBadCollect:
     def collect_models(self) -> list[str]:
         return ["model"]
 
+
+def _plan_with(compiled: list[CompiledTransform]) -> SurgeryPlan:
+    return SurgeryPlan(
+        inputs={},
+        output=None,
+        steps=[PlanStep(raw={}, compiled=item) for item in compiled],
+    )
+
 def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
     original_registry = dict(REGISTRY)
     REGISTRY.clear()
@@ -93,18 +101,12 @@ def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
         REGISTRY.update(original_registry)
 
 def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
-    )
+    plan = _plan_with([CompiledTransform(_FallbackTransform(), _Spec("model"))])
     assert _infer_output_model(plan, _Provider()) == "model"
 
 def test_infer_output_model_skips_non_contributing_transforms() -> None:
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[
+    plan = _plan_with(
+        [
             CompiledTransform(HelpTransform(), HelpTransform().compile("copy", default_model=None)),
             CompiledTransform(
                 SaveTransform(),
@@ -114,49 +116,35 @@ def test_infer_output_model_skips_non_contributing_transforms() -> None:
                 CopyTransform(),
                 CopyTransform().compile({"from": "model::w", "to": "model::w_copy"}, default_model=None),
             ),
-        ],
+        ]
     )
 
     assert _infer_output_model(plan, _Provider()) == "model"
 
 def test_infer_output_model_raises_when_no_destination_model() -> None:
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[CompiledTransform(HelpTransform(), HelpTransform().compile({}, default_model=None))],
-    )
+    plan = _plan_with([CompiledTransform(HelpTransform(), HelpTransform().compile({}, default_model=None))])
     with pytest.raises(TransformError, match="cannot infer output model uniquely"):
         _infer_output_model(plan, _Provider())
 
 def test_infer_output_model_raises_when_multiple_destination_models() -> None:
     provider = _Provider()
     provider.state_dicts["other"]["w"] = torch.ones(1)
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[
+    plan = _plan_with(
+        [
             CompiledTransform(_Transform(), _Spec("model")),
             CompiledTransform(_Transform(), _Spec("other")),
-        ],
+        ]
     )
     with pytest.raises(TransformError, match="cannot infer output model uniquely"):
         _infer_output_model(plan, provider)
 
 def test_infer_output_model_fallback_requires_provider() -> None:
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[CompiledTransform(_FallbackTransform(), _Spec("model"))],
-    )
+    plan = _plan_with([CompiledTransform(_FallbackTransform(), _Spec("model"))])
     with pytest.raises(TransformError, match="needs provider"):
         _infer_output_model(plan, None)
 
 def test_infer_output_model_fallback_rejects_non_set_collect_models() -> None:
-    plan = _SurgeryPlan(
-        inputs={},
-        output=None,
-        transforms=[CompiledTransform(_FallbackTransform(), _SpecBadCollect())],
-    )
+    plan = _plan_with([CompiledTransform(_FallbackTransform(), _SpecBadCollect())])
     with pytest.raises(TransformError, match="needs provider"):
         _infer_output_model(plan, _Provider())
 

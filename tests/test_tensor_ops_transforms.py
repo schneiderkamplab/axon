@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
 from brainsurgery.core import TransformError
@@ -32,7 +32,7 @@ def test_split_and_concat_roundtrip() -> None:
     }
     plan = compile_plan(raw)
     provider = _Provider({"model": _make_state_dict({"x": torch.tensor([1.0, 2.0, 3.0, 4.0])})})
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -60,7 +60,7 @@ def test_matmul_creates_destination() -> None:
             )
         }
     )
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -91,7 +91,7 @@ def test_permute_reshape_and_reshape_in_place() -> None:
             )
         }
     )
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -118,7 +118,7 @@ def test_fill_modes_and_clamp_variants() -> None:
     }
     plan = compile_plan(raw)
     provider = _Provider({"model": _make_state_dict({"x": torch.tensor([0.0, 0.0], dtype=torch.float32)})})
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -142,7 +142,7 @@ def test_split_rejects_size_mismatch() -> None:
     plan = compile_plan(raw)
     provider = _Provider({"model": _make_state_dict({"x": torch.tensor([0.0, 1.0, 2.0])})})
     with pytest.raises(TransformError, match="must sum to source size"):
-        execute_transform_pairs(
+        _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,

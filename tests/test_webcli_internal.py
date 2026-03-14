@@ -195,16 +195,18 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     class _FakePlan:
         def __init__(self, *, output):
             self.inputs = {}
-            self.transforms = []
             self.output = output
+            self.executed_raw_transforms = [{"dump": {}}]
+
+        def execute_pending(self, _provider, *, interactive: bool) -> bool:
+            assert interactive is False
+            return True
 
     fake_provider = _FakeProvider()
     monkeypatch.setattr(webcli_runner, "_configure_logging", lambda *, log_level: None)
     monkeypatch.setattr(webcli_runner, "compile_plan", lambda raw: _FakePlan(output=raw.get("output")))
     monkeypatch.setattr(webcli_runner, "create_state_dict_provider", lambda **_kwargs: fake_provider)
     monkeypatch.setattr(webcli_runner, "normalize_transform_specs", lambda _t: [])
-    monkeypatch.setattr(webcli_runner, "execute_transform_pairs", lambda *_a, **_k: (None, [{"dump": {}}]))
-    monkeypatch.setattr(webcli_runner, "build_raw_plan", lambda **_kwargs: {"transforms": [{"dump": {}}]})
 
     class _Ctx:
         def __enter__(self):

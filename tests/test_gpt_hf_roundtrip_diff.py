@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from brainsurgery.engine import create_state_dict_provider
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def gpt_model_path() -> Path:
 
 def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dict[str, object]]]:
     plan = compile_plan(raw_plan)
-    return execute_transform_pairs(
+    return _execute_transform_pairs(
         zip(raw_plan["transforms"], plan.transforms, strict=False),  # type: ignore[index]
         provider,
         interactive=False,

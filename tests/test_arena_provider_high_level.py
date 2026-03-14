@@ -8,7 +8,7 @@ import torch
 from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine import create_state_dict_provider
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
 def _toy_tensors() -> dict[str, torch.Tensor]:
@@ -42,7 +42,7 @@ def _execute_plan(
         arena_segment_size=arena_segment_size,
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], compile_plan(raw).transforms, strict=False),  # type: ignore[index]
             provider,
             interactive=False,

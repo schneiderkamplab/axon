@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
 from brainsurgery.core import TransformError
@@ -41,7 +41,7 @@ def test_concat_two_tensors_into_new_tensor() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -71,7 +71,7 @@ def test_concat_supports_sliced_sources() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -102,7 +102,7 @@ def test_concat_rejects_source_pattern_matching_multiple_tensors() -> None:
     )
 
     with pytest.raises(TransformError, match="match exactly one tensor"):
-        execute_transform_pairs(
+        _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -128,7 +128,7 @@ def test_concat_rejects_incompatible_shapes() -> None:
     )
 
     with pytest.raises(TransformError, match="shape mismatch"):
-        execute_transform_pairs(
+        _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,

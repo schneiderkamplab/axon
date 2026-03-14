@@ -6,7 +6,7 @@ import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.engine import create_state_dict_provider, reset_runtime_flags
 from brainsurgery.core import TransformError
@@ -46,7 +46,7 @@ def test_cross_compile_execute_copy_then_assert_equal() -> None:
     )
     baseline_counts = provider.get_state_dict("model").access_counts("src")
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -78,7 +78,7 @@ def test_cross_execute_interactive_stops_current_block_on_failure() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=True,
@@ -110,7 +110,7 @@ def test_cross_execute_non_interactive_raises_on_failure() -> None:
     )
 
     with pytest.raises(TransformError):
-        execute_transform_pairs(
+        _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -140,7 +140,7 @@ def test_cross_structured_mapping_with_copy_transform() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -183,7 +183,7 @@ def test_cross_assert_transform_covers_all_expression_ops() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -211,7 +211,7 @@ def test_cross_assert_equal_with_eps() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -242,7 +242,7 @@ def test_cross_help_dump_exit_in_single_flow(monkeypatch: pytest.MonkeyPatch, ca
     )
     monkeypatch.setattr(dump_module, "tqdm", lambda iterable, **_: iterable)
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -270,7 +270,7 @@ def test_cross_prefixes_lists_available_aliases(capsys: pytest.CaptureFixture[st
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -304,7 +304,7 @@ def test_cross_set_verbose_then_copy_emits_activity(capsys: pytest.CaptureFixtur
     baseline_counts = provider.get_state_dict("model").access_counts("src")
 
     reset_runtime_flags()
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -330,7 +330,7 @@ def test_cross_prefixes_add_creates_empty_alias() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -358,7 +358,7 @@ def test_cross_prefixes_rename_remove_mutate_aliases() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -406,7 +406,7 @@ def test_cross_provider_backends_load_execute_and_save(provider_name: str, tmp_p
         arena_segment_size="1MB",
     )
     try:
-        should_continue, executed = execute_transform_pairs(
+        should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -444,7 +444,7 @@ def test_cross_scale_creates_new_tensor() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -476,7 +476,7 @@ def test_cross_cast_creates_new_tensor() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -507,7 +507,7 @@ def test_cross_cast__casts_in_place() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -545,7 +545,7 @@ def test_cross_add_subtract_multiply_pipeline() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -587,7 +587,7 @@ def test_cross_structured_mapping_with_add_transform() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -625,7 +625,7 @@ def test_cross_add_requires_existing_destination() -> None:
     )
 
     with pytest.raises(TransformError, match="destination missing"):
-        execute_transform_pairs(
+        _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
             interactive=False,
@@ -653,7 +653,7 @@ def test_cross_add__subtract__in_place_pipeline() -> None:
         }
     )
 
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
@@ -688,7 +688,7 @@ def test_cross_dry_run_executes_flow_without_persisting_changes_and_prefixes_ver
     baseline_counts = provider.get_state_dict("model").access_counts("src")
 
     reset_runtime_flags()
-    should_continue, executed = execute_transform_pairs(
+    should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,

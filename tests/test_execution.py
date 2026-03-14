@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.engine.execution import execute_transform_pairs
+from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.core import TransformError
 from brainsurgery.core import BaseTransform, CompiledTransform, TransformControl, TransformResult
 
@@ -33,7 +33,7 @@ def test_execute_transform_pairs_stops_on_exit_control() -> None:
         ({"exit": {}}, CompiledTransform(_Transform(control=TransformControl.EXIT), object())),
     ]
 
-    should_continue, executed = execute_transform_pairs(pairs, object(), interactive=False)
+    should_continue, executed = _execute_transform_pairs(pairs, object(), interactive=False)
     assert should_continue is False
     assert executed == [{"first": {}}, {"exit": {}}]
 
@@ -43,13 +43,13 @@ def test_execute_transform_pairs_returns_to_prompt_on_interactive_failure() -> N
         ({"bad": {}}, CompiledTransform(_Transform(fail=True), object())),
     ]
 
-    should_continue, executed = execute_transform_pairs(pairs, object(), interactive=True)
+    should_continue, executed = _execute_transform_pairs(pairs, object(), interactive=True)
     assert should_continue is True
     assert executed == [{"ok": {}}]
 
 def test_execute_transform_pairs_raises_in_non_interactive_mode() -> None:
     with pytest.raises(TransformError, match="boom"):
-        execute_transform_pairs(
+        _execute_transform_pairs(
             [({"bad": {}}, CompiledTransform(_Transform(fail=True), object()))],
             object(),
             interactive=False,
