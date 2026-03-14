@@ -39,6 +39,18 @@ def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, A
     return decoded
 
 
+def _get_json(base_url: str, path: str) -> dict[str, Any]:
+    req = request.Request(
+        url=base_url + path,
+        method="GET",
+    )
+    with request.urlopen(req, timeout=300) as resp:  # noqa: S310
+        body = resp.read().decode("utf-8")
+    decoded = json.loads(body)
+    assert isinstance(decoded, dict)
+    return decoded
+
+
 @contextmanager
 def _running_webui(tmp_path: Path) -> Iterator[str]:
     provider = create_state_dict_provider(
@@ -122,3 +134,33 @@ def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
 
     expected_transforms = [{"load": {"path": model_input, "alias": "model"}}, *transforms, {"exit": {}}]
     assert summary_obj == {"transforms": expected_transforms}
+
+
+def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) -> None:
+    with _running_webui(tmp_path) as base_url:
+        state_before = _get_json(base_url, "/api/state")
+        assert state_before.get("ok") is True
+        flags_before = state_before.get("runtime_flags")
+        assert isinstance(flags_before, dict)
+        assert isinstance(flags_before.get("dry_run"), bool)
+        assert isinstance(flags_before.get("verbose"), bool)
+
+        set_resp = _post_json(
+            base_url,
+            "/api/apply_transform",
+            {
+                "transform": "set",
+                "payload": {"dry-run": True, "verbose": True},
+            },
+        )
+        assert set_resp.get("ok") is True, set_resp.get("error")
+        flags_after_set = set_resp.get("runtime_flags")
+        assert isinstance(flags_after_set, dict)
+        assert flags_after_set.get("dry_run") is True
+        assert flags_after_set.get("verbose") is True
+
+        state_after = _get_json(base_url, "/api/state")
+        flags_after_state = state_after.get("runtime_flags")
+        assert isinstance(flags_after_state, dict)
+        assert flags_after_state.get("dry_run") is True
+        assert flags_after_state.get("verbose") is True
