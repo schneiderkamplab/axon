@@ -4,6 +4,9 @@ from pathlib import Path
 PACKAGE_ROOT = Path("brainsurgery")
 CORE_DIR = PACKAGE_ROOT / "core"
 CORE_INIT = CORE_DIR / "__init__.py"
+SPECS_DIR = CORE_DIR / "specs"
+COMPILE_DIR = CORE_DIR / "compile"
+RUNTIME_DIR = CORE_DIR / "runtime"
 
 def _iter_python_files(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
@@ -18,29 +21,15 @@ def _core_exports() -> set[str]:
                     exports.add(alias.asname or alias.name)
     return exports
 
-def test_core_modules_import_concrete_core_modules_only() -> None:
-    offenders: list[str] = []
-    for path in _iter_python_files(CORE_DIR):
-        if path.name == "__init__.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            if node.level == 0 and node.module == "brainsurgery.core":
-                offenders.append(f"{path}:{node.lineno}")
-            if node.level == 1 and node.module is None:
-                offenders.append(f"{path}:{node.lineno}")
-
-    assert not offenders, (
-        "Core modules must import from concrete core modules, not package-level re-exports. "
-        f"Offenders: {', '.join(offenders)}"
-    )
-
-def test_core_modules_do_not_import_other_brainsurgery_subpackages() -> None:
+def _assert_subpackage_import_policy(
+    *,
+    subpackage_dir: Path,
+    subpackage_name: str,
+    allowed_core_packages: set[str],
+) -> None:
     offenders: list[str] = []
 
-    for path in _iter_python_files(CORE_DIR):
+    for path in _iter_python_files(subpackage_dir):
         if path.name == "__init__.py":
             continue
 
@@ -48,25 +37,75 @@ def test_core_modules_do_not_import_other_brainsurgery_subpackages() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-
-                # Absolute imports from brainsurgery must stay inside brainsurgery.core.
                 if node.level == 0 and module.startswith("brainsurgery.") and not module.startswith(
                     "brainsurgery.core"
                 ):
                     offenders.append(f"{path}:{node.lineno}")
+                    continue
 
-                # Relative imports with level>=2 from brainsurgery.core.* escape core.
-                if node.level >= 2:
+                if node.level == 1 and node.module is None:
                     offenders.append(f"{path}:{node.lineno}")
+                    continue
+
+                if node.level == 2:
+                    # Cross-subpackage imports must target package __init__, never submodules.
+                    if module not in allowed_core_packages:
+                        offenders.append(f"{path}:{node.lineno}")
+                    continue
+
+                if node.level >= 3:
+                    offenders.append(f"{path}:{node.lineno}")
+                    continue
+
+                if node.level == 0 and module.startswith("brainsurgery.core."):
+                    tail = module[len("brainsurgery.core.") :]
+                    if tail.startswith(f"{subpackage_name}."):
+                        # Same-subpackage imports should be direct relative imports.
+                        offenders.append(f"{path}:{node.lineno}")
+                        continue
+                    if "." in tail:
+                        # Cross-subpackage imports must go through package __init__.
+                        offenders.append(f"{path}:{node.lineno}")
+                        continue
+                    if tail and tail not in allowed_core_packages:
+                        offenders.append(f"{path}:{node.lineno}")
+                        continue
 
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith("brainsurgery.") and not alias.name.startswith("brainsurgery.core"):
                         offenders.append(f"{path}:{node.lineno}")
+                        continue
+                    if alias.name.startswith(f"brainsurgery.core.{subpackage_name}."):
+                        offenders.append(f"{path}:{node.lineno}")
+                        continue
+                    if alias.name.startswith("brainsurgery.core.") and alias.name.count(".") >= 2:
+                        offenders.append(f"{path}:{node.lineno}")
 
     assert not offenders, (
-        "Core modules may not import from non-core brainsurgery subpackages. "
+        f"core.{subpackage_name}: invalid imports detected. "
         f"Offenders: {', '.join(offenders)}"
+    )
+
+def test_core_specs_import_policy() -> None:
+    _assert_subpackage_import_policy(
+        subpackage_dir=SPECS_DIR,
+        subpackage_name="specs",
+        allowed_core_packages=set(),
+    )
+
+def test_core_compile_import_policy() -> None:
+    _assert_subpackage_import_policy(
+        subpackage_dir=COMPILE_DIR,
+        subpackage_name="compile",
+        allowed_core_packages={"specs"},
+    )
+
+def test_core_runtime_import_policy() -> None:
+    _assert_subpackage_import_policy(
+        subpackage_dir=RUNTIME_DIR,
+        subpackage_name="runtime",
+        allowed_core_packages={"specs", "compile"},
     )
 
 def test_non_core_modules_do_not_import_core_submodules_directly() -> None:

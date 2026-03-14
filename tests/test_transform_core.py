@@ -19,9 +19,9 @@ from brainsurgery.core import (
     list_transforms,
     register_transform,
 )
-from brainsurgery.core.transform import REGISTRY
+from brainsurgery.core.runtime.transform import REGISTRY
 from brainsurgery.engine.output_model import _infer_output_model
-from brainsurgery.core.validation import (
+from brainsurgery.core.specs.validation import (
     ensure_mapping_payload,
     require_expr,
     require_nonempty_string,

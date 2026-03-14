@@ -1,6 +1,6 @@
 import torch
 
-from brainsurgery.core.validation import require_same_shape_dtype_device, require_same_shape_dtype_device3
+from brainsurgery.core.specs.validation import require_same_shape_dtype_device, require_same_shape_dtype_device3
 from brainsurgery.core import TransformError
 
 def test_require_same_shape_dtype_device_accepts_matching_tensors() -> None:

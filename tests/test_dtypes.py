@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from brainsurgery.core import TransformError
-from brainsurgery.core.validation import parse_torch_dtype
+from brainsurgery.core.specs.validation import parse_torch_dtype
 
 class _Error(TransformError):
     pass

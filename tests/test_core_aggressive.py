@@ -24,14 +24,14 @@ from brainsurgery.core import (
     UnarySpec,
     UnaryTransform,
 )
-from brainsurgery.core.expression import compile_tensor_ref_expr, get_assert_expr_help
-from brainsurgery.core.matching import _MatchError, StructuredMatch, _StructuredPathMatcher
-from brainsurgery.core.name_mapping import resolve_name_mappings
-from brainsurgery.core.resolver import _resolve_target_names, _resolve_tensors
-from brainsurgery.core.scalar_comparison import ScalarComparison, parse_scalar_comparison
-from brainsurgery.core.transform import REGISTRY, register_transform
-from brainsurgery.core.types import StateDictLike
-from brainsurgery.core.validation import (
+from brainsurgery.core.compile.expression import compile_tensor_ref_expr, get_assert_expr_help
+from brainsurgery.core.compile.matching import _MatchError, StructuredMatch, _StructuredPathMatcher
+from brainsurgery.core.compile.name_mapping import resolve_name_mappings
+from brainsurgery.core.compile.resolver import _resolve_target_names, _resolve_tensors
+from brainsurgery.core.specs.scalar_comparison import ScalarComparison, parse_scalar_comparison
+from brainsurgery.core.runtime.transform import REGISTRY, register_transform
+from brainsurgery.core.specs.types import StateDictLike
+from brainsurgery.core.specs.validation import (
     require_expr,
     require_same_shape_dtype_device,
     require_same_shape_dtype_device3,

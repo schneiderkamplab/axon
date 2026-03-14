@@ -12,7 +12,7 @@ from brainsurgery.core import (
     select_tensor,
 )
 from brainsurgery.core import TransformError
-from brainsurgery.core.refs import _looks_like_slice, _validate_expr_kind
+from brainsurgery.core.specs.refs import _looks_like_slice, _validate_expr_kind
 
 def test_parse_model_expr_supports_default_model_explicit_model_and_slices() -> None:
     assert parse_model_expr("weight", default_model="base") == TensorRef(

@@ -3,13 +3,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-import brainsurgery.core.name_mapping as name_mapping_module
+import brainsurgery.core.compile.name_mapping as name_mapping_module
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.core import (
     match_expr_names,
     resolve_name_mappings,
 )
-from brainsurgery.core.name_mapping import _require_dest_missing, _require_dest_present
+from brainsurgery.core.compile.name_mapping import _require_dest_missing, _require_dest_present
 
 from brainsurgery.core import TensorRef
 from brainsurgery.core import TransformError
