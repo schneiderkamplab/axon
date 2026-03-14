@@ -42,7 +42,7 @@ def test_main_defaults_to_cli_when_no_subcommand(monkeypatch) -> None:
     assert calls == [(["cli", "examples/gpt2.yaml"], "brainsurgery")]
 
 
-def test_main_preserves_explicit_webui2_subcommand(monkeypatch) -> None:
+def test_main_preserves_explicit_webui_subcommand(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
 
     def _fake_app(*, args, prog_name):  # type: ignore[no-untyped-def]
@@ -50,6 +50,6 @@ def test_main_preserves_explicit_webui2_subcommand(monkeypatch) -> None:
 
     monkeypatch.setattr(brainsurgery, "app", _fake_app)
 
-    brainsurgery.main(["webui2", "--port", "9010"])
+    brainsurgery.main(["webui", "--port", "9010"])
 
-    assert calls == [(["webui2", "--port", "9010"], "brainsurgery")]
+    assert calls == [(["webui", "--port", "9010"], "brainsurgery")]
