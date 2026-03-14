@@ -127,3 +127,10 @@ def test_parser_private_advance_and_expect_errors() -> None:
         parser._advance()
     with pytest.raises(ValueError, match="expected ':'"):
         _Parser("x")._expect(":")
+
+
+def test_oly_additional_emit_and_parse_paths() -> None:
+    assert parse_oly_line("copy: from: a, to: b") == {"copy": {"from": "a", "to": "b"}}
+    assert emit_oly_line({"copy": {"nested": {"k": "v"}}}) == 'copy: { nested: { k: v } }'
+    with pytest.raises(ValueError, match="payload must be a mapping"):
+        emit_oly_line({"copy": "bad"})  # type: ignore[arg-type]

@@ -1,0 +1,429 @@
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Optional
+
+from dataclasses import dataclass
+import pytest
+import typer
+
+from brainsurgery.webui.session import SessionState
+import brainsurgery.webui.backend as webui_backend
+import brainsurgery.webui.cli as webui_cli
+import brainsurgery.webui.handler as webui_handler
+import brainsurgery.webui.server as webui_server
+
+
+class _Provider:
+    def __init__(self) -> None:
+        self.closed = False
+        self.models: dict[str, dict[str, object]] = {}
+
+    def list_model_aliases(self) -> list[str]:
+        return sorted(self.models)
+
+    def get_state_dict(self, alias: str):
+        return self.models[alias]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_webui_configure_logging_and_bad_level() -> None:
+    webui_cli.configure_logging("warning")
+    with pytest.raises(typer.BadParameter):
+        webui_cli.configure_logging("bogus")
+
+
+def test_webui_callback_handles_browser_error_and_wildcard_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    served: list[tuple[str, int]] = []
+    monkeypatch.setattr(webui_cli, "configure_logging", lambda _lvl: None)
+
+    def _boom(_url: str) -> None:
+        raise RuntimeError("browser failed")
+
+    monkeypatch.setattr(webui_cli.webbrowser, "open", _boom)
+    monkeypatch.setattr(webui_cli, "serve_webui", lambda *, host, port: served.append((host, port)))
+    webui_cli.webui(host="::", port=8124, log_level="info", open_browser=True)
+    assert served == [("::", 8124)]
+
+
+def test_webui_backend_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_disabled = set(webui_backend.DISABLED_TRANSFORMS)
+    try:
+        webui_backend.DISABLED_TRANSFORMS.add("help")
+        names = {item["name"] for item in webui_backend.transform_items()}
+        assert "help" not in names
+    finally:
+        webui_backend.DISABLED_TRANSFORMS.clear()
+        webui_backend.DISABLED_TRANSFORMS.update(original_disabled)
+
+    with pytest.raises(ValueError):
+        webui_backend.require_string("", "x")
+
+    p = _Provider()
+    assert webui_backend.default_alias(p) == "model"
+    p.models = {"model": {}, "model_2": {}}
+    assert webui_backend.default_alias(p) == "model_3"
+
+    assert webui_backend.parse_filter_expr(None, alias="m") == ".*"
+    assert webui_backend.parse_filter_expr(" ", alias="m") == ".*"
+    assert isinstance(webui_backend.parse_filter_expr('["a","b"]', alias="m"), list)
+    assert isinstance(webui_backend.parse_filter_expr(["a"], alias="m"), list)
+    with pytest.raises(ValueError):
+        webui_backend.parse_filter_expr(1, alias="m")
+
+
+def test_webui_backend_boolean_keys_and_apply_transform_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    @dataclass
+    class _Spec:
+        dry_run: Optional[bool]
+
+    class _DummyTransform:
+        spec_type = _Spec
+        help_text = "- dry-run (boolean)"
+
+    out = webui_backend._boolean_keys_for_transform(_DummyTransform(), ["dry-run"])
+    assert out == ["dry-run"]
+
+    monkeypatch.setattr(webui_backend, "get_type_hints", lambda _s: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert webui_backend._boolean_keys_for_transform(_DummyTransform(), ["dry-run"]) == ["dry-run"]
+
+    p = _Provider()
+    p.models = {"only": {"w": object()}}
+    original_disabled = set(webui_backend.DISABLED_TRANSFORMS)
+    try:
+        webui_backend.DISABLED_TRANSFORMS.add("copy")
+        with pytest.raises(ValueError, match="disabled"):
+            webui_backend.apply_transform(provider=p, transform_name="copy", payload={}, default_model="only")
+    finally:
+        webui_backend.DISABLED_TRANSFORMS.clear()
+        webui_backend.DISABLED_TRANSFORMS.update(original_disabled)
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        webui_backend.apply_transform(provider=p, transform_name="assert", payload="  ", default_model="only")
+
+    with pytest.raises(ValueError, match="invalid assert YAML payload"):
+        webui_backend.apply_transform(provider=p, transform_name="assert", payload=":\n", default_model="only")
+
+    class _TransformWithInferError:
+        def compile(self, payload, default_model=None):
+            return {"payload": payload, "default_model": default_model}
+
+        def apply(self, spec, provider):
+            return None
+
+        def contributes_output_model(self, spec):
+            return True
+
+        def infer_output_model(self, spec):
+            raise RuntimeError("nope")
+
+    class _Ctx:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(webui_backend, "get_transform", lambda _name: _TransformWithInferError())
+    monkeypatch.setattr(webui_backend, "list_model_aliases", lambda _provider: ["only"])
+    monkeypatch.setattr(webui_backend, "use_output_emitter", lambda _sink: _Ctx())
+    _output, default_model = webui_backend.apply_transform(
+        provider=p,
+        transform_name="set",
+        payload={},
+        default_model=None,
+    )
+    assert default_model == "only"
+
+    class _TransformAssertPass:
+        def compile(self, payload, default_model=None):
+            assert isinstance(payload, dict)
+            return {"payload": payload, "default_model": default_model}
+
+        def apply(self, spec, provider):
+            return None
+
+        def contributes_output_model(self, spec):
+            return False
+
+    monkeypatch.setattr(webui_backend, "get_transform", lambda _name: _TransformAssertPass())
+    webui_backend.apply_transform(
+        provider=p,
+        transform_name="assert",
+        payload="equal:\n  left: a\n  right: a\n",
+        default_model="only",
+    )
+
+
+def test_webui_backend_render_dump_for_alias_no_matches() -> None:
+    p = _Provider()
+    p.models = {"m": {"w": object()}}
+    dumped, matched, total = webui_backend.render_dump_for_alias(
+        provider=p,
+        alias="m",
+        format_name="compact",
+        verbosity="shape",
+        target="^nope$",
+    )
+    assert dumped == "(no tensors matched filter)"
+    assert matched == 0
+    assert total == 1
+
+
+def _make_session(tmp_path: Path) -> SessionState:
+    provider = _Provider()
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir(parents=True, exist_ok=True)
+    return SessionState(provider=provider, lock=threading.Lock(), upload_root=upload_root)
+
+
+def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    handler_cls = webui_handler.handler_factory(session)
+
+    h = object.__new__(handler_cls)
+    h._json = []
+    h._html = []
+    h._errors = []
+    h._send_json = lambda payload, status=200: h._json.append((status, payload))
+    h._send_html = lambda body: h._html.append(body)
+    h.send_error = lambda code, message: h._errors.append((code, message))
+    h._read_json_body = lambda: {}
+
+    h.path = "/"
+    handler_cls.do_GET(h)
+    assert h._html
+
+    h.path = "/api/transforms"
+    handler_cls.do_GET(h)
+    assert h._json[-1][1]["ok"] is True
+
+    h.path = "/api/state"
+    handler_cls.do_GET(h)
+    assert h._json[-1][1]["ok"] is True
+
+    h.path = "/missing"
+    handler_cls.do_GET(h)
+    assert h._errors[-1][0] == 404
+
+    h.path = "/api/load"
+    h._read_json_body = lambda: {"alias": ""}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/load"
+    h._read_json_body = lambda: {"server_path": "/x", "alias": "a"}
+    monkeypatch.setattr(webui_handler, "apply_load_transform", lambda **_k: (_ for _ in ()).throw(RuntimeError("x")))
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/apply_transform"
+    h._read_json_body = lambda: {"transform": "copy", "payload": 1}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/apply_transform"
+    h._read_json_body = lambda: {"transform": "assert", "payload": " "}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/apply_transform"
+    h._read_json_body = lambda: {"transform": "assert", "payload": ":"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/apply_transform"
+    h._read_json_body = lambda: {"transform": "exit", "payload": {}}
+    monkeypatch.setattr(webui_handler, "apply_transform", lambda **_k: ("out", "m"))
+    monkeypatch.setattr(webui_handler, "serialize_models", lambda _p: [])
+    monkeypatch.setattr(webui_handler, "render_execution_summary", lambda **_k: "transforms: []\n")
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is True
+    assert "transforms:" in h._json[-1][1]["output"]
+
+    h.path = "/api/apply_transform"
+    h._read_json_body = lambda: {"transform": "help"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is True
+
+    h.path = "/api/apply_transform"
+    h._read_json_body = lambda: {"transform": "assert", "payload": "equal:\n  left: a\n  right: a\n"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is True
+
+    h.path = "/api/save_download"
+    h._read_json_body = lambda: {"payload": 1}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/save_download"
+    h._read_json_body = lambda: {"payload": {}}
+    h._run_save_download = lambda _payload: (_ for _ in ()).throw(RuntimeError("save boom"))
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/save_download"
+    h._read_json_body = lambda: {}
+    h._run_save_download = lambda _payload: ("saved", "m.bin", "application/octet-stream", "YQ==")
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is True
+
+    h.path = "/api/model_dump"
+    h._read_json_body = lambda: {"alias": "", "format": "compact", "verbosity": "shape"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/model_dump"
+    h._read_json_body = lambda: {"alias": "x", "format": "nope", "verbosity": "shape"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/model_dump"
+    h._read_json_body = lambda: {"alias": "x", "format": "compact", "verbosity": "bad"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/model_dump"
+    h._read_json_body = lambda: {"alias": "x", "format": "compact", "verbosity": "shape", "filter": ".*"}
+    monkeypatch.setattr(webui_handler, "parse_filter_expr", lambda _v, alias: ".*")
+    monkeypatch.setattr(webui_handler, "list_model_aliases", lambda _p: [])
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/model_dump"
+    monkeypatch.setattr(webui_handler, "list_model_aliases", lambda _p: ["x"])
+    monkeypatch.setattr(
+        webui_handler,
+        "render_dump_for_alias",
+        lambda **_k: (_ for _ in ()).throw(RuntimeError("dump boom")),
+    )
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/model_dump"
+    monkeypatch.setattr(webui_handler, "render_dump_for_alias", lambda **_k: ("d", 1, 2))
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is True
+
+    h.path = "/api/none"
+    handler_cls.do_POST(h)
+    assert h._errors[-1][0] == 404
+
+
+def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    handler_cls = webui_handler.handler_factory(session)
+    h = object.__new__(handler_cls)
+    h.wfile = io.BytesIO()
+    h._responses = []
+    h._headers = []
+    h.end_headers = lambda: None
+    h.send_response = lambda code: h._responses.append(code)
+    h.send_header = lambda key, val: h._headers.append((key, val))
+
+    handler_cls._send_html(h, "x")
+    handler_cls._send_json(h, {"ok": True})
+    assert h._responses == [200, 200]
+    assert any(k == "Cache-Control" for k, _v in h._headers)
+
+    missing_len = object.__new__(handler_cls)
+    missing_len.headers = {}
+    missing_len.rfile = io.BytesIO(b"{}")
+    with pytest.raises(ValueError, match="Missing Content-Length"):
+        handler_cls._read_json_body(missing_len)
+
+    non_obj = object.__new__(handler_cls)
+    non_obj.headers = {"Content-Length": "2"}
+    non_obj.rfile = io.BytesIO(b"[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        handler_cls._read_json_body(non_obj)
+
+    assert webui_handler._suggest_download_filename(
+        requested_name="x",
+        out_path=Path("x.safetensors"),
+        payload={},
+    ) == "x.safetensors"
+    assert webui_handler._suggest_download_filename(
+        requested_name="x.txt",
+        out_path=Path("x"),
+        payload={},
+    ) == "x.txt"
+    assert webui_handler._suggest_download_filename(
+        requested_name="x",
+        out_path=Path("x"),
+        payload={"format": "numpy"},
+    ) == "x.npy"
+    assert webui_handler._suggest_download_filename(
+        requested_name="x",
+        out_path=Path("x"),
+        payload={"format": "torch"},
+    ) == "x.pt"
+    assert webui_handler._suggest_download_filename(
+        requested_name="x",
+        out_path=Path("x"),
+        payload={"format": "unknown"},
+    ) == "x.bin"
+
+
+def test_webui_handler_run_save_download_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    handler_cls = webui_handler.handler_factory(session)
+    h = object.__new__(handler_cls)
+
+    with pytest.raises(ValueError, match="payload.path"):
+        handler_cls._run_save_download(h, {})
+
+    class _TempDir:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def __enter__(self) -> str:
+            self.path.mkdir(parents=True, exist_ok=True)
+            return str(self.path)
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    dir_path = tmp_path / "tmp_dir_case"
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", lambda prefix=None: _TempDir(dir_path))
+    monkeypatch.setattr(webui_handler, "apply_transform", lambda **_k: ("ok", None))
+    (dir_path / "dir_only").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ValueError, match="supports files only"):
+        handler_cls._run_save_download(h, {"path": "dir_only"})
+
+    no_file_path = tmp_path / "tmp_missing_case"
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", lambda prefix=None: _TempDir(no_file_path))
+    with pytest.raises(ValueError, match="did not produce a file or directory"):
+        handler_cls._run_save_download(h, {"path": "missing"})
+
+
+def test_webui_server_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    events: list[str] = []
+    provider = _Provider()
+
+    class _Server:
+        def __init__(self, addr, handler) -> None:
+            assert addr == ("127.0.0.1", 9022)
+            assert handler is not None
+
+        def serve_forever(self) -> None:
+            events.append("serve")
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(webui_server, "create_state_dict_provider", lambda **_k: provider)
+    monkeypatch.setattr(webui_server, "handler_factory", lambda _s: object)
+    monkeypatch.setattr(webui_server.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(webui_server, "ThreadingHTTPServer", _Server)
+    webui_server.serve_webui(host="127.0.0.1", port=9022)
+    assert events == ["serve", "close"]
+    assert provider.closed is True

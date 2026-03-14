@@ -1,5 +1,7 @@
 from importlib import import_module
 
+import pytest
+
 _module = import_module("brainsurgery.transforms.dump")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -29,6 +31,10 @@ def test_dump_compile_defaults() -> None:
     assert spec.default_model_hint == "model"
     assert spec.format == "compact"
     assert spec.verbosity == "shape"
+    assert spec.collect_models() == {"model"}
+
+    spec_no_default = DumpTransform().compile({}, default_model=None)
+    assert spec_no_default.collect_models() == set()
 
 
 def test_dump_apply_to_target_is_not_used() -> None:
@@ -51,3 +57,14 @@ def test_dump_infer_output_model_rejected() -> None:
         assert "does not infer an output model" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected infer_output_model validation error")
+
+
+def test_dump_apply_rejects_missing_target_when_not_dumping_all_models() -> None:
+    spec = DumpTransform().build_spec(
+        target_ref=None,
+        payload={"format": "compact", "verbosity": "shape"},
+        dump_all_models=False,
+    )
+    assert spec.collect_models() == set()
+    with pytest.raises(DumpTransformError, match="dump target missing"):
+        DumpTransform().apply(spec, provider=None)  # type: ignore[arg-type]

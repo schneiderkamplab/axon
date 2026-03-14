@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 import json
@@ -10,6 +11,9 @@ from urllib.error import HTTPError
 from urllib import request
 
 from omegaconf import OmegaConf
+import pytest
+from safetensors.torch import save_file
+import torch
 
 import brainsurgery  # noqa: F401
 
@@ -67,7 +71,11 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
     )
     session.upload_root.mkdir(parents=True, exist_ok=True)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_factory(session))
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_factory(session))
+    except PermissionError as exc:
+        provider.close()
+        pytest.skip(f"local webui bind is not permitted in this environment: {exc}")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -164,3 +172,94 @@ def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) 
         assert isinstance(flags_after_state, dict)
         assert flags_after_state.get("dry_run") is True
         assert flags_after_state.get("verbose") is True
+
+
+def test_webui_e2e_transforms_and_upload_dump_and_save_flows(tmp_path: Path) -> None:
+    tiny_path = tmp_path / "tiny.safetensors"
+    save_file({"weight": torch.arange(4, dtype=torch.float32)}, str(tiny_path))
+    raw = tiny_path.read_bytes()
+    payload_b64 = base64.b64encode(raw).decode("ascii")
+
+    with _running_webui(tmp_path) as base_url:
+        transforms_resp = _get_json(base_url, "/api/transforms")
+        assert transforms_resp.get("ok") is True
+        transforms = transforms_resp.get("transforms")
+        assert isinstance(transforms, list) and transforms
+        names = {item.get("name") for item in transforms if isinstance(item, dict)}
+        assert {"load", "save", "dump", "help", "exit"}.issubset(names)
+
+        upload_resp = _post_json(
+            base_url,
+            "/api/load",
+            {
+                "filename": "tiny.safetensors",
+                "content_b64": payload_b64,
+                "alias": "tiny",
+            },
+        )
+        assert upload_resp.get("ok") is True, upload_resp.get("error")
+
+        state = _get_json(base_url, "/api/state")
+        assert state.get("ok") is True
+        models = state.get("models")
+        assert isinstance(models, list)
+        assert any(isinstance(item, dict) and item.get("alias") == "tiny" for item in models)
+
+        dump_ok = _post_json(
+            base_url,
+            "/api/model_dump",
+            {
+                "alias": "tiny",
+                "format": "compact",
+                "verbosity": "shape",
+                "filter": ".*",
+            },
+        )
+        assert dump_ok.get("ok") is True, dump_ok.get("error")
+        assert isinstance(dump_ok.get("dump"), str)
+        assert dump_ok.get("matched_count") == 1
+        assert dump_ok.get("total_count") == 1
+
+        dump_bad = _post_json(
+            base_url,
+            "/api/model_dump",
+            {
+                "alias": "tiny",
+                "format": "compact",
+                "verbosity": "shape",
+                "filter": "[",
+            },
+        )
+        assert dump_bad.get("ok") is False
+        assert isinstance(dump_bad.get("error"), str)
+
+        save_download = _post_json(
+            base_url,
+            "/api/save_download",
+            {
+                "payload": {
+                    "path": "tiny_export",
+                    "alias": "tiny",
+                    "format": "safetensors",
+                }
+            },
+        )
+        assert save_download.get("ok") is True, save_download.get("error")
+        assert isinstance(save_download.get("download_b64"), str) and save_download.get("download_b64")
+        assert str(save_download.get("download_filename", "")).endswith(".safetensors")
+
+        server_out = tmp_path / "server_saved.safetensors"
+        save_server = _post_json(
+            base_url,
+            "/api/apply_transform",
+            {
+                "transform": "save",
+                "payload": {
+                    "path": str(server_out),
+                    "alias": "tiny",
+                    "format": "safetensors",
+                },
+            },
+        )
+        assert save_server.get("ok") is True, save_server.get("error")
+        assert server_out.exists()
