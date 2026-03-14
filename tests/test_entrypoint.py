@@ -24,9 +24,9 @@ def test_main_passes_empty_args_without_defaulting(monkeypatch) -> None:
 
     monkeypatch.setattr(brainsurgery, "app", _fake_app)
 
-    brainsurgery.main(["webui", "--port", "9000"])
+    brainsurgery.main(["webcli", "--port", "9000"])
 
-    assert calls == [(["webui", "--port", "9000"], "brainsurgery")]
+    assert calls == [(["webcli", "--port", "9000"], "brainsurgery")]
 
 
 def test_main_defaults_to_cli_when_no_subcommand(monkeypatch) -> None:
