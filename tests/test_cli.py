@@ -60,13 +60,10 @@ def test_run_executes_configured_and_interactive_and_writes_summary(monkeypatch:
     monkeypatch.setattr(
         cli_module,
         "_execute_configured_transforms",
-        lambda **_: (True, [{"copy": {"from": "x", "to": "y"}}]),
+        lambda **_: True,
     )
-    monkeypatch.setattr(
-        cli_module,
-        "_run_interactive_session",
-        lambda **_: (False, [{"copy": {"from": "x", "to": "y"}}, {"exit": {}}]),
-    )
+    monkeypatch.setattr(cli_module, "_run_interactive_session", lambda **_: False)
+    surgery_plan.executed_raw_transforms = [{"copy": {"from": "x", "to": "y"}}, {"exit": {}}]
     monkeypatch.setattr(
         cli_module,
         "_write_executed_plan_summary",
@@ -85,7 +82,7 @@ def test_run_executes_configured_and_interactive_and_writes_summary(monkeypatch:
     assert reset_calls == [True]
     assert len(provider.save_calls) == 1
     assert len(summary_calls) == 1
-    assert summary_calls[0]["transforms"] == [{"copy": {"from": "x", "to": "y"}}, {"exit": {}}]
+    assert summary_calls[0]["plan"] is surgery_plan
 
 def test_run_skips_save_when_no_output(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = {"inputs": ["model::/tmp/in.safetensors"], "transforms": [{"help": {}}]}
@@ -100,7 +97,7 @@ def test_run_skips_save_when_no_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "_configure_history", lambda: None)
-    monkeypatch.setattr(cli_module, "_execute_configured_transforms", lambda **_: (True, [{"help": {}}]))
+    monkeypatch.setattr(cli_module, "_execute_configured_transforms", lambda **_: True)
     monkeypatch.setattr(
         cli_module,
         "_write_executed_plan_summary",
@@ -159,11 +156,7 @@ def test_run_skips_output_save_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "_configure_history", lambda: None)
     monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: None)
-    monkeypatch.setattr(
-        cli_module,
-        "_execute_configured_transforms",
-        lambda **_: (True, [{"set": {"dry-run": True}}]),
-    )
+    monkeypatch.setattr(cli_module, "_execute_configured_transforms", lambda **_: True)
     monkeypatch.setattr(
         cli_module,
         "get_runtime_flags",
@@ -199,11 +192,7 @@ def test_run_skips_summary_file_write_when_dry_run(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "_configure_history", lambda: None)
     monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: None)
-    monkeypatch.setattr(
-        cli_module,
-        "_execute_configured_transforms",
-        lambda **_: (True, [{"set": {"dry-run": True}}]),
-    )
+    monkeypatch.setattr(cli_module, "_execute_configured_transforms", lambda **_: True)
     monkeypatch.setattr(
         cli_module,
         "get_runtime_flags",
@@ -226,25 +215,22 @@ def test_run_skips_summary_file_write_when_dry_run(monkeypatch: pytest.MonkeyPat
     assert provider.closed is True
     assert summary_calls == []
 
-def test_execute_configured_transforms_normalizes_specs(monkeypatch: pytest.MonkeyPatch) -> None:
-    called: dict[str, object] = {"executed": [{"help": {}}]}
+def test_execute_configured_transforms_runs_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
 
     class _Plan:
-        executed_raw_transforms = [{"help": {}}]
-
         def execute_pending(self, provider: object, *, interactive: bool) -> bool:
             called["provider"] = provider
             called["interactive"] = interactive
             return True
 
     surgery_plan = _Plan()
-    should_continue, executed = cli_module._execute_configured_transforms(
+    should_continue = cli_module._execute_configured_transforms(
         surgery_plan=surgery_plan,
         state_dict_provider="provider",
     )
 
     assert should_continue is True
-    assert executed == [{"help": {}}]
     assert called["interactive"] is False
     assert called["provider"] == "provider"
 
@@ -271,22 +257,20 @@ def test_run_interactive_session_retries_on_compile_error_then_exits(monkeypatch
             self.executed_raw_transforms.append({"exit": {}})
             return False
 
-    should_continue, executed = cli_module._run_interactive_session(
+    should_continue = cli_module._run_interactive_session(
         surgery_plan=_Plan(),
         state_dict_provider=object(),
     )
 
     assert should_continue is False
-    assert executed == [{"exit": {}}]
 
 def test_run_interactive_session_returns_when_prompt_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_module, "_prompt_interactive_transform", lambda **_: None)
-    should_continue, executed = cli_module._run_interactive_session(
+    should_continue = cli_module._run_interactive_session(
         surgery_plan=SurgeryPlan(inputs={}, output=None),
         state_dict_provider=object(),
     )
     assert should_continue is True
-    assert executed == []
 
 def test_cli_module_main_guard_executes_app(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[bool] = []

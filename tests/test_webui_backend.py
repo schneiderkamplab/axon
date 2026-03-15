@@ -3,6 +3,7 @@ from __future__ import annotations
 import brainsurgery  # noqa: F401
 
 from brainsurgery.webui.backend import _render_execution_summary, _transform_items
+from brainsurgery.engine.plan import PlanStep, SurgeryPlan
 
 def test_transform_items_include_help_exit_dump() -> None:
     names = {item["name"] for item in _transform_items()}
@@ -32,14 +33,16 @@ def test_render_execution_summary_renders_yaml_plan() -> None:
         def list_model_aliases(self) -> list[str]:
             return ["m2", "m1"]
 
-    summary = _render_execution_summary(
-        provider=_Provider(),
-        executed_transforms=[
-            {"load": {"path": "/tmp/model.safetensors", "alias": "m1"}},
-            {"copy": {"from": "m1::.*", "to": "m1::\\1"}},
-            {"exit": None},
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        steps=[
+            PlanStep(raw={"load": {"path": "/tmp/model.safetensors", "alias": "m1"}}, status="done"),
+            PlanStep(raw={"copy": {"from": "m1::.*", "to": "m1::\\1"}}, status="done"),
+            PlanStep(raw={"exit": None}, status="done"),
         ],
     )
+    summary = _render_execution_summary(provider=_Provider(), plan=plan)
     assert "transforms:" in summary
     assert "- load:" in summary
     assert "- copy:" in summary

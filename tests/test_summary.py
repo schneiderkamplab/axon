@@ -2,29 +2,30 @@ from __future__ import annotations
 
 import typer
 
-from brainsurgery.cli.summary import build_raw_plan, _write_executed_plan_summary
-
-def test_build_raw_plan_common_outputs() -> None:
-    plan = build_raw_plan(inputs=["a"], output={"path": "out"}, transforms=[{"help": {}}])
-    assert plan == {"inputs": ["a"], "output": {"path": "out"}, "transforms": [{"help": {}}]}
+from brainsurgery.cli.summary import _write_executed_plan_summary
+from brainsurgery.engine.plan import PlanStep, SurgeryPlan
 
 def test_write_executed_plan_summary_writes_yaml(tmp_path, monkeypatch) -> None:
     echoed: list[str] = []
     monkeypatch.setattr(typer, "echo", echoed.append)
 
+    plan = SurgeryPlan(
+        inputs={},
+        output=None,
+        steps=[PlanStep(raw={"help": {}}, compiled=None, status="done")],
+        raw_inputs=["a"],
+        raw_output={"path": "out"},
+    )
+
     destination = tmp_path / "executed.yaml"
     _write_executed_plan_summary(
-        inputs=["a"],
-        output={"path": "out"},
-        transforms=[{"help": {}}],
+        plan=plan,
         destination=destination,
     )
     assert destination.exists()
 
     _write_executed_plan_summary(
-        inputs=[],
-        output=None,
-        transforms=[],
+        plan=SurgeryPlan(inputs={}, output=None, raw_inputs=[]),
         destination=None,
     )
     assert echoed

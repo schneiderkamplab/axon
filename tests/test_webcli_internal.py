@@ -98,7 +98,6 @@ def test_webcli_handler_do_get_and_post_paths(monkeypatch: pytest.MonkeyPatch) -
             ok=True,
             logs=["a"],
             output_lines=["b"],
-            executed_transforms=[{"x": {}}],
             summary_yaml="transforms: []\n",
             written_path=None,
             error=None,
@@ -202,11 +201,19 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
             assert interactive is False
             return True
 
+        def to_raw_plan(self, *, executed_only: bool) -> dict[str, object]:
+            assert executed_only is True
+            return {"inputs": [], "transforms": self.executed_raw_transforms}
+
     fake_provider = _FakeProvider()
     monkeypatch.setattr(webcli_runner, "_configure_logging", lambda *, log_level: None)
     monkeypatch.setattr(webcli_runner, "compile_plan", lambda raw: _FakePlan(output=raw.get("output")))
     monkeypatch.setattr(webcli_runner, "create_state_dict_provider", lambda **_kwargs: fake_provider)
-    monkeypatch.setattr(webcli_runner, "normalize_transform_specs", lambda _t: [])
+    monkeypatch.setattr(
+        webcli_runner,
+        "normalize_raw_plan",
+        lambda raw: {"inputs": raw.get("inputs", []), "transforms": [], "output": raw.get("output")},
+    )
 
     class _Ctx:
         def __enter__(self):
