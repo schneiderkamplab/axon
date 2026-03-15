@@ -189,6 +189,11 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     handler_cls.do_GET(h)
     assert h._json[-1][1]["ok"] is True
 
+    h.path = "/api/progress"
+    handler_cls.do_GET(h)
+    assert h._json[-1][1]["ok"] is True
+    assert "progress" in h._json[-1][1]
+
     h.path = "/missing"
     handler_cls.do_GET(h)
     assert h._errors[-1][0] == 404
@@ -316,6 +321,7 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_webui_page_contains_exit_summary_mode_selector() -> None:
     assert "summary mode: raw" in webui_page._HTML_PAGE
     assert "summary_mode: runTransformName === \"exit\"" in webui_page._HTML_PAGE
+    assert "mode: list aliases" in webui_page._HTML_PAGE
 
 def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:
     session = _make_session(tmp_path)

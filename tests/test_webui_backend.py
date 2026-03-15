@@ -30,6 +30,12 @@ def test_set_transform_metadata_contains_boolean_keys() -> None:
     assert "dry-run" in set_item["boolean_keys"]
     assert "verbose" in set_item["boolean_keys"]
 
+def test_transform_items_include_iterating_metadata() -> None:
+    copy_item = next(item for item in _transform_items() if item["name"] == "copy")
+    help_item = next(item for item in _transform_items() if item["name"] == "help")
+    assert copy_item["iterating"] is True
+    assert help_item["iterating"] is False
+
 def test_render_execution_summary_renders_yaml_plan() -> None:
     plan = SurgeryPlan(
         inputs={},
