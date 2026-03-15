@@ -319,11 +319,11 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert h._errors[-1][0] == 404
 
 def test_webui_page_contains_exit_summary_mode_selector() -> None:
-    main_js = (webui_page._STATIC_DIR / "js" / "main.js").read_text(encoding="utf-8")
-    assert '<script type="module" src="/static/app.js"></script>' in webui_page._HTML_PAGE
-    assert "summary mode: raw" in main_js
-    assert "summary_mode: runTransformName === \"exit\"" in main_js
-    assert "mode: list aliases" in main_js
+    transforms_ui_js = (webui_page._STATIC_DIR / "js" / "transforms_ui.js").read_text(encoding="utf-8")
+    assert '<script type="module" src="/static/js/main.js"></script>' in webui_page._HTML_PAGE
+    assert "summary mode: raw" in transforms_ui_js
+    assert "summaryModeSelect" in transforms_ui_js
+    assert "mode: list aliases" in transforms_ui_js
 
 def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
@@ -342,7 +342,7 @@ def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path)
     assert any(k == "Cache-Control" for k, _v in h._headers)
 
     static = object.__new__(handler_cls)
-    static.path = "/static/app.js"
+    static.path = "/static/js/main.js"
     static.wfile = io.BytesIO()
     static._responses = []
     static._headers = []
