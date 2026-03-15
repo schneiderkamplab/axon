@@ -4,6 +4,7 @@ from pathlib import Path
 
 import brainsurgery  # noqa: F401
 
+import brainsurgery.web.ui.backend as webui_backend
 from brainsurgery.web.ui.backend import _render_execution_summary, _transform_items
 from brainsurgery.engine.plan import PlanStep, SurgeryPlan
 
@@ -63,3 +64,21 @@ def test_render_execution_summary_resolve_mode_includes_inputs() -> None:
     summary = _render_execution_summary(plan=plan, mode="resolve")
     assert "inputs:" in summary
     assert "- model::/tmp/model.safetensors" in summary
+
+
+def test_serialize_models_is_lightweight_and_does_not_render_dumps(monkeypatch) -> None:
+    class _Provider:
+        def list_model_aliases(self) -> list[str]:
+            return ["m"]
+
+        def get_state_dict(self, alias: str):
+            assert alias == "m"
+            return {"w": object(), "b": object()}
+
+    monkeypatch.setattr(
+        webui_backend,
+        "_render_dump_for_alias",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("should not be called")),
+    )
+    models = webui_backend._serialize_models(_Provider())
+    assert models == [{"alias": "m", "tensor_count": 2, "matched_count": 2, "total_count": 2}]
