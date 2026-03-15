@@ -7,13 +7,15 @@ import brainsurgery
 import pytest
 
 import brainsurgery.cli.complete as complete_module
+from brainsurgery.cli.complete import (
+    _completion_display_hook,
+    _is_transform_payload_start,
+)
 from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
-    _completion_display_hook,
     _configure_readline_completion_bindings,
     _infer_active_transform,
-    _is_transform_payload_start,
     _is_top_level_completion_position,
     _list_model_aliases,
     _match_payload_candidates,

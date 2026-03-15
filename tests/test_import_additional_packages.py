@@ -9,8 +9,7 @@ CONFIG = {
     "expressions": {"allowed": {"expressions", "core"}},
     "transforms": {"allowed": {"transforms", "algorithms", "core", "engine", "expressions"}},
     "cli": {"allowed": {"cli", "core", "engine"}},
-    "webui": {"allowed": {"webui", "core", "engine"}},
-    "webcli": {"allowed": {"webcli", "cli", "engine"}},
+    "web": {"allowed": {"web", "core", "engine", "http", "cli", "ui"}},
 }
 
 
@@ -157,9 +156,5 @@ def test_cli_import_policy() -> None:
     _assert_import_policy("cli", CONFIG["cli"]["allowed"])
 
 
-def test_webui_import_policy() -> None:
-    _assert_import_policy("webui", CONFIG["webui"]["allowed"])
-
-
-def test_webcli_import_policy() -> None:
-    _assert_import_policy("webcli", CONFIG["webcli"]["allowed"])
+def test_web_import_policy() -> None:
+    _assert_import_policy("web", CONFIG["web"]["allowed"])

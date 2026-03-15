@@ -1,6 +1,7 @@
 from importlib import import_module
 
 from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.core import TensorRef
 
 _module = import_module("brainsurgery.transforms.delete")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})

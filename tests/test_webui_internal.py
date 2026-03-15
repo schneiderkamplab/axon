@@ -12,11 +12,13 @@ from dataclasses import dataclass
 import pytest
 import typer
 
-from brainsurgery.webui.session import _SessionState
-import brainsurgery.webui.backend as webui_backend
-import brainsurgery.webui.cli as webui_cli
-import brainsurgery.webui.handler as webui_handler
-import brainsurgery.webui.server as webui_server
+from brainsurgery.engine import SurgeryPlan
+from brainsurgery.web.ui.session import _SessionState
+import brainsurgery.web.ui.backend as webui_backend
+import brainsurgery.web.ui.cli as webui_cli
+import brainsurgery.web.ui.handler as webui_handler
+import brainsurgery.web.ui.page as webui_page
+import brainsurgery.web.ui.server as webui_server
 
 class _Provider:
     def __init__(self) -> None:
@@ -91,68 +93,54 @@ def test_webui_backend_boolean_keys_and_apply_transform_branches(monkeypatch: py
 
     p = _Provider()
     p.models = {"only": {"w": object()}}
+    plan = SurgeryPlan(inputs={}, output=None)
     original_disabled = set(webui_backend.DISABLED_TRANSFORMS)
     try:
         webui_backend.DISABLED_TRANSFORMS.add("copy")
         with pytest.raises(ValueError, match="disabled"):
-            webui_backend._apply_transform(provider=p, transform_name="copy", payload={}, default_model="only")
+            webui_backend._apply_transform(
+                provider=p,
+                plan=plan,
+                transform_name="copy",
+                payload={},
+                default_model="only",
+            )
     finally:
         webui_backend.DISABLED_TRANSFORMS.clear()
         webui_backend.DISABLED_TRANSFORMS.update(original_disabled)
 
     with pytest.raises(ValueError, match="cannot be empty"):
-        webui_backend._apply_transform(provider=p, transform_name="assert", payload="  ", default_model="only")
+        webui_backend._apply_transform(
+            provider=p,
+            plan=plan,
+            transform_name="assert",
+            payload="  ",
+            default_model="only",
+        )
 
     with pytest.raises(ValueError, match="invalid assert YAML payload"):
-        webui_backend._apply_transform(provider=p, transform_name="assert", payload=":\n", default_model="only")
+        webui_backend._apply_transform(
+            provider=p,
+            plan=plan,
+            transform_name="assert",
+            payload=":\n",
+            default_model="only",
+        )
 
-    class _TransformWithInferError:
-        def compile(self, payload, default_model=None):
-            return {"payload": payload, "default_model": default_model}
-
-        def apply(self, spec, provider):
-            return None
-
-        def contributes_output_model(self, spec):
-            return True
-
-        def _infer_output_model(self, spec):
-            raise RuntimeError("nope")
-
-    class _Ctx:
-        def __enter__(self):
-            return None
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(webui_backend, "get_transform", lambda _name: _TransformWithInferError())
-    monkeypatch.setattr(webui_backend, "list_model_aliases", lambda _provider: ["only"])
-    monkeypatch.setattr(webui_backend, "use_output_emitter", lambda _sink: _Ctx())
     _output, default_model = webui_backend._apply_transform(
         provider=p,
+        plan=plan,
         transform_name="set",
-        payload={},
+        payload={"dry-run": True},
         default_model=None,
     )
     assert default_model == "only"
 
-    class _TransformAssertPass:
-        def compile(self, payload, default_model=None):
-            assert isinstance(payload, dict)
-            return {"payload": payload, "default_model": default_model}
-
-        def apply(self, spec, provider):
-            return None
-
-        def contributes_output_model(self, spec):
-            return False
-
-    monkeypatch.setattr(webui_backend, "get_transform", lambda _name: _TransformAssertPass())
     webui_backend._apply_transform(
         provider=p,
-        transform_name="assert",
-        payload="equal:\n  left: a\n  right: a\n",
+        plan=plan,
+        transform_name="help",
+        payload={},
         default_model="only",
     )
 
@@ -235,10 +223,27 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     h._read_json_body = lambda: {"transform": "exit", "payload": {}}
     monkeypatch.setattr(webui_handler, "_apply_transform", lambda **_k: ("out", "m"))
     monkeypatch.setattr(webui_handler, "_serialize_models", lambda _p: [])
-    monkeypatch.setattr(webui_handler, "_render_execution_summary", lambda **_k: "transforms: []\n")
+    seen_modes: list[str] = []
+    monkeypatch.setattr(
+        webui_handler,
+        "_render_execution_summary",
+        lambda **kwargs: (seen_modes.append(kwargs["mode"]) or "transforms: []\n"),
+    )
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is True
     assert "transforms:" in h._json[-1][1]["output"]
+    assert seen_modes[-1] == "raw"
+
+    h.path = "/api/_apply_transform"
+    h._read_json_body = lambda: {"transform": "exit", "payload": {}, "summary_mode": "resolve"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is True
+    assert seen_modes[-1] == "resolve"
+
+    h.path = "/api/_apply_transform"
+    h._read_json_body = lambda: {"transform": "exit", "payload": {}, "summary_mode": 1}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
 
     h.path = "/api/_apply_transform"
     h._read_json_body = lambda: {"transform": "help"}
@@ -307,6 +312,10 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     h.path = "/api/none"
     handler_cls.do_POST(h)
     assert h._errors[-1][0] == 404
+
+def test_webui_page_contains_exit_summary_mode_selector() -> None:
+    assert "summary mode: raw" in webui_page._HTML_PAGE
+    assert "summary_mode: runTransformName === \"exit\"" in webui_page._HTML_PAGE
 
 def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
@@ -397,22 +406,17 @@ def test_webui_server_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     events: list[str] = []
     provider = _Provider()
 
-    class _Server:
-        def __init__(self, addr, handler) -> None:
-            assert addr == ("127.0.0.1", 9022)
-            assert handler is not None
-
-        def serve_forever(self) -> None:
-            events.append("serve")
-            raise KeyboardInterrupt
-
-        def server_close(self) -> None:
-            events.append("close")
-
     monkeypatch.setattr(webui_server, "create_state_dict_provider", lambda **_k: provider)
     monkeypatch.setattr(webui_server, "_handler_factory", lambda _s: object)
     monkeypatch.setattr(webui_server.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(webui_server, "ThreadingHTTPServer", _Server)
+    monkeypatch.setattr(
+        webui_server,
+        "serve_http",
+        lambda **kwargs: (
+            events.extend(["serve", "close"]),
+            kwargs["on_close"](),
+        ),
+    )
     webui_server._serve_webui(host="127.0.0.1", port=9022)
     assert events == ["serve", "close"]
     assert provider.closed is True

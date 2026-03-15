@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import brainsurgery  # noqa: F401
 
-from brainsurgery.webui.backend import _render_execution_summary, _transform_items
+from brainsurgery.web.ui.backend import _render_execution_summary, _transform_items
 from brainsurgery.engine.plan import PlanStep, SurgeryPlan
 
 def test_transform_items_include_help_exit_dump() -> None:
@@ -29,10 +31,6 @@ def test_set_transform_metadata_contains_boolean_keys() -> None:
     assert "verbose" in set_item["boolean_keys"]
 
 def test_render_execution_summary_renders_yaml_plan() -> None:
-    class _Provider:
-        def list_model_aliases(self) -> list[str]:
-            return ["m2", "m1"]
-
     plan = SurgeryPlan(
         inputs={},
         output=None,
@@ -42,10 +40,20 @@ def test_render_execution_summary_renders_yaml_plan() -> None:
             PlanStep(raw={"exit": None}, status="done"),
         ],
     )
-    summary = _render_execution_summary(provider=_Provider(), plan=plan)
+    summary = _render_execution_summary(plan=plan)
     assert "transforms:" in summary
     assert "- load:" in summary
     assert "- copy:" in summary
     assert "- exit: {}" in summary
     assert "inputs:" not in summary
     assert "output:" not in summary
+
+def test_render_execution_summary_resolve_mode_includes_inputs() -> None:
+    plan = SurgeryPlan(
+        inputs={"model": Path("/tmp/model.safetensors")},
+        output=None,
+        steps=[PlanStep(raw={"exit": {}}, status="done")],
+    )
+    summary = _render_execution_summary(plan=plan, mode="resolve")
+    assert "inputs:" in summary
+    assert "- model::/tmp/model.safetensors" in summary

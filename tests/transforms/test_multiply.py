@@ -23,17 +23,7 @@ def test_multiply_apply_success() -> None:
             return self._state_dict
 
     provider = _Provider()
-    item = ResolvedTernaryMapping(
-        src_a_model="m",
-        src_a_name="a",
-        src_a_slice=None,
-        src_b_model="m",
-        src_b_name="b",
-        src_b_slice=None,
-        dst_model="m",
-        dst_name="dst",
-        dst_slice=None,
-    )
+    item = ("a", "b", "dst")
     spec = TernaryMappingSpec(
         from_a_ref=TensorRef(model="m", expr="a"),
         from_b_ref=TensorRef(model="m", expr="b"),
@@ -63,17 +53,7 @@ def test_multiply_shape_mismatch() -> None:
             assert model == "m"
             return self._state_dict
 
-    item = ResolvedTernaryMapping(
-        src_a_model="m",
-        src_a_name="a",
-        src_a_slice=None,
-        src_b_model="m",
-        src_b_name="b",
-        src_b_slice=None,
-        dst_model="m",
-        dst_name="dst",
-        dst_slice=None,
-    )
+    item = ("a", "b", "dst")
     try:
         spec = TernaryMappingSpec(
             from_a_ref=TensorRef(model="m", expr="a"),

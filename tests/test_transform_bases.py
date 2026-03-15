@@ -37,8 +37,8 @@ class _Binary(BinaryMappingTransform[BinaryMappingSpec]):
     def validate_refs(self, from_ref: TensorRef, to_ref: TensorRef) -> None:
         del from_ref, to_ref
 
-    def apply_mapping(self, item, provider) -> None:
-        del item, provider
+    def apply_mapping(self, spec, src_name, dst_name, provider) -> None:
+        del spec, src_name, dst_name, provider
 
 class _Unary(UnaryTransform[UnarySpec]):
     name = "unary"
@@ -60,8 +60,8 @@ class _Ternary(TernaryMappingTransform[_TernarySpec]):
     def validate_refs(self, from_a_ref: TensorRef, from_b_ref: TensorRef, to_ref: TensorRef) -> None:
         del from_a_ref, from_b_ref, to_ref
 
-    def apply_mapping(self, item, provider) -> None:
-        del item, provider
+    def apply_mapping(self, spec, src_a_name, src_b_name, dst_name, provider) -> None:
+        del spec, src_a_name, src_b_name, dst_name, provider
 
 def test_binary_mapping_transform_compile_and_destination_policy() -> None:
     transform = _Binary()
@@ -91,7 +91,7 @@ def test_ternary_mapping_transform_resolves_regex_triples_and_requires_existing_
     )
 
     resolved = transform.resolve_items(spec, _Provider())
-    assert [(item.src_a_name, item.src_b_name, item.dst_name) for item in resolved] == [
+    assert resolved == [
         ("layer.0.weight", "peer.0.weight", "copy.0.weight"),
         ("layer.1.weight", "peer.1.weight", "copy.1.weight"),
     ]

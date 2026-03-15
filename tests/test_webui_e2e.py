@@ -18,8 +18,8 @@ import torch
 import brainsurgery  # noqa: F401
 
 from brainsurgery.engine import create_state_dict_provider
-from brainsurgery.webui.handler import _handler_factory
-from brainsurgery.webui.session import _SessionState
+from brainsurgery.web.ui.handler import _handler_factory
+from brainsurgery.web.ui.session import _SessionState
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

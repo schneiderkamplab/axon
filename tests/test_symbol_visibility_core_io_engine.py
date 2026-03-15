@@ -12,8 +12,7 @@ TARGET_PACKAGES = (
     "expressions",
     "transforms",
     "cli",
-    "webui",
-    "webcli",
+    "web",
 )
 
 

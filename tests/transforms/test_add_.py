@@ -22,14 +22,7 @@ def test_add_in_place_apply_success() -> None:
             return self._state_dict
 
     provider = _Provider()
-    item = ResolvedMapping(
-        src_model="model",
-        src_name="src",
-        src_slice=None,
-        dst_model="model",
-        dst_name="dst",
-        dst_slice=None,
-    )
+    item = ("src", "dst")
     spec = BinaryMappingSpec(
         from_ref=TensorRef(model="model", expr="src"),
         to_ref=TensorRef(model="model", expr="dst"),
@@ -48,14 +41,7 @@ def test_add_in_place_shape_mismatch() -> None:
             assert model == "model"
             return self._state_dict
 
-    item = ResolvedMapping(
-        src_model="model",
-        src_name="src",
-        src_slice=None,
-        dst_model="model",
-        dst_name="dst",
-        dst_slice=None,
-    )
+    item = ("src", "dst")
     try:
         spec = BinaryMappingSpec(
             from_ref=TensorRef(model="model", expr="src"),

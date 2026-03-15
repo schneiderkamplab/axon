@@ -10,11 +10,13 @@ import pytest
 import typer
 
 from brainsurgery.engine import ProviderError
-import brainsurgery.webcli.cli as webcli_cli
-import brainsurgery.webcli.handler as webcli_handler
-from brainsurgery.webcli.models import _WebRunResult
-import brainsurgery.webcli.runner as webcli_runner
-import brainsurgery.webcli.server as webcli_server
+from brainsurgery.web.http import as_int, as_string
+import brainsurgery.web.cli.cli as webcli_cli
+import brainsurgery.web.cli.handler as webcli_handler
+from brainsurgery.web.cli.models import _WebRunResult
+from brainsurgery.web.cli.page import _HTML_PAGE
+import brainsurgery.web.cli.runner as webcli_runner
+import brainsurgery.web.cli.server as webcli_server
 
 def test_webcli_configure_logging_and_bad_level() -> None:
     webcli_cli.configure_logging("debug")
@@ -120,6 +122,40 @@ def test_webcli_handler_do_get_and_post_paths(monkeypatch: pytest.MonkeyPatch) -
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is True
 
+def test_webcli_handler_forwards_summary_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    handler_cls = _make_handler_for_read()
+    h = object.__new__(handler_cls)
+    h._json = []
+    h._payload = {"plan_yaml": "{}", "summary_mode": "resolve"}
+    h.path = "/api/run"
+    h._send_json = lambda payload, status=200: h._json.append((status, payload))
+    h._read_json_body = lambda: h._payload
+
+    seen: list[str] = []
+
+    def _fake_run(**kwargs):
+        seen.append(kwargs["summary_mode"])
+        return _WebRunResult(
+            ok=True,
+            logs=[],
+            output_lines=[],
+            summary_yaml=None,
+            written_path=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(webcli_handler, "_run_web_plan", _fake_run)
+    handler_cls.do_POST(h)
+    assert seen == ["resolve"]
+
+    h._payload = {"plan_yaml": "{}"}
+    handler_cls.do_POST(h)
+    assert seen == ["resolve", "raw"]
+
+def test_webcli_page_contains_summary_mode_control() -> None:
+    assert 'id="summaryMode"' in _HTML_PAGE
+    assert "summary_mode: document.getElementById(\"summaryMode\").value" in _HTML_PAGE
+
 @pytest.mark.parametrize(
     ("exc", "needle"),
     [
@@ -147,12 +183,12 @@ def test_webcli_handler_do_post_error_branches(
     assert needle in payload["error"]
 
 def test_webcli_handler_cast_helpers() -> None:
-    assert webcli_handler._as_string("x", "k") == "x"
+    assert as_string("x", "k") == "x"
     with pytest.raises(ValueError):
-        webcli_handler._as_string(1, "k")
-    assert webcli_handler._as_int(3, "k") == 3
+        as_string(1, "k")
+    assert as_int(3, "k") == 3
     with pytest.raises(ValueError):
-        webcli_handler._as_int(True, "k")
+        as_int(True, "k")
 
 def test_webcli_runner_configure_logging_and_list_log_handler() -> None:
     webcli_runner._configure_logging(log_level="info")
@@ -288,19 +324,13 @@ def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 def test_webcli_server_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
 
-    class _Server:
-        def __init__(self, addr, handler) -> None:
-            assert addr == ("127.0.0.1", 9001)
-            assert handler is not None
+    def _serve_http(**kwargs):
+        assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["port"] == 9001
+        assert kwargs["handler_factory"]() is object
+        events.extend(["serve", "close"])
 
-        def serve_forever(self) -> None:
-            events.append("serve")
-            raise KeyboardInterrupt
-
-        def server_close(self) -> None:
-            events.append("close")
-
-    monkeypatch.setattr(webcli_server, "ThreadingHTTPServer", _Server)
+    monkeypatch.setattr(webcli_server, "serve_http", _serve_http)
     monkeypatch.setattr(webcli_server, "_handler_factory", lambda: object)
     webcli_server._serve_webcli(host="127.0.0.1", port=9001)
     assert events == ["serve", "close"]

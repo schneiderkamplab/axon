@@ -25,3 +25,20 @@ def test_normalize_cli_args_keeps_dashdash_separator() -> None:
     args = ["plan.yaml", "--", "-i", "--log-level", "debug"]
     normalized = brainsurgery._normalize_cli_args(args)
     assert normalized == ["plan.yaml", "--", "-i", "--log-level", "debug"]
+
+def test_normalize_cli_args_handles_summary_mode_option() -> None:
+    args = [
+        "examples/gpt2.yaml",
+        "--summary-mode",
+        "resolve",
+        "--summarize-path",
+        "/tmp/summary.yaml",
+    ]
+    normalized = brainsurgery._normalize_cli_args(args)
+    assert normalized == [
+        "--summary-mode",
+        "resolve",
+        "--summarize-path",
+        "/tmp/summary.yaml",
+        "examples/gpt2.yaml",
+    ]

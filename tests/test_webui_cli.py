@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import brainsurgery.webui.cli as webui_module
+import brainsurgery.web.ui.cli as webui_module
 
 def test_webui_opens_browser_and_serves(monkeypatch) -> None:
     opened: list[str] = []

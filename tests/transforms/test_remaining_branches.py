@@ -138,9 +138,9 @@ def test_copy_apply_slice_and_destination_exists_branch() -> None:
     state_dict["src"] = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
     state_dict["dst"] = torch.tensor([0.0], dtype=torch.float32)
     provider = _provider_for(model="m", state_dict=state_dict)
-    item = ResolvedMapping("m", "src", (slice(0, 1),), "m", "dst", None)
+    spec = module.BinaryMappingSpec(TensorRef("m", "src", slice_spec="[:1]"), TensorRef("m", "dst"))
     with pytest.raises(TransformError, match="destination already exists"):
-        module._copy_apply(module.BinaryMappingSpec(TensorRef("m", "src"), TensorRef("m", "dst")), item, provider)
+        module._copy_apply(spec, "src", "dst", provider)
 
 def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.diff")
@@ -311,9 +311,9 @@ def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     state_dict["a"] = torch.tensor([[1.0]], dtype=torch.float32)
     state_dict["b"] = torch.tensor([[1.0]], dtype=torch.float16)
     provider = _provider_for(model="m", state_dict=state_dict)
-    item = module.ResolvedTernaryMapping("m", "a", None, "m", "b", None, "m", "c", None)
+    spec = module.TernaryMappingSpec(TensorRef("m", "a"), TensorRef("m", "b"), TensorRef("m", "c"))
     with pytest.raises(TransformError, match="dtype mismatch"):
-        module._matmul_apply(module.TernaryMappingSpec(TensorRef("m", "a"), TensorRef("m", "b"), TensorRef("m", "c")), item, provider)
+        module._matmul_apply(spec, "a", "b", "c", provider)
 
     with monkeypatch.context() as patch:
         calls = [0]
@@ -326,19 +326,14 @@ def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
 
         patch.setattr(module, "select_tensor", _select)
         with pytest.raises(TransformError, match="device mismatch"):
-            module._matmul_apply(
-                module.TernaryMappingSpec(TensorRef("m", "a"), TensorRef("m", "b"), TensorRef("m", "c")),
-                item,
-                provider,
-            )
+            module._matmul_apply(spec, "a", "b", "c", provider)
 
     state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones((2, 3), dtype=torch.float32)
     state_dict["b"] = torch.ones((4, 2), dtype=torch.float32)
     provider = _provider_for(model="m", state_dict=state_dict)
-    item = module.ResolvedTernaryMapping("m", "a", None, "m", "b", None, "m", "c", None)
     with pytest.raises(TransformError, match="shape mismatch"):
-        module._matmul_apply(module.TernaryMappingSpec(TensorRef("m", "a"), TensorRef("m", "b"), TensorRef("m", "c")), item, provider)
+        module._matmul_apply(spec, "a", "b", "c", provider)
 
 def test_move_apply_error_branches() -> None:
     module = import_module("brainsurgery.transforms.move")
@@ -351,9 +346,12 @@ def test_move_apply_error_branches() -> None:
             self[key] = slot
 
     state_dict = _StateDict({"src": torch.ones(1), "dst": torch.ones(1)})
+    spec = module.BinaryMappingSpec(TensorRef("m", "src"), TensorRef("m", "dst"))
     with pytest.raises(module.MoveTransformError, match="destination already exists"):
         module.MoveTransform().apply_mapping(
-            ResolvedMapping("m", "src", None, "m", "dst", None),
+            spec,
+            "src",
+            "dst",
             _provider_for(model="m", state_dict=state_dict),
         )
 
@@ -363,7 +361,9 @@ def test_move_apply_error_branches() -> None:
 
     with pytest.raises(module.MoveTransformError, match="destination missing after move"):
         module.MoveTransform().apply_mapping(
-            ResolvedMapping("m", "src", None, "m", "dst", None),
+            spec,
+            "src",
+            "dst",
             _provider_for(model="m", state_dict=_BrokenBindStateDict({"src": torch.ones(1)})),
         )
 
@@ -373,7 +373,9 @@ def test_move_apply_error_branches() -> None:
 
     with pytest.raises(module.MoveTransformError, match="source still present after move"):
         module.MoveTransform().apply_mapping(
-            ResolvedMapping("m", "src", None, "m", "dst", None),
+            spec,
+            "src",
+            "dst",
             _provider_for(model="m", state_dict=_StickyDeleteStateDict({"src": torch.ones(1)})),
         )
 
@@ -388,13 +390,15 @@ def test_permute_rank_permutation_and_order_type_errors() -> None:
     with pytest.raises(TransformError, match="rank mismatch"):
         module._permute_apply(
             module.PermuteSpec(TensorRef("m", "x"), TensorRef("m", "y"), order=(0, 1, 2)),
-            ResolvedMapping("m", "x", None, "m", "y", None),
+            "x",
+            "y",
             provider,
         )
     with pytest.raises(TransformError, match="must be a permutation"):
         module._permute_apply(
             module.PermuteSpec(TensorRef("m", "x"), TensorRef("m", "y"), order=(0, 0)),
-            ResolvedMapping("m", "x", None, "m", "y", None),
+            "x",
+            "y",
             provider,
         )
 
@@ -520,7 +524,8 @@ def test_reshape_parse_and_runtime_error_branches() -> None:
     with pytest.raises(TransformError, match="reshape failed"):
         module._reshape_apply(
             module.ReshapeSpec(TensorRef("m", "x"), TensorRef("m", "y"), shape=(2, 3)),
-            ResolvedMapping("m", "x", None, "m", "y", None),
+            "x",
+            "y",
             provider,
         )
     with pytest.raises(TransformError, match="reshape_ failed"):

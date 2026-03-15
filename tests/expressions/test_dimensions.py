@@ -1,5 +1,7 @@
 from importlib import import_module
 
+import torch
+
 _module = import_module("brainsurgery.expressions.dimensions")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 

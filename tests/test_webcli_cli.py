@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import brainsurgery.webcli.cli as webcli_module
+import brainsurgery.web.cli.cli as webcli_module
 
 def test_webcli_opens_browser_and_serves(monkeypatch) -> None:
     opened: list[str] = []

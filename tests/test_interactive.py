@@ -6,16 +6,18 @@ from pathlib import Path
 import pytest
 
 import brainsurgery.cli.interactive as interactive_module
+from brainsurgery.cli.complete import (
+    _is_transform_payload_start,
+    _payload_context,
+    _render_completion_preview,
+)
 from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
     _configure_readline_completion_bindings,
     _infer_active_transform,
-    _is_transform_payload_start,
     _match_payload_candidates,
-    _payload_context,
     _readline_safe_prompt,
-    _render_completion_preview,
     _is_top_level_completion_position,
     _parse_transform_block,
     _prompt_interactive_transform,

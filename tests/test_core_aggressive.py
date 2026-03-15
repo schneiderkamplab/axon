@@ -15,7 +15,6 @@ from brainsurgery.core import (
     DeclarativeUnaryTransform,
     DestinationPolicy,
     Docs,
-    ResolvedTernaryMapping,
     TernaryMappingSpec,
     TernaryMappingTransform,
     TensorRef,
@@ -61,11 +60,11 @@ class _NoDocsUnary(DeclarativeUnaryTransform[UnarySpec]):
 
 class _NoDocsBinary(DeclarativeBinaryTransform[BinaryMappingSpec]):
     name = "nodocs_b"
-    apply_fn = staticmethod(lambda spec, item, provider: None)
+    apply_fn = staticmethod(lambda spec, src_name, dst_name, provider: None)
 
 class _NoDocsTernary(DeclarativeTernaryTransform[TernaryMappingSpec]):
     name = "nodocs_t"
-    apply_fn = staticmethod(lambda spec, item, provider: None)
+    apply_fn = staticmethod(lambda spec, src_a_name, src_b_name, dst_name, provider: None)
 
 class _DocUnary(DeclarativeUnaryTransform[UnarySpec]):
     name = "doc_u"
@@ -76,13 +75,13 @@ class _DocBinaryAny(DeclarativeBinaryTransform[BinaryMappingSpec]):
     name = "doc_b_any"
     docs = Docs(summary="doc binary any")
     destination_policy = DestinationPolicy.ANY
-    apply_fn = staticmethod(lambda spec, item, provider: None)
+    apply_fn = staticmethod(lambda spec, src_name, dst_name, provider: None)
 
 class _DocTernaryAny(DeclarativeTernaryTransform[TernaryMappingSpec]):
     name = "doc_t_any"
     docs = Docs(summary="doc ternary any")
     destination_policy = DestinationPolicy.ANY
-    apply_fn = staticmethod(lambda spec, item, provider: None)
+    apply_fn = staticmethod(lambda spec, src_a_name, src_b_name, dst_name, provider: None)
 
 def test_core_base_abstract_methods_raise() -> None:
     with pytest.raises(NotImplementedError):
@@ -178,9 +177,16 @@ class _Ternary(TernaryMappingTransform[_TernarySpec]):
     def validate_refs(self, from_a_ref: TensorRef, from_b_ref: TensorRef, to_ref: TensorRef) -> None:
         del from_a_ref, from_b_ref, to_ref
 
-    def apply_mapping(self, item: ResolvedTernaryMapping, provider: _Provider) -> None:
-        del provider
-        self.applied.append(item.dst_name)
+    def apply_mapping(
+        self,
+        spec: _TernarySpec,
+        src_a_name: str,
+        src_b_name: str,
+        dst_name: str,
+        provider: _Provider,
+    ) -> None:
+        del spec, src_a_name, src_b_name, provider
+        self.applied.append(dst_name)
 
 def test_core_transform_infer_and_apply_error_paths() -> None:
     unary = _Unary()
@@ -198,7 +204,7 @@ def test_core_transform_infer_and_apply_error_paths() -> None:
 
     item = binary.build_spec(TensorRef(model="a", expr="x"), TensorRef(model="dst", expr="z"))
     with pytest.raises(NotImplementedError):
-        binary.apply_item(item, object(), _Provider())
+        binary.apply_item(item, ("x", "z"), _Provider())
 
     ternary = _Ternary()
     with pytest.raises(TransformError, match="output model missing"):
@@ -210,17 +216,7 @@ def test_core_transform_infer_and_apply_error_paths() -> None:
             )
         )
 
-    mapping = ResolvedTernaryMapping(
-        src_a_model="a",
-        src_a_name="x.0",
-        src_a_slice=None,
-        src_b_model="b",
-        src_b_name="y.0",
-        src_b_slice=None,
-        dst_model="dst",
-        dst_name="z.1",
-        dst_slice=None,
-    )
+    mapping = ("x.0", "y.0", "z.1")
     ternary.apply_item(
         _TernarySpec(
             from_a_ref=TensorRef(model="a", expr="x"),
@@ -318,19 +314,7 @@ def test_core_ternary_transform_error_branches() -> None:
         )
 
     t.destination_policy = DestinationPolicy.MUST_NOT_EXIST
-    mappings = [
-        ResolvedTernaryMapping(
-            src_a_model="a",
-            src_a_name="x.0",
-            src_a_slice=None,
-            src_b_model="b",
-            src_b_name="y.0",
-            src_b_slice=None,
-            dst_model="dst",
-            dst_name="z.0",
-            dst_slice=None,
-        )
-    ]
+    mappings = [("x.0", "y.0", "z.0")]
     with pytest.raises(TransformError, match="destination already exists"):
         t.validate_resolved_items(
             _TernarySpec(
@@ -503,9 +487,9 @@ def test_core_declarative_uncovered_paths() -> None:
     assert "may be created or overwritten" in _DocTernaryAny.help_text
 
     with pytest.raises(NotImplementedError):
-        _DocBinaryAny().apply_mapping(object(), _Provider())  # type: ignore[arg-type]
+        _DocBinaryAny().apply_mapping(object(), "x", "y", _Provider())  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError):
-        _DocTernaryAny().apply_mapping(object(), _Provider())  # type: ignore[arg-type]
+        _DocTernaryAny().apply_mapping(object(), "a", "b", "c", _Provider())  # type: ignore[arg-type]
 
 def test_core_ternary_validate_any_policy_returns_early() -> None:
     provider = _Provider()
@@ -516,18 +500,6 @@ def test_core_ternary_validate_any_policy_returns_early() -> None:
             from_b_ref=TensorRef(model="b", expr=r"y.\1"),
             to_ref=TensorRef(model="dst", expr=r"z.\1"),
         ),
-        [
-            ResolvedTernaryMapping(
-                src_a_model="a",
-                src_a_name="x.0",
-                src_a_slice=None,
-                src_b_model="b",
-                src_b_name="y.0",
-                src_b_slice=None,
-                dst_model="dst",
-                dst_name="z.0",
-                dst_slice=None,
-            )
-        ],
+        [("x.0", "y.0", "z.0")],
         provider,
     )

@@ -32,14 +32,7 @@ def test_copy_apply_clones_tensor() -> None:
             return self._state_dict
 
     provider = _Provider()
-    item = ResolvedMapping(
-        src_model="model",
-        src_name="src",
-        src_slice=None,
-        dst_model="model",
-        dst_name="dst",
-        dst_slice=None,
-    )
+    item = ("src", "dst")
     spec = BinaryMappingSpec(
         from_ref=TensorRef(model="model", expr="src"),
         to_ref=TensorRef(model="model", expr="dst"),
@@ -58,14 +51,7 @@ def test_copy_apply_emits_verbose_activity_line(capsys) -> None:
             return self._state_dict
 
     provider = _Provider()
-    item = ResolvedMapping(
-        src_model="model",
-        src_name="h.0.attn.bias",
-        src_slice=None,
-        dst_model="model",
-        dst_name="i.0.attn.bias",
-        dst_slice=None,
-    )
+    item = ("h.0.attn.bias", "i.0.attn.bias")
     spec = BinaryMappingSpec(
         from_ref=TensorRef(model="model", expr="h.0.attn.bias"),
         to_ref=TensorRef(model="model", expr="i.0.attn.bias"),
@@ -79,14 +65,7 @@ def test_copy_apply_emits_verbose_activity_line(capsys) -> None:
 
     provider._state_dict["i.0.attn.bias"] = provider._state_dict.pop("i.0.attn.bias")
     set_runtime_flag("verbose", False)
-    item = ResolvedMapping(
-        src_model="model",
-        src_name="h.0.attn.bias",
-        src_slice=None,
-        dst_model="model",
-        dst_name="j.0.attn.bias",
-        dst_slice=None,
-    )
+    item = ("h.0.attn.bias", "j.0.attn.bias")
     spec = BinaryMappingSpec(
         from_ref=TensorRef(model="model", expr="h.0.attn.bias"),
         to_ref=TensorRef(model="model", expr="j.0.attn.bias"),

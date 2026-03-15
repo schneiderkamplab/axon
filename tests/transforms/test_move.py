@@ -1,5 +1,7 @@
 from importlib import import_module
 
+from brainsurgery.core import BinaryMappingSpec, TensorRef
+
 _module = import_module("brainsurgery.transforms.move")
 globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
 
@@ -36,14 +38,10 @@ def test_move_apply_moves_slot() -> None:
             return self._state_dict
 
     provider = _Provider()
-    item = ResolvedMapping(
-        src_model="model",
-        src_name="src",
-        src_slice=None,
-        dst_model="model",
-        dst_name="dst",
-        dst_slice=None,
+    spec = BinaryMappingSpec(
+        from_ref=TensorRef(model="model", expr="src"),
+        to_ref=TensorRef(model="model", expr="dst"),
     )
-    MoveTransform().apply_mapping(item, provider)
+    MoveTransform().apply_mapping(spec, "src", "dst", provider)
     assert "src" not in provider._state_dict
     assert "dst" in provider._state_dict
