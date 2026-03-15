@@ -633,6 +633,49 @@ def test_transforms_package_skips_private_modules(monkeypatch: pytest.MonkeyPatc
     reload(package)
     assert calls == ["brainsurgery.transforms.x"]
 
+
+def test_transforms_package_imports_modules_in_sorted_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        pkgutil,
+        "iter_modules",
+        lambda _path: [
+            SimpleNamespace(name="zeta"),
+            SimpleNamespace(name="alpha"),
+            SimpleNamespace(name="_private"),
+        ],
+    )
+    import importlib as _importlib
+
+    monkeypatch.setattr(_importlib, "import_module", lambda name: calls.append(name))
+    package = import_module("brainsurgery.transforms")
+    reload(package)
+    assert calls == ["brainsurgery.transforms.alpha", "brainsurgery.transforms.zeta"]
+
+
+def test_transforms_package_duplicate_discovery_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        pkgutil,
+        "iter_modules",
+        lambda _path: [SimpleNamespace(name="dup"), SimpleNamespace(name="dup")],
+    )
+    package = import_module("brainsurgery.transforms")
+    with pytest.raises(RuntimeError, match="Duplicate transform module names discovered"):
+        reload(package)
+
+
+def test_transforms_package_import_failure_reports_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pkgutil, "iter_modules", lambda _path: [SimpleNamespace(name="bad")])
+    import importlib as _importlib
+
+    def _raise(name: str):
+        raise ValueError(name)
+
+    monkeypatch.setattr(_importlib, "import_module", _raise)
+    package = import_module("brainsurgery.transforms")
+    with pytest.raises(RuntimeError, match=r"Failed to import discovered transform module: brainsurgery\.transforms\.bad"):
+        reload(package)
+
 def test_help_print_all_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.help")
     lines: list[str] = []
