@@ -12,7 +12,7 @@ from brainsurgery.engine.plan import (
     parse_input_entry,
     parse_output,
     parse_output_mapping,
-    parse_transforms,
+    parse_raw_transforms,
     validate_model_aliases,
 )
 
@@ -95,9 +95,9 @@ def test_validate_model_aliases_rejects_non_collecting_spec() -> None:
     with pytest.raises(PlanLoaderError, match="does not expose collect_models"):
         validate_model_aliases(_NoCollectSpec(), {"base"}, index=1)
 
-def test_parse_transforms_rejects_non_list() -> None:
+def test_parse_raw_transforms_rejects_non_list() -> None:
     with pytest.raises(PlanLoaderError, match="transforms must be a list"):
-        parse_transforms({}, {})
+        parse_raw_transforms({})
 
 def test_parse_transform_entry_validation_errors() -> None:
     with pytest.raises(PlanLoaderError, match="single-key mapping"):

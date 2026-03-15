@@ -8,7 +8,6 @@ import pytest
 
 import brainsurgery.cli.complete as complete_module
 from brainsurgery.cli.complete import (
-    _completion_display_hook,
     _is_transform_payload_start,
 )
 from brainsurgery.cli.interactive import (
@@ -433,32 +432,6 @@ def test_configure_readline_completion_bindings_ignores_parse_failures() -> None
             raise RuntimeError("broken")
 
     complete_module._configure_readline_completion_bindings(_BrokenReadline())
-
-def test_completion_display_hook_prints_preview_and_redisplays(capsys: pytest.CaptureFixture[str]) -> None:
-    class _Readline:
-        def __init__(self) -> None:
-            self.called = False
-
-        def redisplay(self) -> None:
-            self.called = True
-
-    readline = _Readline()
-    _completion_display_hook("", ["a", "b"], 0, readline)
-    output = capsys.readouterr().out
-    assert "Completions: a  b" in output
-    assert readline.called is True
-
-def test_completion_display_hook_ignores_redisplay_errors() -> None:
-    class _BrokenReadline:
-        def redisplay(self) -> None:
-            raise RuntimeError("broken redisplay")
-
-    _completion_display_hook("", ["a"], 0, _BrokenReadline())
-
-def test_completion_display_hook_and_preview_empty_paths(capsys: pytest.CaptureFixture[str]) -> None:
-    _completion_display_hook("", [], 0, None)
-    assert capsys.readouterr().out == ""
-    assert complete_module._render_completion_preview([]) == ""
 
 def test_infer_active_transform_returns_none_when_unknown() -> None:
     assert _infer_active_transform(["something without colon"], "also invalid") is None

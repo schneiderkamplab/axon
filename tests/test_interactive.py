@@ -9,7 +9,6 @@ import brainsurgery.cli.interactive as interactive_module
 from brainsurgery.cli.complete import (
     _is_transform_payload_start,
     _payload_context,
-    _render_completion_preview,
 )
 from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
@@ -477,10 +476,6 @@ def test_prefixes_rename_from_value_completion_uses_aliases_not_tensor_refs() ->
         model_aliases=["scratch", "source", "base"],
     )
     assert matches == ["scratch", "source"]
-
-def test_render_completion_preview_compacts_and_limits() -> None:
-    preview = _render_completion_preview(["a", "b", "c"], limit=2)
-    assert preview == "a  b (+1 more)"
 
 def test_readline_safe_prompt_wraps_ansi_when_readline_available(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(interactive_module, "readline", object())
