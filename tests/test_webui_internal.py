@@ -319,9 +319,11 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert h._errors[-1][0] == 404
 
 def test_webui_page_contains_exit_summary_mode_selector() -> None:
-    assert "summary mode: raw" in webui_page._HTML_PAGE
-    assert "summary_mode: runTransformName === \"exit\"" in webui_page._HTML_PAGE
-    assert "mode: list aliases" in webui_page._HTML_PAGE
+    main_js = (webui_page._STATIC_DIR / "js" / "main.js").read_text(encoding="utf-8")
+    assert '<script type="module" src="/static/app.js"></script>' in webui_page._HTML_PAGE
+    assert "summary mode: raw" in main_js
+    assert "summary_mode: runTransformName === \"exit\"" in main_js
+    assert "mode: list aliases" in main_js
 
 def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
@@ -338,6 +340,28 @@ def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path)
     handler_cls._send_json(h, {"ok": True})
     assert h._responses == [200, 200]
     assert any(k == "Cache-Control" for k, _v in h._headers)
+
+    static = object.__new__(handler_cls)
+    static.path = "/static/app.js"
+    static.wfile = io.BytesIO()
+    static._responses = []
+    static._headers = []
+    static._errors = []
+    static.end_headers = lambda: None
+    static.send_response = lambda code: static._responses.append(code)
+    static.send_header = lambda key, val: static._headers.append((key, val))
+    static.send_error = lambda code, message: static._errors.append((code, message))
+    handler_cls.do_GET(static)
+    assert static._responses == [200]
+    assert any(k == "Content-Type" and "application/javascript" in v for k, v in static._headers)
+    assert static.wfile.getvalue()
+
+    static_missing = object.__new__(handler_cls)
+    static_missing.path = "/static/missing.js"
+    static_missing._errors = []
+    static_missing.send_error = lambda code, message: static_missing._errors.append((code, message))
+    handler_cls.do_GET(static_missing)
+    assert static_missing._errors[-1][0] == 404
 
     missing_len = object.__new__(handler_cls)
     missing_len.headers = {}
