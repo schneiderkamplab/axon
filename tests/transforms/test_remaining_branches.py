@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import pkgutil
 from importlib import import_module, reload
 from types import SimpleNamespace
 
-import pkgutil
 import pytest
 import torch
 
 from brainsurgery.core import ResolvedMapping, TensorRef, TransformError
-
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
+
 def _provider_for(*, model: str, state_dict) -> object:
     class _Provider:
         def get_state_dict(self, selected: str):
@@ -17,6 +18,7 @@ def _provider_for(*, model: str, state_dict) -> object:
             return state_dict
 
     return _Provider()
+
 
 def test_assign_validate_refs_parses_slices() -> None:
     module = import_module("brainsurgery.transforms.assign")
@@ -26,11 +28,13 @@ def test_assign_validate_refs_parses_slices() -> None:
         TensorRef(model="m", expr="b", slice_spec="[:1]"),
     )
 
+
 def test_assert_completion_payload_start_candidates_non_empty_prefix() -> None:
     module = import_module("brainsurgery.transforms.assert_")
     out = module.AssertTransform().completion_payload_start_candidates("e")
     assert out is not None
     assert "{ " not in out
+
 
 def test_clamp_compile_rejects_min_gt_max() -> None:
     module = import_module("brainsurgery.transforms.clamp")
@@ -39,6 +43,7 @@ def test_clamp_compile_rejects_min_gt_max() -> None:
             {"from": "x", "to": "y", "min": 2, "max": 1},
             default_model="m",
         )
+
 
 def test_concat_error_branches_and_validation_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.concat")
@@ -106,6 +111,7 @@ def test_concat_error_branches_and_validation_helpers(monkeypatch: pytest.Monkey
             dim=0,
         )
 
+
 def test_concat_apply_rejects_existing_destination_and_source_match_count() -> None:
     module = import_module("brainsurgery.transforms.concat")
     transform = module.ConcatTransform()
@@ -132,6 +138,7 @@ def test_concat_apply_rejects_existing_destination_and_source_match_count() -> N
     with pytest.raises(module.ConcatTransformError, match="exactly one tensor"):
         transform._resolve_source_tensor(TensorRef(model="m", expr=".*"), provider)
 
+
 def test_copy_apply_slice_and_destination_exists_branch() -> None:
     module = import_module("brainsurgery.transforms.copy")
     state_dict = _InMemoryStateDict()
@@ -141,6 +148,7 @@ def test_copy_apply_slice_and_destination_exists_branch() -> None:
     spec = module.BinaryMappingSpec(TensorRef("m", "src", slice_spec="[:1]"), TensorRef("m", "dst"))
     with pytest.raises(TransformError, match="destination already exists"):
         module._copy_apply(spec, "src", "dst", provider)
+
 
 def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.diff")
@@ -166,10 +174,14 @@ def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch)
     assert spec.left_ref.slice_spec == "[:1]"
 
     with pytest.raises(module.DiffTransformError, match="boom"):
-        monkeypatch.setattr(module, "match_expr_names", lambda **_: (_ for _ in ()).throw(TransformError("boom")))
+        monkeypatch.setattr(
+            module, "match_expr_names", lambda **_: (_ for _ in ()).throw(TransformError("boom"))
+        )
         state_dict = _InMemoryStateDict()
         state_dict["x"] = torch.ones(1)
-        module._resolve_names(TensorRef(model="m", expr="x"), _provider_for(model="m", state_dict=state_dict))
+        module._resolve_names(
+            TensorRef(model="m", expr="x"), _provider_for(model="m", state_dict=state_dict)
+        )
 
     class _FakeTensor:
         def __init__(self, *, shape, dtype, device, complex_: bool = False) -> None:
@@ -190,12 +202,14 @@ def test_diff_compile_and_helper_error_branches(monkeypatch: pytest.MonkeyPatch)
     assert module._diff_mode("left: x") is None
     assert module._compile_eps(None) is None
 
+
 def test_diff_complex_eps_branch() -> None:
     module = import_module("brainsurgery.transforms.diff")
     left = torch.tensor([1 + 1j], dtype=torch.complex64)
     right = torch.tensor([2 + 1j], dtype=torch.complex64)
     reason = module._difference_reason(left, right, eps=0.1)
     assert "max_abs_diff" in str(reason)
+
 
 def test_diff_remaining_completion_and_spec_helpers() -> None:
     module = import_module("brainsurgery.transforms.diff")
@@ -216,6 +230,7 @@ def test_diff_remaining_completion_and_spec_helpers() -> None:
     assert transform.completion_key_candidates("mode: refs left: x", "z") == []
     assert transform.completion_key_candidates("mode: refs left: x right: y eps: 1", "") == ["}"]
     assert module._diff_mode("mode: ALIASES left_alias: a") == "aliases"
+
 
 def test_dump_remaining_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.dump")
@@ -239,12 +254,17 @@ def test_dump_remaining_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(module.DumpTransformError, match="invalid tree structure"):
         module.insert_into_tree({}, ["0"], 2)
 
-    assert module._maybe_get_access_counts(SimpleNamespace(access_counts={}), "x", verbosity="full") is None
+    assert (
+        module._maybe_get_access_counts(SimpleNamespace(access_counts={}), "x", verbosity="full")
+        is None
+    )
     monkeypatch.setattr(module, "emit_line", lambda _line: None)
+
 
 def test_exit_contributes_output_model_false() -> None:
     module = import_module("brainsurgery.transforms.exit")
     assert module.ExitTransform().contributes_output_model(object()) is False
+
 
 def test_fill_parse_config_and_build_error_branches() -> None:
     module = import_module("brainsurgery.transforms.fill")
@@ -253,7 +273,9 @@ def test_fill_parse_config_and_build_error_branches() -> None:
     with pytest.raises(TransformError, match="mode must be one of"):
         module.parse_fill_config({"mode": "wat"}, op_name="fill", error_type=TransformError)
     with pytest.raises(TransformError, match="seed must be an integer"):
-        module.parse_fill_config({"mode": "rand", "seed": 1.2}, op_name="fill", error_type=TransformError)
+        module.parse_fill_config(
+            {"mode": "rand", "seed": 1.2}, op_name="fill", error_type=TransformError
+        )
     with pytest.raises(TransformError, match="values is required"):
         module.parse_fill_config({"mode": "tensor"}, op_name="fill", error_type=TransformError)
     with pytest.raises(TransformError, match="distribution must be one of"):
@@ -303,7 +325,10 @@ def test_fill_parse_config_and_build_error_branches() -> None:
         seed=None,
     )
     with pytest.raises(TransformError, match="cannot broadcast"):
-        module.build_filled_tensor_like(torch.zeros((2, 2), dtype=torch.float32), bad, TransformError)
+        module.build_filled_tensor_like(
+            torch.zeros((2, 2), dtype=torch.float32), bad, TransformError
+        )
+
 
 def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.matmul")
@@ -318,13 +343,13 @@ def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     with monkeypatch.context() as patch:
         calls = [0]
 
-        def _select(_tensor, _slice):
+        def view_for_ref_name(_provider, _ref, _tensor_name):
             calls[0] += 1
             if calls[0] == 1:
-                return SimpleNamespace(dtype=torch.float32, device=torch.device("cpu"))
-            return SimpleNamespace(dtype=torch.float32, device=torch.device("meta"))
+                return (None, SimpleNamespace(dtype=torch.float32, device=torch.device("cpu")))
+            return (None, SimpleNamespace(dtype=torch.float32, device=torch.device("meta")))
 
-        patch.setattr(module, "select_tensor", _select)
+        patch.setattr(module, "view_for_ref_name", view_for_ref_name)
         with pytest.raises(TransformError, match="device mismatch"):
             module._matmul_apply(spec, "a", "b", "c", provider)
 
@@ -334,6 +359,7 @@ def test_matmul_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _provider_for(model="m", state_dict=state_dict)
     with pytest.raises(TransformError, match="shape mismatch"):
         module._matmul_apply(spec, "a", "b", "c", provider)
+
 
 def test_move_apply_error_branches() -> None:
     module = import_module("brainsurgery.transforms.move")
@@ -379,6 +405,7 @@ def test_move_apply_error_branches() -> None:
             _provider_for(model="m", state_dict=_StickyDeleteStateDict({"src": torch.ones(1)})),
         )
 
+
 def test_permute_rank_permutation_and_order_type_errors() -> None:
     module = import_module("brainsurgery.transforms.permute")
     with pytest.raises(TransformError, match="non-empty list of integers"):
@@ -401,6 +428,7 @@ def test_permute_rank_permutation_and_order_type_errors() -> None:
             "y",
             provider,
         )
+
 
 def test_phlora_remaining_error_branches() -> None:
     module = import_module("brainsurgery.transforms.phlora")
@@ -509,6 +537,7 @@ def test_phlora_remaining_error_branches() -> None:
             provider,
         )
 
+
 def test_reshape_parse_and_runtime_error_branches() -> None:
     module = import_module("brainsurgery.transforms.reshape")
     with pytest.raises(TransformError, match="non-empty list of integers"):
@@ -535,11 +564,14 @@ def test_reshape_parse_and_runtime_error_branches() -> None:
             provider,
         )
 
+
 def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.split")
     transform = module.SplitTransform()
 
-    spec = transform.compile({"from": "x::[:1]", "to": ["a", "b"], "sizes": [1, 1]}, default_model="m")
+    spec = transform.compile(
+        {"from": "x::[:1]", "to": ["a", "b"], "sizes": [1, 1]}, default_model="m"
+    )
     assert spec.from_ref.slice_spec == "[:1]"
     with pytest.raises(module.SplitTransformError, match="at least two references"):
         transform.compile({"from": "x", "to": ["a"], "sizes": [1]}, default_model="m")
@@ -565,7 +597,9 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
                 default_model=None,
             )
     with pytest.raises(module.SplitTransformError, match="must not be sliced"):
-        transform.compile({"from": "m::x", "to": ["m::a::[:]", "m::b"], "sizes": [1, 1]}, default_model=None)
+        transform.compile(
+            {"from": "m::x", "to": ["m::a::[:]", "m::b"], "sizes": [1, 1]}, default_model=None
+        )
 
     with monkeypatch.context() as patch:
         patch.setattr(
@@ -574,10 +608,15 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
             lambda _value, default_model=None: TensorRef(model="m", expr=object()),
         )
         with pytest.raises(module.SplitTransformError, match="single names"):
-            transform.compile({"from": "m::x", "to": ["m::a", "m::b"], "sizes": [1, 1]}, default_model=None)
+            transform.compile(
+                {"from": "m::x", "to": ["m::a", "m::b"], "sizes": [1, 1]}, default_model=None
+            )
 
     with pytest.raises(module.SplitTransformError, match="must be an integer"):
-        transform.compile({"from": "m::x", "to": ["m::a", "m::b"], "sizes": [1, 1], "dim": "0"}, default_model=None)
+        transform.compile(
+            {"from": "m::x", "to": ["m::a", "m::b"], "sizes": [1, 1], "dim": "0"},
+            default_model=None,
+        )
 
     with pytest.raises(module.SplitTransformError, match="wrong spec type"):
         transform.require_spec(object())
@@ -594,22 +633,30 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(module.SplitTransformError, match="matched zero tensors"):
         transform.apply(
-            module.SplitSpec(TensorRef("m", "missing"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 1], 0),
+            module.SplitSpec(
+                TensorRef("m", "missing"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 1], 0
+            ),
             provider,
         )
     with pytest.raises(module.SplitTransformError, match="exactly one tensor"):
         transform.apply(
-            module.SplitSpec(TensorRef("m", ".*"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 1], 0),
+            module.SplitSpec(
+                TensorRef("m", ".*"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 1], 0
+            ),
             provider,
         )
     with pytest.raises(module.SplitTransformError, match="out of range"):
         transform.apply(
-            module.SplitSpec(TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 1], 2),
+            module.SplitSpec(
+                TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 1], 2
+            ),
             provider,
         )
     with pytest.raises(module.SplitTransformError, match="must sum to source size"):
         transform.apply(
-            module.SplitSpec(TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 2], 0),
+            module.SplitSpec(
+                TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [1, 2], 0
+            ),
             provider,
         )
 
@@ -619,13 +666,20 @@ def test_split_compile_and_apply_error_branches(monkeypatch: pytest.MonkeyPatch)
     provider = _provider_for(model="m", state_dict=state_dict)
     with pytest.raises(module.SplitTransformError, match="destination already exists"):
         transform.apply(
-            module.SplitSpec(TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [2, 2], 0),
+            module.SplitSpec(
+                TensorRef("m", "x"), [TensorRef("m", "a"), TensorRef("m", "b")], [2, 2], 0
+            ),
             provider,
         )
 
+
 def test_transforms_package_skips_private_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(pkgutil, "iter_modules", lambda _path: [SimpleNamespace(name="_p"), SimpleNamespace(name="x")])
+    monkeypatch.setattr(
+        pkgutil,
+        "iter_modules",
+        lambda _path: [SimpleNamespace(name="_p"), SimpleNamespace(name="x")],
+    )
     import importlib as _importlib
 
     monkeypatch.setattr(_importlib, "import_module", lambda name: calls.append(name))
@@ -634,7 +688,9 @@ def test_transforms_package_skips_private_modules(monkeypatch: pytest.MonkeyPatc
     assert calls == ["brainsurgery.transforms.x"]
 
 
-def test_transforms_package_imports_modules_in_sorted_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_transforms_package_imports_modules_in_sorted_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
         pkgutil,
@@ -673,8 +729,12 @@ def test_transforms_package_import_failure_reports_module(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(_importlib, "import_module", _raise)
     package = import_module("brainsurgery.transforms")
-    with pytest.raises(RuntimeError, match=r"Failed to import discovered transform module: brainsurgery\.transforms\.bad"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"Failed to import discovered transform module: brainsurgery\.transforms\.bad",
+    ):
         reload(package)
+
 
 def test_help_print_all_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     module = import_module("brainsurgery.transforms.help")
