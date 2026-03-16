@@ -3,9 +3,10 @@ from importlib import import_module
 import pytest
 
 _module = import_module("brainsurgery.expressions.exists")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+ExistsExpr = _module.ExistsExpr
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
+compile_exists_expr = _module.compile_exists_expr
 
 
 def test_exists_compile_rejects_empty_ref() -> None:

@@ -1,9 +1,11 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.expressions.dtype")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+DtypeExpr = _module.DtypeExpr
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
+compile_dtype_expr = _module.compile_dtype_expr
+torch = _module.torch
 
 
 def test_dtype_compile_rejects_empty_is() -> None:

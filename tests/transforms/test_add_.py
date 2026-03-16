@@ -6,9 +6,8 @@ from brainsurgery.core import BinaryMappingSpec, TensorRef
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.add")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+AddInPlaceTransform = _module.AddInPlaceTransform
+TransformError = _module.TransformError
 
 
 def test_add_in_place_apply_success() -> None:

@@ -3,9 +3,8 @@ from importlib import import_module
 import torch
 
 _module = import_module("brainsurgery.transforms.permute")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+PermuteTransform = _module.PermuteTransform
+TransformError = _module.TransformError
 
 
 def test_permute_compile_rejects_non_list_order() -> None:

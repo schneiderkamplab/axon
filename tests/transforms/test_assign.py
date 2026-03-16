@@ -7,9 +7,7 @@ from brainsurgery.core import BinaryMappingSpec, TensorRef, TransformError
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.assign")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+AssignTransform = _module.AssignTransform
 
 
 def test_assign_dtype_compatibility(single_model_provider: Callable[[object, str], object]) -> None:

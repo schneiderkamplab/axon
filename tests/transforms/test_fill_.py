@@ -5,9 +5,10 @@ import torch
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.fill")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+FillConfig = _module.FillConfig
+FillInPlaceSpec = _module.FillInPlaceSpec
+FillInPlaceTransform = _module.FillInPlaceTransform
+TensorRef = _module.TensorRef
 
 
 def test_fill_in_place_tensor_mode() -> None:

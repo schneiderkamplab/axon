@@ -4,9 +4,9 @@ from brainsurgery.core import TensorRef
 from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 
 _module = import_module("brainsurgery.transforms.delete")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+DeleteTransform = _module.DeleteTransform
+DeleteTransformError = _module.DeleteTransformError
+UnarySpec = _module.UnarySpec
 
 
 def test_delete_compile_rejects_sliced_target() -> None:

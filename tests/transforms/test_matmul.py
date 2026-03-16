@@ -1,9 +1,9 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.matmul")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+MatmulTransform = _module.MatmulTransform
+TransformError = _module.TransformError
+torch = _module.torch
 
 
 def test_matmul_compile_rejects_sliced_destination() -> None:

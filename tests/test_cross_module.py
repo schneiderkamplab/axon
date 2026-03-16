@@ -47,8 +47,6 @@ def test_cross_compile_execute_copy_then_assert_equal() -> None:
             )
         }
     )
-    baseline_counts = provider.get_state_dict("model").access_counts("src")
-
     should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
@@ -314,8 +312,6 @@ def test_cross_set_verbose_then_copy_emits_activity(capsys: pytest.CaptureFixtur
             )
         }
     )
-    baseline_counts = provider.get_state_dict("model").access_counts("src")
-
     reset_runtime_flags()
     should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),

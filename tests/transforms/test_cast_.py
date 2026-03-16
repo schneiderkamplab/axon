@@ -1,9 +1,11 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.cast")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+CastInPlaceSpec = _module.CastInPlaceSpec
+CastInPlaceTransform = _module.CastInPlaceTransform
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
+torch = _module.torch
 
 
 def test_cast_in_place_compile_rejects_unknown_dtype() -> None:

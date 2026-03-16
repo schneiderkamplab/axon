@@ -7,9 +7,9 @@ from brainsurgery.engine import reset_runtime_flags
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.assert_")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+AssertSpec = _module.AssertSpec
+AssertTransform = _module.AssertTransform
+TransformError = _module.TransformError
 
 
 def test_assert_compile_rejects_unknown_op() -> None:

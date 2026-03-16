@@ -6,9 +6,8 @@ import torch
 from brainsurgery.core import TensorRef, TransformError
 
 _module = import_module("brainsurgery.expressions.equal")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+EqualExpr = _module.EqualExpr
+compile_equal_expr = _module.compile_equal_expr
 
 
 def test_equal_compile_rejects_boolean_eps() -> None:

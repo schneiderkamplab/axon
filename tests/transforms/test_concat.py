@@ -1,9 +1,8 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.concat")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+ConcatTransform = _module.ConcatTransform
+ConcatTransformError = _module.ConcatTransformError
 
 
 def test_concat_compile_requires_list() -> None:

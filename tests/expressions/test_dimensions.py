@@ -3,9 +3,11 @@ from importlib import import_module
 import torch
 
 _module = import_module("brainsurgery.expressions.dimensions")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+DimensionsExpr = _module.DimensionsExpr
+ScalarComparison = _module.ScalarComparison
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
+compile_dimensions_expr = _module.compile_dimensions_expr
 
 
 def test_dimensions_compile_rejects_non_int_is() -> None:

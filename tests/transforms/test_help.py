@@ -5,9 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 _module = import_module("brainsurgery.transforms.help")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+HelpSpec = _module.HelpSpec
+HelpTransform = _module.HelpTransform
+HelpTransformError = _module.HelpTransformError
+TransformError = _module.TransformError
 
 
 def test_help_compile_rejects_multi_key_mapping() -> None:

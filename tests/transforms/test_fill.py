@@ -1,9 +1,11 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.fill")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+FillTransform = _module.FillTransform
+TransformError = _module.TransformError
+build_filled_tensor_like = _module.build_filled_tensor_like
+parse_fill_config = _module.parse_fill_config
+torch = _module.torch
 
 
 def test_fill_compile_requires_mode_specific_payload() -> None:

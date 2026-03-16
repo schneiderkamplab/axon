@@ -6,9 +6,10 @@ from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.scale")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+ScaleInPlaceSpec = _module.ScaleInPlaceSpec
+ScaleInPlaceTransform = _module.ScaleInPlaceTransform
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
 
 
 def test_scale_in_place_compile_rejects_non_numeric_factor() -> None:

@@ -6,9 +6,8 @@ from brainsurgery.core import BinaryMappingSpec, TensorRef
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.subtract")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+SubtractInPlaceTransform = _module.SubtractInPlaceTransform
+TransformError = _module.TransformError
 
 
 def test_subtract_in_place_apply_success() -> None:

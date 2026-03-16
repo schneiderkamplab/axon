@@ -6,9 +6,8 @@ from brainsurgery.core import BinaryMappingSpec, TensorRef
 from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 
 _module = import_module("brainsurgery.transforms.copy")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+CopyTransform = _module.CopyTransform
+TransformError = _module.TransformError
 
 
 def test_copy_compile_rejects_sliced_destination() -> None:

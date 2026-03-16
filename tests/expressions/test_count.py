@@ -1,9 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.expressions.count")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+CountExpr = _module.CountExpr
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
+compile_count_expr = _module.compile_count_expr
 
 
 def test_count_compile_rejects_non_int_is() -> None:

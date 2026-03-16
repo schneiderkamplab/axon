@@ -1,14 +1,14 @@
-from importlib import import_module
-
 import pytest
 import torch
 
+import brainsurgery.expressions.access as access_module
 from brainsurgery.core import TensorRef, TransformError
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
-
-_module = import_module("brainsurgery.expressions.access")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+from brainsurgery.expressions.access import (
+    ScalarComparison,
+    TensorAccessExpr,
+    compile_reads_expr,
+    compile_writes_expr,
 )
 
 
@@ -128,7 +128,7 @@ def test_reads_evaluate_reports_zero_matches(monkeypatch: pytest.MonkeyPatch) ->
             assert model == "model"
             return state_dict
 
-    monkeypatch.setattr(_module, "resolve_matches", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(access_module, "resolve_matches", lambda *_args, **_kwargs: [])
     expr = TensorAccessExpr(
         ref=TensorRef(model="model", expr="missing"),
         field="reads",

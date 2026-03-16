@@ -3,9 +3,11 @@ from importlib import import_module
 import pytest
 
 _module = import_module("brainsurgery.transforms.dump")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+DumpSpec = _module.DumpSpec
+DumpTransform = _module.DumpTransform
+DumpTransformError = _module.DumpTransformError
+TensorRef = _module.TensorRef
+insert_into_tree = _module.insert_into_tree
 
 
 def test_dump_compile_rejects_unknown_format() -> None:

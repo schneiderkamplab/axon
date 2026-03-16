@@ -1,9 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.exit")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+ExitSpec = _module.ExitSpec
+ExitTransform = _module.ExitTransform
+ExitTransformError = _module.ExitTransformError
+TransformControl = _module.TransformControl
 
 
 def test_exit_compile_rejects_payload() -> None:

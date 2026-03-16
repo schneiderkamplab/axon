@@ -5,9 +5,9 @@ import torch
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.clamp")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+ClampInPlaceSpec = _module.ClampInPlaceSpec
+ClampInPlaceTransform = _module.ClampInPlaceTransform
+TensorRef = _module.TensorRef
 
 
 def test_clamp_in_place_apply_with_slice() -> None:

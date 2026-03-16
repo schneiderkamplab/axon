@@ -6,9 +6,8 @@ import torch
 from brainsurgery.core import TensorRef, TransformError
 
 _module = import_module("brainsurgery.expressions.iszero")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+IsZeroExpr = _module.IsZeroExpr
+compile_iszero_expr = _module.compile_iszero_expr
 
 
 def test_iszero_compile_rejects_boolean_eps() -> None:

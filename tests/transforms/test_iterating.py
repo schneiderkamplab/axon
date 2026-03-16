@@ -1,9 +1,9 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.core")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+DestinationPolicy = _module.DestinationPolicy
+IteratingTransform = _module.IteratingTransform
+StateDictProvider = _module.StateDictProvider
 
 
 def test_destination_policy_values_are_stable() -> None:

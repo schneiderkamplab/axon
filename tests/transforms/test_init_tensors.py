@@ -7,9 +7,9 @@ from brainsurgery.core import TransformError
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.init_tensors")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+OnesTransform = _module.OnesTransform
+RandTransform = _module.RandTransform
+ZeroesTransform = _module.ZeroesTransform
 
 
 class _Provider:

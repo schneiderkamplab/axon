@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import brainsurgery.cli.complete as complete_module
+import brainsurgery.cli.payload_scan as payload_scan_module
 from brainsurgery.cli.complete import (
     _is_transform_payload_start,
 )
@@ -896,15 +897,15 @@ def test_save_path_completion_supports_quoted_prefix(
 
 def test_cursor_helpers_cover_nested_quotes_and_invalid_keys() -> None:
     segment = '\'a:b\' "x\\"y:z" (u:v) [k:l] {m:n}: tail'
-    colon_index = complete_module._find_top_level_colon(segment)
+    colon_index = payload_scan_module._find_top_level_colon(segment)
     assert colon_index is not None
     assert segment[colon_index] == ":"
-    assert complete_module._parse_key_from_segment("from: x") == "from"
-    assert complete_module._parse_key_from_segment("1bad: x") is None
+    assert payload_scan_module._parse_key_from_segment("from: x") == "from"
+    assert payload_scan_module._parse_key_from_segment("1bad: x") is None
 
 
 def test_split_top_level_segments_handles_quotes_and_closing_brace_boundary() -> None:
-    completed, current = complete_module._split_top_level_segments(
+    completed, current = payload_scan_module._split_top_level_segments(
         '{ from: "x\\"y,z", note: \'a,b\', paren: (u,v), arr: [k,l] } trailing'
     )
     assert any("from:" in segment for segment in completed)

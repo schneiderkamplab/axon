@@ -1,9 +1,9 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.expressions.any")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+AnyExpr = _module.AnyExpr
+TransformError = _module.TransformError
+compile_any_expr = _module.compile_any_expr
 
 
 def test_any_compile_rejects_empty_list() -> None:

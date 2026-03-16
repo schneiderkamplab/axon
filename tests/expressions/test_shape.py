@@ -3,9 +3,10 @@ from importlib import import_module
 import torch
 
 _module = import_module("brainsurgery.expressions.shape")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+ShapeExpr = _module.ShapeExpr
+TensorRef = _module.TensorRef
+TransformError = _module.TransformError
+compile_shape_expr = _module.compile_shape_expr
 
 
 def test_shape_compile_rejects_non_integer_shape() -> None:

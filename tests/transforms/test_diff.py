@@ -5,9 +5,9 @@ import torch
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.diff")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+DiffTransform = _module.DiffTransform
+DiffTransformError = _module.DiffTransformError
+TensorRef = _module.TensorRef
 
 
 class _Provider:

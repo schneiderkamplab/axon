@@ -3,9 +3,8 @@ from importlib import import_module
 from brainsurgery.core import BinaryMappingSpec, TensorRef
 
 _module = import_module("brainsurgery.transforms.move")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
+MoveTransform = _module.MoveTransform
+MoveTransformError = _module.MoveTransformError
 
 
 def test_move_compile_rejects_sliced_source() -> None:

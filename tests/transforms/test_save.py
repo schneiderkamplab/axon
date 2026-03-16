@@ -1,17 +1,16 @@
 from importlib import import_module
-
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
-
-_module = import_module("brainsurgery.transforms.save")
-globals().update(
-    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
-)
 from pathlib import Path
 
 import pytest
 import torch
 
 from brainsurgery.core import TensorRef
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
+_module = import_module("brainsurgery.transforms.save")
+SaveSpec = _module.SaveSpec
+SaveTransform = _module.SaveTransform
+SaveTransformError = _module.SaveTransformError
 
 
 def test_save_compile_defaults_to_default_model() -> None:
