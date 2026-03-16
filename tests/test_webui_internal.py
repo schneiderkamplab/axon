@@ -137,6 +137,16 @@ def test_webui_backend_boolean_keys_and_apply_transform_branches(
             default_model="only",
         )
 
+    with pytest.raises(Exception, match="count payload must be a mapping"):
+        webui_backend._apply_transform(
+            provider=p,
+            plan=plan,
+            transform_name="assert",
+            payload={"count": "of: only::w\nis: 1"},
+            default_model="only",
+        )
+
+    plan = SurgeryPlan(inputs={}, output=None)
     _output, default_model = webui_backend._apply_transform(
         provider=p,
         plan=plan,
@@ -235,11 +245,18 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     h._read_json_body = lambda: {"transform": "assert", "payload": " "}
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is False
+    assert h._json[-1][1]["error_info"]["code"] == "assert_error"
+    assert h._json[-1][1]["error_info"]["location"] == {"transform": "assert", "field": "payload"}
+    assert h._json[-1][1]["error_info"]["endpoint"] == "/api/_apply_transform"
+    assert h._json[-1][1]["error_info"]["context"] == {"raw_payload": ""}
 
     h.path = "/api/_apply_transform"
     h._read_json_body = lambda: {"transform": "assert", "payload": ":"}
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is False
+    assert h._json[-1][1]["error_info"]["code"] == "assert_error"
+    assert h._json[-1][1]["error_info"]["location"] == {"transform": "assert", "field": "payload"}
+    assert h._json[-1][1]["error_info"]["context"] == {"raw_payload": ":"}
 
     h.path = "/api/_apply_transform"
     h._read_json_body = lambda: {"transform": "exit", "payload": {}}

@@ -90,3 +90,22 @@ def test_serialize_models_is_lightweight_and_does_not_render_dumps(monkeypatch) 
     )
     models = webui_backend._serialize_models(_Provider())
     assert models == [{"alias": "m", "tensor_count": 2, "matched_count": 2, "total_count": 2}]
+
+
+def test_api_error_payload_for_assert_includes_location_and_context() -> None:
+    payload = {"equal": {"left": "a", "right": "b"}}
+    error = webui_backend._api_error_payload(
+        RuntimeError("assert.equal failed"),
+        endpoint="/api/_apply_transform",
+        transform_name="assert",
+        payload=payload,
+    )
+    assert error["ok"] is False
+    assert error["error"] == "assert.equal failed"
+    info = error["error_info"]
+    assert info["code"] == "assert_error"
+    assert info["endpoint"] == "/api/_apply_transform"
+    assert info["transform"] == "assert"
+    assert info["location"] == {"transform": "assert", "field": "payload"}
+    assert info["context"]["expression"] == "equal"
+    assert info["context"]["expression_keys"] == ["left", "right"]
