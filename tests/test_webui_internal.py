@@ -187,6 +187,19 @@ def _make_session(tmp_path: Path) -> _SessionState:
     return _SessionState(provider=provider, lock=threading.Lock(), upload_root=upload_root)
 
 
+def test_webui_handler_factory_resets_runtime_flags_for_webui_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        webui_handler,
+        "reset_runtime_flags_for_scope",
+        lambda scope: calls.append(scope),
+    )
+    webui_handler._handler_factory(_make_session(tmp_path))
+    assert calls == [webui_handler.RuntimeFlagLifecycleScope.WEBUI_SESSION]
+
+
 def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     handler_cls = webui_handler._handler_factory(session)
@@ -221,6 +234,10 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     handler_cls.do_GET(h)
     assert h._errors[-1][0] == 404
 
+    h.path = "/static/../../etc/passwd"
+    handler_cls.do_GET(h)
+    assert h._errors[-1][0] == 404
+
     h.path = "/api/load"
     h._read_json_body = lambda: {"alias": ""}
     handler_cls.do_POST(h)
@@ -240,6 +257,28 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     h._read_json_body = lambda: {"transform": "copy", "payload": 1}
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/_apply_transform"
+    h._read_json_body = lambda: {"transform": "copy", "payload": {}, "preview_decision": 1}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/_apply_transform"
+    h._read_json_body = lambda: {"transform": "copy", "payload": {}, "preview_decision": "maybe"}
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+
+    h.path = "/api/_apply_transform"
+    h._read_json_body = lambda: {"transform": "copy", "payload": {}}
+    original_get_transform = webui_handler.get_transform
+    monkeypatch.setattr(
+        webui_handler,
+        "get_transform",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("missing transform")),
+    )
+    handler_cls.do_POST(h)
+    assert h._json[-1][1]["ok"] is False
+    monkeypatch.setattr(webui_handler, "get_transform", original_get_transform)
 
     h.path = "/api/_apply_transform"
     h._read_json_body = lambda: {"transform": "assert", "payload": " "}

@@ -1,10 +1,15 @@
 import pytest
 
-from brainsurgery.engine import get_runtime_flags, reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    get_runtime_flags,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 
 
 def test_engine_flags_defaults_and_updates() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     flags = get_runtime_flags()
     assert flags.dry_run is False
     assert flags.preview is False
@@ -18,7 +23,7 @@ def test_engine_flags_defaults_and_updates() -> None:
     assert flags.preview is True
     assert flags.verbose is True
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_engine_flags_reject_unknown_flag() -> None:

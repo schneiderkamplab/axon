@@ -3,13 +3,17 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 from brainsurgery.engine.arena import _SegmentedFileBackedArena
 from brainsurgery.engine.state_dicts import _ArenaStateDict, _InMemoryStateDict
 
 
 def test_inmemory_dry_run_overlay_paths() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     sd = _InMemoryStateDict()
     sd["x"] = torch.tensor([1.0])
 
@@ -39,13 +43,13 @@ def test_inmemory_dry_run_overlay_paths() -> None:
     assert sd.access_counts("x") == before
 
     # leaving dry-run clears overlay
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     assert "y" not in sd
     assert "z" not in sd
 
 
 def test_arena_dry_run_overlay_paths(tmp_path) -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     arena = _SegmentedFileBackedArena(tmp_path, segment_size_bytes=1024, alignment=16)
     sd = _ArenaStateDict(arena)
     sd["x"] = torch.tensor([1.0])
@@ -68,7 +72,7 @@ def test_arena_dry_run_overlay_paths(tmp_path) -> None:
     with pytest.raises(KeyError):
         _ = sd["z"]
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     assert "y" not in sd
     assert "z" not in sd
     arena.close()

@@ -232,6 +232,50 @@ def test_webcli_runner_rejects_non_mapping_yaml() -> None:
         )
 
 
+def test_webcli_runner_resets_runtime_flags_for_webcli_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_calls: list[object] = []
+    monkeypatch.setattr(
+        webcli_runner,
+        "reset_runtime_flags_for_scope",
+        lambda scope: reset_calls.append(scope),
+    )
+    monkeypatch.setattr(webcli_runner, "_configure_logging", lambda *, log_level: None)
+
+    class _FakeProvider:
+        def close(self) -> None:
+            pass
+
+    class _FakePlan:
+        inputs: dict[str, object] = {}
+        output = None
+
+        def execute_pending(self, _provider, *, interactive: bool) -> bool:
+            assert interactive is False
+            return True
+
+    monkeypatch.setattr(webcli_runner, "compile_plan", lambda _raw: _FakePlan())
+    monkeypatch.setattr(
+        webcli_runner,
+        "create_state_dict_provider",
+        lambda **_kwargs: _FakeProvider(),
+    )
+
+    webcli_runner._run_web_plan(
+        plan_yaml="{}",
+        shard_size="5GB",
+        num_workers=1,
+        provider="inmemory",
+        arena_root=Path(".brainsurgery"),
+        arena_segment_size="1GB",
+        summarize=False,
+        log_level="info",
+    )
+
+    assert reset_calls == [webcli_runner.RuntimeFlagLifecycleScope.WEBCLI_RUN]
+
+
 def test_webcli_runner_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _FakeProvider:
         def __init__(self) -> None:

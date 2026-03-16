@@ -1,7 +1,11 @@
 from importlib import import_module
 
 from brainsurgery.core import TensorRef
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 
 _module = import_module("brainsurgery.transforms.delete")
 DeleteTransform = _module.DeleteTransform
@@ -63,8 +67,8 @@ def test_delete_apply_emits_verbose_activity_line(capsys) -> None:
     provider = _Provider()
     spec = UnarySpec(target_ref=TensorRef(model="model", expr="x"))
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("verbose", True)
     DeleteTransform().apply_to_target(spec, "x", provider)
     assert "delete: x" in capsys.readouterr().out
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)

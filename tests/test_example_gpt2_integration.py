@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from brainsurgery.engine import create_state_dict_provider, reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    create_state_dict_provider,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.transforms.copy import CopyTransform
@@ -176,7 +181,7 @@ def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
         baseline_counts = {name: loaded.access_counts(name) for name in probe_names}
         baseline_keys = set(loaded.keys())
 
-        reset_runtime_flags()
+        reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
         should_continue, executed = _execute_transform_pairs(
             zip(raw["transforms"], plan.transforms, strict=False),
             provider,
@@ -198,5 +203,5 @@ def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
             assert loaded.access_counts(name) == baseline_counts[name]
             assert torch.equal(loaded[name], baseline_tensors[name]), name
     finally:
-        reset_runtime_flags()
+        reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
         provider.close()

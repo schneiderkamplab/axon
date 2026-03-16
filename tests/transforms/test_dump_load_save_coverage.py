@@ -6,7 +6,11 @@ import pytest
 import torch
 
 from brainsurgery.core import TensorRef
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 from brainsurgery.engine.providers import InMemoryStateDictProvider
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.transforms.dump import (
@@ -21,7 +25,7 @@ from brainsurgery.transforms.save import SaveSpec, SaveTransform, SaveTransformE
 
 
 def test_dump_apply_all_formats_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     provider = InMemoryStateDictProvider({}, max_io_workers=1)
     a = provider.get_or_create_alias_state_dict("a")
     b = provider.get_or_create_alias_state_dict("b")
@@ -96,7 +100,7 @@ def test_load_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyP
     assert result.count == 1
     assert tr._infer_output_model(state_spec) == "model"
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("dry_run", True)
     tensor_spec = LoadSpec(
         path=Path("/tmp/t.npy"), alias="model", tensor_name="new_x", format="numpy"
@@ -106,7 +110,7 @@ def test_load_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyP
     )
     result = tr.apply(tensor_spec, provider)
     assert result.count == 1
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_save_transform_completion_and_success_paths(monkeypatch: pytest.MonkeyPatch) -> None:

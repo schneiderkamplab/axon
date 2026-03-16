@@ -3,7 +3,7 @@ from importlib import import_module
 import pytest
 import torch
 
-from brainsurgery.engine import reset_runtime_flags
+from brainsurgery.engine import RuntimeFlagLifecycleScope, reset_runtime_flags_for_scope
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.assert_")
@@ -41,7 +41,7 @@ def test_assert_infer_output_model_requires_single_model() -> None:
 
 
 def test_assert_apply_supports_model_wide_reads_check() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones(1)
     state_dict["b"] = torch.ones(1)
@@ -62,7 +62,7 @@ def test_assert_apply_supports_model_wide_reads_check() -> None:
 
 
 def test_assert_apply_fails_when_tensor_has_not_been_read() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     state_dict = _InMemoryStateDict()
     state_dict["a"] = torch.ones(1)
 

@@ -3,7 +3,11 @@ from importlib import import_module
 import torch
 
 from brainsurgery.core import BinaryMappingSpec, TensorRef
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 
 _module = import_module("brainsurgery.transforms.copy")
 CopyTransform = _module.CopyTransform
@@ -61,7 +65,7 @@ def test_copy_apply_emits_verbose_activity_line(capsys) -> None:
         to_ref=TensorRef(model="model", expr="i.0.attn.bias"),
     )
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
     set_runtime_flag("verbose", True)
     CopyTransform().apply_item(spec, item, provider)
@@ -77,4 +81,4 @@ def test_copy_apply_emits_verbose_activity_line(capsys) -> None:
     CopyTransform().apply_item(spec, item, provider)
     assert capsys.readouterr().out == ""
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)

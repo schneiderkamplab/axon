@@ -1,7 +1,12 @@
 import pytest
 
 import brainsurgery.transforms.set as set_module
-from brainsurgery.engine import get_runtime_flags, reset_runtime_flags, use_output_emitter
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    get_runtime_flags,
+    reset_runtime_flags_for_scope,
+    use_output_emitter,
+)
 from brainsurgery.transforms.set import SetSpec, SetTransform, SetTransformError
 
 
@@ -32,11 +37,11 @@ def test_set_compile_rejects_invalid_payloads() -> None:
 
 
 def test_set_apply_updates_runtime_flags_and_reports_count() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_set_apply_without_flags_prints_current_values_and_no_changes() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     transform = SetTransform()
     lines: list[str] = []
     with use_output_emitter(lines.append):
@@ -62,7 +67,7 @@ def test_set_apply_without_flags_prints_current_values_and_no_changes() -> None:
     assert get_runtime_flags().preview is True
     assert get_runtime_flags().verbose is True
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_set_transform_infer_output_model_and_completion() -> None:

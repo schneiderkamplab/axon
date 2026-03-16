@@ -110,3 +110,14 @@ def test_api_error_payload_for_assert_includes_location_and_context() -> None:
     assert info["location"] == {"transform": "assert", "field": "payload"}
     assert info["context"]["expression"] == "equal"
     assert info["context"]["expression_keys"] == ["left", "right"]
+
+
+def test_api_error_payload_for_assert_with_non_mapping_payload_has_no_context() -> None:
+    error = webui_backend._api_error_payload(
+        RuntimeError("assert failed"),
+        endpoint="/api/_apply_transform",
+        transform_name="assert",
+        payload=123,
+    )
+    assert error["ok"] is False
+    assert error["error_info"]["context"] is None

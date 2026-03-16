@@ -13,7 +13,12 @@ from brainsurgery.core import (
     TransformError,
     TransformResult,
 )
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag, use_output_emitter
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+    use_output_emitter,
+)
 from brainsurgery.engine.execution import _execute_transform_pairs
 
 
@@ -104,7 +109,7 @@ class _Provider:
 
 
 def test_execute_transform_pairs_preview_emits_transform_and_session_summaries() -> None:
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("preview", True)
     provider = _Provider()
     lines: list[str] = []
@@ -137,7 +142,7 @@ def test_execute_transform_pairs_preview_emits_transform_and_session_summaries()
     assert any("preview 1/2 copy: created[1] m::c" in line for line in lines)
     assert any("preview 2/2 move: created[1] m::d | deleted[1] m::b" in line for line in lines)
     assert any("preview session: changed[0], created[2], deleted[1]" in line for line in lines)
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_preview_bucket_renders_all_refs_without_abbreviation() -> None:
@@ -159,7 +164,7 @@ def test_execute_transform_pairs_preview_still_applies_set_transform() -> None:
             self.calls += 1
             return TransformResult(name=self.name, count=1)
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("preview", True)
     transform = _CountingSetTransform()
     pairs = [({"set": {"preview": True}}, CompiledTransform(transform, object()))]
@@ -167,7 +172,7 @@ def test_execute_transform_pairs_preview_still_applies_set_transform() -> None:
     assert should_continue is True
     assert executed == [{"set": {"preview": True}}]
     assert transform.calls == 1
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_execute_transform_pairs_preview_interactive_no_go_skips_apply(
@@ -183,7 +188,7 @@ def test_execute_transform_pairs_preview_interactive_no_go_skips_apply(
             self.calls += 1
             return TransformResult(name=self.name, count=1)
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("preview", True)
     transform = _CountingTransform()
     monkeypatch.setattr("builtins.input", lambda _prompt: "no-go")
@@ -203,7 +208,7 @@ def test_execute_transform_pairs_preview_interactive_no_go_skips_apply(
     assert should_continue is True
     assert executed == []
     assert transform.calls == 0
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_execute_transform_pairs_preview_interactive_go_applies(
@@ -219,7 +224,7 @@ def test_execute_transform_pairs_preview_interactive_go_applies(
             self.calls += 1
             return TransformResult(name=self.name, count=1)
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("preview", True)
     transform = _CountingTransform()
     monkeypatch.setattr("builtins.input", lambda _prompt: "go")
@@ -239,7 +244,7 @@ def test_execute_transform_pairs_preview_interactive_go_applies(
     assert should_continue is True
     assert executed == [{"copy": {"from": "m::a", "to": "m::c"}}]
     assert transform.calls == 1
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
 
 def test_execute_transform_pairs_preview_non_interactive_with_dry_run_skips_apply() -> None:
@@ -253,7 +258,7 @@ def test_execute_transform_pairs_preview_non_interactive_with_dry_run_skips_appl
             self.calls += 1
             return TransformResult(name=self.name, count=1)
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("preview", True)
     set_runtime_flag("dry_run", True)
     transform = _CountingTransform()
@@ -276,4 +281,4 @@ def test_execute_transform_pairs_preview_non_interactive_with_dry_run_skips_appl
     assert executed == []
     assert transform.calls == 0
     assert any("dry-run+preview, apply skipped" in line for line in lines)
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)

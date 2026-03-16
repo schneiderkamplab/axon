@@ -56,13 +56,17 @@ def test_run_executes_configured_and_interactive_and_writes_summary(
     )
     provider = _Provider()
     summary_calls: list[dict[str, object]] = []
-    reset_calls: list[bool] = []
+    reset_calls: list[object] = []
 
     monkeypatch.setattr(cli_module, "_load_cli_config", lambda _: raw_plan)
     monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "_configure_history", lambda: None)
-    monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: reset_calls.append(True))
+    monkeypatch.setattr(
+        cli_module,
+        "reset_runtime_flags_for_scope",
+        lambda scope: reset_calls.append(scope),
+    )
     monkeypatch.setattr(
         cli_module,
         "_execute_configured_transforms",
@@ -85,7 +89,7 @@ def test_run_executes_configured_and_interactive_and_writes_summary(
     )
 
     assert provider.closed is True
-    assert reset_calls == [True]
+    assert reset_calls == [cli_module.RuntimeFlagLifecycleScope.CLI_RUN]
     assert len(provider.save_calls) == 1
     assert len(summary_calls) == 1
     assert summary_calls[0]["plan"] is surgery_plan
@@ -164,7 +168,7 @@ def test_run_skips_output_save_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "_configure_history", lambda: None)
-    monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: None)
+    monkeypatch.setattr(cli_module, "reset_runtime_flags_for_scope", lambda _scope: None)
     monkeypatch.setattr(cli_module, "_execute_configured_transforms", lambda **_: True)
     monkeypatch.setattr(
         cli_module,
@@ -201,7 +205,7 @@ def test_run_skips_summary_file_write_when_dry_run(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(cli_module, "compile_plan", lambda _: surgery_plan)
     monkeypatch.setattr(cli_module, "create_state_dict_provider", lambda **_: provider)
     monkeypatch.setattr(cli_module, "_configure_history", lambda: None)
-    monkeypatch.setattr(cli_module, "reset_runtime_flags", lambda: None)
+    monkeypatch.setattr(cli_module, "reset_runtime_flags_for_scope", lambda _scope: None)
     monkeypatch.setattr(cli_module, "_execute_configured_transforms", lambda **_: True)
     monkeypatch.setattr(
         cli_module,

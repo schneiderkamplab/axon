@@ -5,7 +5,11 @@ import torch
 
 import brainsurgery.transforms.load as load_module
 from brainsurgery.core import TensorRef
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 from brainsurgery.engine.providers import InMemoryStateDictProvider
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.transforms.load import LoadSpec, LoadTransform, LoadTransformError, ProviderError
@@ -121,7 +125,7 @@ def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = InMemoryStateDictProvider({}, max_io_workers=1)
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("dry_run", True)
 
     calls: list[str] = []
@@ -157,4 +161,4 @@ def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     assert result.count == 1
     assert provider.has_model_alias("new_alias") is False
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)

@@ -8,7 +8,11 @@ from safetensors.torch import save_file as save_safetensors_file
 
 import brainsurgery.transforms.dump as dump_module
 from brainsurgery.core import TransformError
-from brainsurgery.engine import create_state_dict_provider, reset_runtime_flags
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    create_state_dict_provider,
+    reset_runtime_flags_for_scope,
+)
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
@@ -312,14 +316,14 @@ def test_cross_set_verbose_then_copy_emits_activity(capsys: pytest.CaptureFixtur
             )
         }
     )
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
         interactive=False,
     )
     output = capsys.readouterr().out
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
     assert should_continue is True
     assert executed == raw["transforms"]
@@ -708,7 +712,7 @@ def test_cross_dry_run_executes_flow_without_persisting_changes_and_prefixes_ver
     )
     baseline_counts = provider.get_state_dict("model").access_counts("src")
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     should_continue, executed = _execute_transform_pairs(
         zip(raw["transforms"], plan.transforms, strict=False),
         provider,
@@ -721,7 +725,7 @@ def test_cross_dry_run_executes_flow_without_persisting_changes_and_prefixes_ver
     assert "dry-run copy: src -> dst" in output
     assert "dry-run assert: ok" in output
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     model_sd = provider.get_state_dict("model")
     assert "dst" not in model_sd
     assert model_sd.access_counts("src") == baseline_counts

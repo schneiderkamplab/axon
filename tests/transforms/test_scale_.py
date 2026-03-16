@@ -2,7 +2,11 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import (
+    RuntimeFlagLifecycleScope,
+    reset_runtime_flags_for_scope,
+    set_runtime_flag,
+)
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
 _module = import_module("brainsurgery.transforms.scale")
@@ -61,8 +65,8 @@ def test_scale_in_place_emits_verbose_activity_line(capsys) -> None:
         factor=2.0,
     )
 
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
     set_runtime_flag("verbose", True)
     ScaleInPlaceTransform().apply_to_target(spec, "x", provider)
     assert "scale_: x" in capsys.readouterr().out
-    reset_runtime_flags()
+    reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
