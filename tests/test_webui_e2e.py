@@ -154,6 +154,7 @@ def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) 
         flags_before = state_before.get("runtime_flags")
         assert isinstance(flags_before, dict)
         assert isinstance(flags_before.get("dry_run"), bool)
+        assert isinstance(flags_before.get("preview"), bool)
         assert isinstance(flags_before.get("verbose"), bool)
 
         set_resp = _post_json(
@@ -161,19 +162,21 @@ def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) 
             "/api/_apply_transform",
             {
                 "transform": "set",
-                "payload": {"dry-run": True, "verbose": True},
+                "payload": {"dry-run": True, "preview": True, "verbose": True},
             },
         )
         assert set_resp.get("ok") is True, set_resp.get("error")
         flags_after_set = set_resp.get("runtime_flags")
         assert isinstance(flags_after_set, dict)
         assert flags_after_set.get("dry_run") is True
+        assert flags_after_set.get("preview") is True
         assert flags_after_set.get("verbose") is True
 
         state_after = _get_json(base_url, "/api/state")
         flags_after_state = state_after.get("runtime_flags")
         assert isinstance(flags_after_state, dict)
         assert flags_after_state.get("dry_run") is True
+        assert flags_after_state.get("preview") is True
         assert flags_after_state.get("verbose") is True
 
 
@@ -268,3 +271,80 @@ def test_webui_e2e_transforms_and_upload_dump_and_save_flows(tmp_path: Path) -> 
         )
         assert save_server.get("ok") is True, save_server.get("error")
         assert server_out.exists()
+
+
+def test_webui_preview_requires_confirmation_and_honors_go_no_go(tmp_path: Path) -> None:
+    tiny_path = tmp_path / "tiny_preview.safetensors"
+    save_file({"weight": torch.arange(4, dtype=torch.float32)}, str(tiny_path))
+
+    with _running_webui(tmp_path) as base_url:
+        load_resp = _post_json(
+            base_url,
+            "/api/load",
+            {
+                "server_path": str(tiny_path),
+                "alias": "tiny",
+            },
+        )
+        assert load_resp.get("ok") is True
+
+        set_resp = _post_json(
+            base_url,
+            "/api/_apply_transform",
+            {
+                "transform": "set",
+                "payload": {"preview": True, "dry-run": False},
+            },
+        )
+        assert set_resp.get("ok") is True
+
+        preview_resp = _post_json(
+            base_url,
+            "/api/_apply_transform",
+            {
+                "transform": "delete",
+                "payload": {"target": "tiny::weight"},
+            },
+        )
+        assert preview_resp.get("ok") is True
+        assert preview_resp.get("preview_confirmation_required") is True
+        assert "preview 1/1 delete:" in str(preview_resp.get("output"))
+        models_after_preview = preview_resp.get("models")
+        assert isinstance(models_after_preview, list)
+        tiny_after_preview = next(
+            item for item in models_after_preview if item.get("alias") == "tiny"
+        )
+        assert tiny_after_preview.get("tensor_count") == 1
+
+        no_go_resp = _post_json(
+            base_url,
+            "/api/_apply_transform",
+            {
+                "transform": "delete",
+                "payload": {"target": "tiny::weight"},
+                "preview_decision": "no-go",
+            },
+        )
+        assert no_go_resp.get("ok") is True
+        assert no_go_resp.get("preview_confirmation_required") is False
+        assert "no-go, apply skipped" in str(no_go_resp.get("output"))
+        models_after_no_go = no_go_resp.get("models")
+        assert isinstance(models_after_no_go, list)
+        tiny_after_no_go = next(item for item in models_after_no_go if item.get("alias") == "tiny")
+        assert tiny_after_no_go.get("tensor_count") == 1
+
+        go_resp = _post_json(
+            base_url,
+            "/api/_apply_transform",
+            {
+                "transform": "delete",
+                "payload": {"target": "tiny::weight"},
+                "preview_decision": "go",
+            },
+        )
+        assert go_resp.get("ok") is True
+        assert go_resp.get("preview_confirmation_required") is False
+        models_after_go = go_resp.get("models")
+        assert isinstance(models_after_go, list)
+        tiny_after_go = next(item for item in models_after_go if item.get("alias") == "tiny")
+        assert tiny_after_go.get("tensor_count") == 0

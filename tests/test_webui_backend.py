@@ -32,6 +32,7 @@ def test_assert_transform_metadata_contains_expression_options() -> None:
 def test_set_transform_metadata_contains_boolean_keys() -> None:
     set_item = next(item for item in _transform_items() if item["name"] == "set")
     assert "dry-run" in set_item["boolean_keys"]
+    assert "preview" in set_item["boolean_keys"]
     assert "verbose" in set_item["boolean_keys"]
 
 
