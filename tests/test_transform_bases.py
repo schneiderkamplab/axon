@@ -5,14 +5,20 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from brainsurgery.core import TensorRef
-from brainsurgery.core import TernaryMappingSpec, TernaryMappingTransform
-from brainsurgery.core import TransformError
-from brainsurgery.core import BinaryMappingSpec, BinaryMappingTransform
-from brainsurgery.core import DestinationPolicy
-from brainsurgery.core import UnarySpec, UnaryTransform
-
+from brainsurgery.core import (
+    BinaryMappingSpec,
+    BinaryMappingTransform,
+    DestinationPolicy,
+    TensorRef,
+    TernaryMappingSpec,
+    TernaryMappingTransform,
+    TransformError,
+    UnarySpec,
+    UnaryTransform,
+)
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
+
 class _Provider:
     def __init__(self) -> None:
         self.state_dicts = {
@@ -29,6 +35,7 @@ class _Provider:
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
 
+
 class _Binary(BinaryMappingTransform[BinaryMappingSpec]):
     name = "binary"
     spec_type = BinaryMappingSpec
@@ -40,6 +47,7 @@ class _Binary(BinaryMappingTransform[BinaryMappingSpec]):
     def apply_mapping(self, spec, src_name, dst_name, provider) -> None:
         del spec, src_name, dst_name, provider
 
+
 class _Unary(UnaryTransform[UnarySpec]):
     name = "unary"
     spec_type = UnarySpec
@@ -48,29 +56,39 @@ class _Unary(UnaryTransform[UnarySpec]):
     def apply_to_target(self, spec: UnarySpec, name: str, provider) -> None:
         del spec, name, provider
 
+
 @dataclass(frozen=True)
 class _TernarySpec(TernaryMappingSpec):
     pass
+
 
 class _Ternary(TernaryMappingTransform[_TernarySpec]):
     name = "ternary"
     spec_type = _TernarySpec
     destination_policy = DestinationPolicy.MUST_EXIST
 
-    def validate_refs(self, from_a_ref: TensorRef, from_b_ref: TensorRef, to_ref: TensorRef) -> None:
+    def validate_refs(
+        self, from_a_ref: TensorRef, from_b_ref: TensorRef, to_ref: TensorRef
+    ) -> None:
         del from_a_ref, from_b_ref, to_ref
 
     def apply_mapping(self, spec, src_a_name, src_b_name, dst_name, provider) -> None:
         del spec, src_a_name, src_b_name, dst_name, provider
 
+
 def test_binary_mapping_transform_compile_and_destination_policy() -> None:
     transform = _Binary()
-    spec = transform.compile({"from": "src::layer\\.(\\d+)\\.weight", "to": "dst::copy.\\1.weight"}, None)
+    spec = transform.compile(
+        {"from": "src::layer\\.(\\d+)\\.weight", "to": "dst::copy.\\1.weight"}, None
+    )
     assert spec.from_ref.model == "src"
     assert spec.to_ref.model == "dst"
 
     with pytest.raises(TransformError, match="destination already exists"):
-        transform.validate_resolved_items(spec, transform.resolve_items(spec, _Provider()), _Provider())
+        transform.validate_resolved_items(
+            spec, transform.resolve_items(spec, _Provider()), _Provider()
+        )
+
 
 def test_unary_transform_compile_allows_slices_and_resolves_targets() -> None:
     transform = _Unary()
@@ -79,7 +97,10 @@ def test_unary_transform_compile_allows_slices_and_resolves_targets() -> None:
     assert spec.target_ref == TensorRef(model="src", expr="layer\\..*", slice_spec="[:1]")
     assert transform.resolve_targets(spec, _Provider()) == ["layer.0.weight", "layer.1.weight"]
 
-def test_ternary_mapping_transform_resolves_regex_triples_and_requires_existing_destination() -> None:
+
+def test_ternary_mapping_transform_resolves_regex_triples_and_requires_existing_destination() -> (
+    None
+):
     transform = _Ternary()
     spec = transform.compile(
         {

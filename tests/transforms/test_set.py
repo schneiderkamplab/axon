@@ -1,7 +1,9 @@
+import pytest
+
 import brainsurgery.transforms.set as set_module
 from brainsurgery.engine import get_runtime_flags, reset_runtime_flags
 from brainsurgery.transforms.set import SetSpec, SetTransform, SetTransformError
-import pytest
+
 
 def test_set_compile_accepts_bool_and_string_forms() -> None:
     transform = SetTransform()
@@ -11,6 +13,7 @@ def test_set_compile_accepts_bool_and_string_forms() -> None:
 
     spec = transform.compile({"dry-run": "T", "verbose": "false"}, default_model=None)
     assert spec == SetSpec(dry_run=True, verbose=False)
+
 
 def test_set_compile_rejects_invalid_payloads() -> None:
     transform = SetTransform()
@@ -26,6 +29,7 @@ def test_set_compile_rejects_invalid_payloads() -> None:
 
     with pytest.raises(SetTransformError, match="must be a boolean"):
         transform.compile({"dry-run": "yes"}, default_model=None)
+
 
 def test_set_apply_updates_runtime_flags_and_reports_count() -> None:
     reset_runtime_flags()
@@ -47,6 +51,7 @@ def test_set_apply_updates_runtime_flags_and_reports_count() -> None:
 
     reset_runtime_flags()
 
+
 def test_set_transform_infer_output_model_and_completion() -> None:
     transform = SetTransform()
     with pytest.raises(SetTransformError, match="does not infer an output model"):
@@ -56,6 +61,7 @@ def test_set_transform_infer_output_model_and_completion() -> None:
     assert transform.completion_key_candidates("set: { ", "d") == ["dry-run: "]
     assert transform.completion_value_candidates("dry-run", "T", []) == ["T", "True"]
     assert transform.completion_value_candidates("unknown", "", []) is None
+
 
 def test_set_parse_bool_direct_helper_error() -> None:
     with pytest.raises(SetTransformError, match="set.verbose must be a boolean"):

@@ -1,12 +1,16 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.core")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_destination_policy_values_are_stable() -> None:
     assert DestinationPolicy.ANY.value == "any"
     assert DestinationPolicy.MUST_EXIST.value == "must_exist"
     assert DestinationPolicy.MUST_NOT_EXIST.value == "must_not_exist"
+
 
 def test_iterating_transform_default_validation_is_noop() -> None:
     class _Transform(IteratingTransform[int, int]):

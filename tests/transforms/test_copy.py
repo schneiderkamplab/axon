@@ -2,12 +2,14 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.core import TensorRef
-from brainsurgery.core import BinaryMappingSpec
+from brainsurgery.core import BinaryMappingSpec, TensorRef
 from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 
 _module = import_module("brainsurgery.transforms.copy")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_copy_compile_rejects_sliced_destination() -> None:
     try:
@@ -17,10 +19,12 @@ def test_copy_compile_rejects_sliced_destination() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected sliced destination error")
 
+
 def test_copy_compile_accepts_sliced_source() -> None:
     spec = CopyTransform().compile({"from": "a::[:1]", "to": "b"}, default_model="model")
     assert spec.from_ref.slice_spec == "[:1]"
     assert spec.to_ref.slice_spec is None
+
 
 def test_copy_apply_clones_tensor() -> None:
     class _Provider:
@@ -40,6 +44,7 @@ def test_copy_apply_clones_tensor() -> None:
     CopyTransform().apply_item(spec, item, provider)
     assert torch.equal(provider._state_dict["src"], provider._state_dict["dst"])
     assert provider._state_dict["src"] is not provider._state_dict["dst"]
+
 
 def test_copy_apply_emits_verbose_activity_line(capsys) -> None:
     class _Provider:

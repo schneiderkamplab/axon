@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.engine.arena import ProviderError, _SegmentedFileBackedArena, ensure_supported_dtype, prod
+from brainsurgery.engine.arena import (
+    ProviderError,
+    _SegmentedFileBackedArena,
+    ensure_supported_dtype,
+    prod,
+)
+
 
 def test_segmented_file_backed_arena_stores_and_reads_tensor_roundtrip(tmp_path) -> None:
     arena = _SegmentedFileBackedArena(tmp_path, segment_size_bytes=1024, alignment=16)
@@ -16,6 +22,7 @@ def test_segmented_file_backed_arena_stores_and_reads_tensor_roundtrip(tmp_path)
     assert slot.offset % 16 == 0
     arena.close()
 
+
 def test_arena_allocate_rejects_invalid_sizes(tmp_path) -> None:
     arena = _SegmentedFileBackedArena(tmp_path, segment_size_bytes=32, alignment=8)
 
@@ -26,6 +33,7 @@ def test_arena_allocate_rejects_invalid_sizes(tmp_path) -> None:
         arena.allocate(64)
 
     arena.close()
+
 
 def test_arena_dtype_helpers_cover_supported_and_rejected_values() -> None:
     ensure_supported_dtype(torch.float32)

@@ -6,11 +6,15 @@ import torch
 from brainsurgery.core import TensorRef, TransformError
 
 _module = import_module("brainsurgery.expressions.iszero")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_iszero_compile_rejects_boolean_eps() -> None:
     with pytest.raises(TransformError, match="non-negative number"):
         compile_iszero_expr({"of": "x", "eps": False}, default_model="model")
+
 
 def test_iszero_evaluate_complex_tolerance_branch() -> None:
     class _Provider:

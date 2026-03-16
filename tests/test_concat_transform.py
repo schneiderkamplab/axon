@@ -3,12 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
+from brainsurgery.core import TransformError
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-
-from brainsurgery.core import TransformError
-
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
+
 class _Provider:
     def __init__(self, state_dicts: dict[str, _InMemoryStateDict]) -> None:
         self._state_dicts = state_dicts
@@ -16,11 +16,13 @@ class _Provider:
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self._state_dicts[model]
 
+
 def _make_state_dict(values: dict[str, torch.Tensor]) -> _InMemoryStateDict:
     sd = _InMemoryStateDict()
     for key, tensor in values.items():
         sd[key] = tensor
     return sd
+
 
 def test_concat_two_tensors_into_new_tensor() -> None:
     raw = {
@@ -53,6 +55,7 @@ def test_concat_two_tensors_into_new_tensor() -> None:
     assert out.shape == (2, 2)
     assert torch.equal(out, torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32))
 
+
 def test_concat_supports_sliced_sources() -> None:
     raw = {
         "inputs": ["/tmp/model.safetensors"],
@@ -79,7 +82,10 @@ def test_concat_supports_sliced_sources() -> None:
 
     assert should_continue is True
     assert len(executed) == 1
-    assert torch.equal(provider.get_state_dict("model")["x_rebuilt"], provider.get_state_dict("model")["x"])
+    assert torch.equal(
+        provider.get_state_dict("model")["x_rebuilt"], provider.get_state_dict("model")["x"]
+    )
+
 
 def test_concat_rejects_source_pattern_matching_multiple_tensors() -> None:
     raw = {
@@ -107,6 +113,7 @@ def test_concat_rejects_source_pattern_matching_multiple_tensors() -> None:
             provider,
             interactive=False,
         )
+
 
 def test_concat_rejects_incompatible_shapes() -> None:
     raw = {

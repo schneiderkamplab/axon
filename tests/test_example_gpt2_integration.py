@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import torch
 
-from brainsurgery.engine import create_state_dict_provider
-from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
+from brainsurgery.engine import create_state_dict_provider, reset_runtime_flags, set_runtime_flag
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.transforms.copy import CopyTransform
 
 _GPT2_MODEL_URL = "https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors"
+
 
 def _ensure_gpt2_model_path() -> Path:
     if shutil.which("curl") is None:
@@ -45,6 +45,7 @@ def _ensure_gpt2_model_path() -> Path:
 
     return model_path
 
+
 def test_download_gpt2_model_and_run_example_yaml() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     _ensure_gpt2_model_path()
@@ -64,15 +65,16 @@ def test_download_gpt2_model_and_run_example_yaml() -> None:
         text=True,
     )
     assert run.returncode == 0, (
-        "brainsurgery examples/gpt2.yaml failed\n"
-        f"stdout:\n{run.stdout}\n"
-        f"stderr:\n{run.stderr}"
+        f"brainsurgery examples/gpt2.yaml failed\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}"
     )
 
     assert (repo_root / "models" / "test" / "model.safetensors.index.json").exists()
 
+
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
-def test_gpt2_copy_tracks_access_counts_for_real_providers(tmp_path: Path, provider_name: str) -> None:
+def test_gpt2_copy_tracks_access_counts_for_real_providers(
+    tmp_path: Path, provider_name: str
+) -> None:
     model_path = _ensure_gpt2_model_path()
     provider = create_state_dict_provider(
         provider=provider_name,
@@ -104,6 +106,7 @@ def test_gpt2_copy_tracks_access_counts_for_real_providers(tmp_path: Path, provi
     finally:
         provider.close()
 
+
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
     tmp_path: Path,
@@ -122,7 +125,11 @@ def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
             {"scale": {"from": "ln_f_copy.weight", "to": "ln_f_scaled_equal.weight", "by": 1.0}},
             {"assert": {"equal": {"left": "ln_f.weight", "right": "ln_f_scaled_equal.weight"}}},
             {"scale": {"from": "ln_f_copy.weight", "to": "ln_f_scaled_half.weight", "by": 0.5}},
-            {"assert": {"not": {"equal": {"left": "ln_f.weight", "right": "ln_f_scaled_half.weight"}}}},
+            {
+                "assert": {
+                    "not": {"equal": {"left": "ln_f.weight", "right": "ln_f_scaled_half.weight"}}
+                }
+            },
             {"copy": {"from": "ln_f_copy.weight::[:8]", "to": "demo.x"}},
             {"copy": {"from": "ln_f_copy.weight::[:8]", "to": "demo.y"}},
             {"scale_": {"target": "demo.y", "by": 2.0}},
@@ -133,7 +140,13 @@ def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
             {"cast": {"from": "demo.clamped", "to": "demo.clamped_cast", "dtype": "float16"}},
             {"reshape": {"from": "demo.clamped", "to": "demo.clamped_2d", "shape": [2, 4]}},
             {"permute": {"from": "demo.clamped_2d", "to": "demo.clamped_perm", "order": [1, 0]}},
-            {"matmul": {"from_a": "demo.clamped_2d", "from_b": "demo.clamped_perm", "to": "demo.matmul"}},
+            {
+                "matmul": {
+                    "from_a": "demo.clamped_2d",
+                    "from_b": "demo.clamped_perm",
+                    "to": "demo.matmul",
+                }
+            },
             {"copy": {"from": "h.0.attn.c_proj.weight::[:4,:4]", "to": "demo.matrix.weight"}},
             {"phlora_": {"target": "demo.matrix.weight", "rank": 2}},
             {

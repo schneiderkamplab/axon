@@ -3,13 +3,13 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 
-import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
 from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
+
 
 def _toy_tensors() -> dict[str, torch.Tensor]:
     return {
@@ -23,8 +23,10 @@ def _toy_tensors() -> dict[str, torch.Tensor]:
         "mat.right": torch.arange(6, dtype=torch.float32).reshape(3, 2),
     }
 
+
 def _write_checkpoint(path: Path, tensors: dict[str, torch.Tensor] | None = None) -> None:
     save_safetensors_file(_toy_tensors() if tensors is None else tensors, str(path))
+
 
 def _execute_plan(
     provider_name: str,
@@ -58,8 +60,12 @@ def _execute_plan(
                     state_dict = provider.get_state_dict(alias)
                 except Exception:
                     continue
-                snapshots[alias] = {name: state_dict[name].clone() for name in sorted(state_dict.keys())}
-                counts[alias] = {name: state_dict.access_counts(name) for name in sorted(state_dict.keys())}
+                snapshots[alias] = {
+                    name: state_dict[name].clone() for name in sorted(state_dict.keys())
+                }
+                counts[alias] = {
+                    name: state_dict.access_counts(name) for name in sorted(state_dict.keys())
+                }
 
         arena_root = None
         if provider_name == "arena":
@@ -68,6 +74,7 @@ def _execute_plan(
     except Exception:
         provider.close()
         raise
+
 
 def test_arena_temp_files_are_deleted_after_provider_lifecycle(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model.safetensors"
@@ -81,12 +88,15 @@ def test_arena_temp_files_are_deleted_after_provider_lifecycle(tmp_path: Path) -
         ],
     }
 
-    _, _, arena_root, provider = _execute_plan("arena", raw=raw, tmp_path=tmp_path, arena_label="cleanup")
+    _, _, arena_root, provider = _execute_plan(
+        "arena", raw=raw, tmp_path=tmp_path, arena_label="cleanup"
+    )
     assert arena_root is not None and arena_root.exists()
     provider.close()
     del provider
     gc.collect()
     assert not arena_root.exists()
+
 
 def test_arena_and_inmemory_match_after_global_read_write_sequence(tmp_path: Path) -> None:
     checkpoint = tmp_path / "global_ops.safetensors"
@@ -96,7 +106,14 @@ def test_arena_and_inmemory_match_after_global_read_write_sequence(tmp_path: Pat
         "transforms": [
             {"prefixes": {"mode": "add", "alias": "work"}},
             {"copy": {"from": r"base::(.+)", "to": r"work::\1"}},
-            {"fill": {"from": "work::ln_f.weight", "to": "work::delta", "mode": "constant", "value": 2.0}},
+            {
+                "fill": {
+                    "from": "work::ln_f.weight",
+                    "to": "work::delta",
+                    "mode": "constant",
+                    "value": 2.0,
+                }
+            },
             {"add_": {"from": "work::delta", "to": "work::ln_f.weight"}},
             {"scale_": {"target": "work::wte.weight", "by": 0.5}},
             {"reshape": {"from": "work::mat.left", "to": "work::mat.left.flat", "shape": [6]}},
@@ -105,14 +122,19 @@ def test_arena_and_inmemory_match_after_global_read_write_sequence(tmp_path: Pat
         ],
     }
 
-    inmemory_snap, _, _, p_inmemory = _execute_plan("inmemory", raw=raw, tmp_path=tmp_path, arena_label="eq_inmemory")
+    inmemory_snap, _, _, p_inmemory = _execute_plan(
+        "inmemory", raw=raw, tmp_path=tmp_path, arena_label="eq_inmemory"
+    )
     p_inmemory.close()
-    arena_snap, _, _, p_arena = _execute_plan("arena", raw=raw, tmp_path=tmp_path, arena_label="eq_arena")
+    arena_snap, _, _, p_arena = _execute_plan(
+        "arena", raw=raw, tmp_path=tmp_path, arena_label="eq_arena"
+    )
     p_arena.close()
 
     assert set(inmemory_snap["work"]) == set(arena_snap["work"])
     for name in sorted(inmemory_snap["work"]):
         assert torch.equal(inmemory_snap["work"][name], arena_snap["work"][name]), name
+
 
 def test_arena_and_inmemory_have_same_access_counts_after_sequence(tmp_path: Path) -> None:
     checkpoint = tmp_path / "counts.safetensors"
@@ -128,12 +150,17 @@ def test_arena_and_inmemory_have_same_access_counts_after_sequence(tmp_path: Pat
         ],
     }
 
-    _, inmemory_counts, _, p_inmemory = _execute_plan("inmemory", raw=raw, tmp_path=tmp_path, arena_label="counts_inmemory")
+    _, inmemory_counts, _, p_inmemory = _execute_plan(
+        "inmemory", raw=raw, tmp_path=tmp_path, arena_label="counts_inmemory"
+    )
     p_inmemory.close()
-    _, arena_counts, _, p_arena = _execute_plan("arena", raw=raw, tmp_path=tmp_path, arena_label="counts_arena")
+    _, arena_counts, _, p_arena = _execute_plan(
+        "arena", raw=raw, tmp_path=tmp_path, arena_label="counts_arena"
+    )
     p_arena.close()
 
     assert inmemory_counts["work"]["wte.weight"] == arena_counts["work"]["wte.weight"]
+
 
 def test_arena_rolls_over_to_multiple_segments_for_large_writes(tmp_path: Path) -> None:
     checkpoint = tmp_path / "large.safetensors"
@@ -162,6 +189,7 @@ def test_arena_rolls_over_to_multiple_segments_for_large_writes(tmp_path: Path) 
     assert len(segment_files) >= 2
     assert torch.equal(snapshots["work"]["big.weight"], tensors["big.weight"])
 
+
 def test_arena_alias_isolation_matches_inmemory_for_move_delete(tmp_path: Path) -> None:
     checkpoint = tmp_path / "isolation.safetensors"
     original = _toy_tensors()
@@ -176,9 +204,13 @@ def test_arena_alias_isolation_matches_inmemory_for_move_delete(tmp_path: Path) 
         ],
     }
 
-    inmemory_snap, _, _, p_inmemory = _execute_plan("inmemory", raw=raw, tmp_path=tmp_path, arena_label="iso_inmemory")
+    inmemory_snap, _, _, p_inmemory = _execute_plan(
+        "inmemory", raw=raw, tmp_path=tmp_path, arena_label="iso_inmemory"
+    )
     p_inmemory.close()
-    arena_snap, _, _, p_arena = _execute_plan("arena", raw=raw, tmp_path=tmp_path, arena_label="iso_arena")
+    arena_snap, _, _, p_arena = _execute_plan(
+        "arena", raw=raw, tmp_path=tmp_path, arena_label="iso_arena"
+    )
     p_arena.close()
 
     assert set(inmemory_snap["work"]) == set(arena_snap["work"])

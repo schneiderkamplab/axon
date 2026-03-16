@@ -5,9 +5,9 @@ import torch
 
 from brainsurgery.engine import reset_runtime_flags, set_runtime_flag
 from brainsurgery.engine.arena import _SegmentedFileBackedArena
+from brainsurgery.engine.state_dicts import _ArenaStateDict, _InMemoryStateDict
 
-from brainsurgery.engine.state_dicts import _ArenaStateDict
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 def test_inmemory_dry_run_overlay_paths() -> None:
     reset_runtime_flags()
     sd = _InMemoryStateDict()
@@ -42,6 +42,7 @@ def test_inmemory_dry_run_overlay_paths() -> None:
     reset_runtime_flags()
     assert "y" not in sd
     assert "z" not in sd
+
 
 def test_arena_dry_run_overlay_paths(tmp_path) -> None:
     reset_runtime_flags()

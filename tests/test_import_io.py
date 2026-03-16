@@ -5,8 +5,10 @@ PACKAGE_ROOT = Path("brainsurgery")
 IO_DIR = PACKAGE_ROOT / "io"
 IO_INIT = IO_DIR / "__init__.py"
 
+
 def _iter_python_files(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
+
 
 def _io_exports() -> set[str]:
     tree = ast.parse(IO_INIT.read_text(encoding="utf-8"), filename=str(IO_INIT))
@@ -24,6 +26,7 @@ def _io_exports() -> set[str]:
             if isinstance(element, ast.Constant) and isinstance(element.value, str):
                 exports.add(element.value)
     return exports
+
 
 def test_io_modules_import_concrete_io_modules_only() -> None:
     offenders: list[str] = []
@@ -44,6 +47,7 @@ def test_io_modules_import_concrete_io_modules_only() -> None:
         f"Offenders: {', '.join(offenders)}"
     )
 
+
 def test_io_modules_do_not_import_other_brainsurgery_subpackages() -> None:
     offenders: list[str] = []
 
@@ -56,8 +60,10 @@ def test_io_modules_do_not_import_other_brainsurgery_subpackages() -> None:
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
 
-                if node.level == 0 and module.startswith("brainsurgery.") and not module.startswith(
-                    "brainsurgery.io"
+                if (
+                    node.level == 0
+                    and module.startswith("brainsurgery.")
+                    and not module.startswith("brainsurgery.io")
                 ):
                     offenders.append(f"{path}:{node.lineno}")
 
@@ -66,13 +72,16 @@ def test_io_modules_do_not_import_other_brainsurgery_subpackages() -> None:
 
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("brainsurgery.") and not alias.name.startswith("brainsurgery.io"):
+                    if alias.name.startswith("brainsurgery.") and not alias.name.startswith(
+                        "brainsurgery.io"
+                    ):
                         offenders.append(f"{path}:{node.lineno}")
 
     assert not offenders, (
         "IO modules may not import from non-io brainsurgery subpackages. "
         f"Offenders: {', '.join(offenders)}"
     )
+
 
 def test_non_io_modules_do_not_import_io_submodules_directly() -> None:
     offenders: list[str] = []
@@ -97,6 +106,7 @@ def test_non_io_modules_do_not_import_io_submodules_directly() -> None:
         "not io submodules directly. "
         f"Offenders: {', '.join(offenders)}"
     )
+
 
 def test_io_reexports_are_used_by_non_io_package_modules() -> None:
     exports = _io_exports()

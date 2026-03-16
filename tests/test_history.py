@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import brainsurgery.cli.history as history
 
+
 class _Readline:
     def __init__(self) -> None:
         self.entries: list[str] = []
@@ -32,6 +33,7 @@ class _Readline:
     def add_history(self, value: str) -> None:
         self.entries.append(value)
 
+
 def test_add_history_entry_skips_blank_and_duplicate(monkeypatch) -> None:
     readline = _Readline()
     monkeypatch.setattr(history, "readline", readline)
@@ -41,6 +43,7 @@ def test_add_history_entry_skips_blank_and_duplicate(monkeypatch) -> None:
     history._add_history_entry("   ")
 
     assert readline.entries == ["one"]
+
 
 def test_configure_history_sets_readline_options(monkeypatch, tmp_path) -> None:
     readline = _Readline()
@@ -56,13 +59,16 @@ def test_configure_history_sets_readline_options(monkeypatch, tmp_path) -> None:
     assert readline.history_length == history._HISTORY_LENGTH
     assert len(registered) == 1
 
+
 def test_configure_history_no_readline_is_noop(monkeypatch) -> None:
     monkeypatch.setattr(history, "readline", None)
     history._configure_history()
 
+
 def test_add_history_entry_no_readline_is_noop(monkeypatch) -> None:
     monkeypatch.setattr(history, "readline", None)
     history._add_history_entry("x")
+
 
 class _BrokenReadline:
     def parse_and_bind(self, value: str) -> None:
@@ -73,10 +79,12 @@ class _BrokenReadline:
         del value
         raise RuntimeError("set history failed")
 
+
 def test_configure_history_ignores_readline_binding_failures(monkeypatch) -> None:
     monkeypatch.setattr(history, "readline", _BrokenReadline())
     monkeypatch.setattr(history, "atexit", SimpleNamespace(register=lambda fn: None))
     history._configure_history()
+
 
 def test_configure_history_write_failure_path(monkeypatch, tmp_path) -> None:
     class _WriteFails(_Readline):
@@ -92,6 +100,7 @@ def test_configure_history_write_failure_path(monkeypatch, tmp_path) -> None:
     history._configure_history()
     assert len(callbacks) == 1
     callbacks[0]()
+
 
 def test_add_history_entry_exception_path(monkeypatch) -> None:
     class _BrokenAdd(_Readline):

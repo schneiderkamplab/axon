@@ -1,7 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.expressions.not")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_not_compile_rejects_invalid_expr() -> None:
     try:
@@ -10,6 +13,7 @@ def test_not_compile_rejects_invalid_expr() -> None:
         assert "unknown assert op" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected unknown assert op error")
+
 
 def test_not_evaluate_succeeds_when_inner_fails() -> None:
     class _FailExpr:
@@ -21,6 +25,7 @@ def test_not_evaluate_succeeds_when_inner_fails() -> None:
             return {"model"}
 
     NotExpr(expr=_FailExpr()).evaluate(provider=None)  # type: ignore[arg-type]
+
 
 def test_not_evaluate_fails_when_inner_succeeds() -> None:
     class _PassExpr:

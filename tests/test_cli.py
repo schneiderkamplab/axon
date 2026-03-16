@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import runpy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,11 +11,13 @@ import typer
 import brainsurgery.cli.cli as cli_module
 from brainsurgery.engine.plan import SurgeryPlan
 
+
 def test_configure_logging_sets_root_and_named_logger_levels() -> None:
     cli_module.configure_logging("debug")
 
     assert logging.getLogger().level == logging.DEBUG
     assert cli_module.logger.level == logging.DEBUG
+
 
 def test_configure_logging_rejects_unknown_level() -> None:
     try:
@@ -24,6 +26,7 @@ def test_configure_logging_rejects_unknown_level() -> None:
         assert "log-level must be one of" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected invalid log-level error")
+
 
 class _Provider:
     def __init__(self) -> None:
@@ -37,7 +40,10 @@ class _Provider:
     def close(self) -> None:
         self.closed = True
 
-def test_run_executes_configured_and_interactive_and_writes_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_run_executes_configured_and_interactive_and_writes_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     raw_plan = {
         "inputs": ["model::/tmp/in.safetensors"],
         "output": {"path": "/tmp/out.safetensors"},
@@ -84,6 +90,7 @@ def test_run_executes_configured_and_interactive_and_writes_summary(monkeypatch:
     assert len(summary_calls) == 1
     assert summary_calls[0]["plan"] is surgery_plan
 
+
 def test_run_skips_save_when_no_output(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = {"inputs": ["model::/tmp/in.safetensors"], "transforms": [{"help": {}}]}
     surgery_plan = SimpleNamespace(
@@ -114,6 +121,7 @@ def test_run_skips_save_when_no_output(monkeypatch: pytest.MonkeyPatch) -> None:
     assert provider.closed is True
     assert provider.save_calls == []
 
+
 def test_run_wraps_provider_error_as_bad_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = {
         "inputs": ["model::/tmp/in.safetensors"],
@@ -137,6 +145,7 @@ def test_run_wraps_provider_error_as_bad_parameter(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(typer.BadParameter, match="bad provider config"):
         cli_module.run(config_items=["plan.yaml"], log_level="info")
+
 
 def test_run_skips_output_save_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = {
@@ -172,6 +181,7 @@ def test_run_skips_output_save_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert provider.closed is True
     assert provider.save_calls == []
+
 
 def test_run_skips_summary_file_write_when_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_plan = {
@@ -215,6 +225,7 @@ def test_run_skips_summary_file_write_when_dry_run(monkeypatch: pytest.MonkeyPat
     assert provider.closed is True
     assert summary_calls == []
 
+
 def test_execute_configured_transforms_runs_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     called: dict[str, object] = {}
 
@@ -234,7 +245,10 @@ def test_execute_configured_transforms_runs_pending(monkeypatch: pytest.MonkeyPa
     assert called["interactive"] is False
     assert called["provider"] == "provider"
 
-def test_run_interactive_session_retries_on_compile_error_then_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_run_interactive_session_retries_on_compile_error_then_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     prompts = iter([[{"help": {}}], [{"exit": {}}]])
     monkeypatch.setattr(cli_module, "_prompt_interactive_transform", lambda **_: next(prompts))
 
@@ -264,7 +278,10 @@ def test_run_interactive_session_retries_on_compile_error_then_exits(monkeypatch
 
     assert should_continue is False
 
-def test_run_interactive_session_returns_when_prompt_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_run_interactive_session_returns_when_prompt_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(cli_module, "_prompt_interactive_transform", lambda **_: None)
     should_continue = cli_module._run_interactive_session(
         surgery_plan=SurgeryPlan(inputs={}, output=None),
@@ -272,9 +289,11 @@ def test_run_interactive_session_returns_when_prompt_returns_none(monkeypatch: p
     )
     assert should_continue is True
 
+
 def test_cli_module_main_guard_executes_app(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[bool] = []
     import sys
+
     import typer
 
     class _FakeTyper:

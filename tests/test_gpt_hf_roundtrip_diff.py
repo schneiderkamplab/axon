@@ -8,6 +8,7 @@ from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
+
 @pytest.fixture
 def gpt_model_path() -> Path:
     repo_root = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ def gpt_model_path() -> Path:
             return candidate
     pytest.skip("missing models/gpt/model.safetensors (or models/gpt2/model.safetensors)")
 
+
 def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dict[str, object]]]:
     plan = compile_plan(raw_plan)
     return _execute_transform_pairs(
@@ -27,6 +29,7 @@ def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dic
         provider,
         interactive=False,
     )
+
 
 def test_gpt_hf_style_rename_roundtrip_and_diff_no_changes(
     gpt_model_path: Path,
@@ -44,10 +47,19 @@ def test_gpt_hf_style_rename_roundtrip_and_diff_no_changes(
             r"modern::model.layers.\1.post_attention_layernorm.\2",
         ),
         (r"legacy::h\.(\d+)\.attn\.bias", r"modern::model.layers.\1.self_attn.causal_mask"),
-        (r"legacy::h\.(\d+)\.attn\.c_attn\.(weight|bias)", r"modern::model.layers.\1.self_attn.qkv_proj.\2"),
-        (r"legacy::h\.(\d+)\.attn\.c_proj\.(weight|bias)", r"modern::model.layers.\1.self_attn.o_proj.\2"),
+        (
+            r"legacy::h\.(\d+)\.attn\.c_attn\.(weight|bias)",
+            r"modern::model.layers.\1.self_attn.qkv_proj.\2",
+        ),
+        (
+            r"legacy::h\.(\d+)\.attn\.c_proj\.(weight|bias)",
+            r"modern::model.layers.\1.self_attn.o_proj.\2",
+        ),
         (r"legacy::h\.(\d+)\.mlp\.c_fc\.(weight|bias)", r"modern::model.layers.\1.mlp.up_proj.\2"),
-        (r"legacy::h\.(\d+)\.mlp\.c_proj\.(weight|bias)", r"modern::model.layers.\1.mlp.down_proj.\2"),
+        (
+            r"legacy::h\.(\d+)\.mlp\.c_proj\.(weight|bias)",
+            r"modern::model.layers.\1.mlp.down_proj.\2",
+        ),
     ]
     reverse_rules = [
         (r"modern::model\.embed_tokens\.weight", r"modern::wte.weight"),
@@ -59,10 +71,19 @@ def test_gpt_hf_style_rename_roundtrip_and_diff_no_changes(
             r"modern::h.\1.ln_2.\2",
         ),
         (r"modern::model\.layers\.(\d+)\.self_attn\.causal_mask", r"modern::h.\1.attn.bias"),
-        (r"modern::model\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)", r"modern::h.\1.attn.c_attn.\2"),
-        (r"modern::model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)", r"modern::h.\1.attn.c_proj.\2"),
+        (
+            r"modern::model\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)",
+            r"modern::h.\1.attn.c_attn.\2",
+        ),
+        (
+            r"modern::model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)",
+            r"modern::h.\1.attn.c_proj.\2",
+        ),
         (r"modern::model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)", r"modern::h.\1.mlp.c_fc.\2"),
-        (r"modern::model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", r"modern::h.\1.mlp.c_proj.\2"),
+        (
+            r"modern::model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)",
+            r"modern::h.\1.mlp.c_proj.\2",
+        ),
     ]
 
     first_pipeline = {
@@ -117,6 +138,7 @@ def test_gpt_hf_style_rename_roundtrip_and_diff_no_changes(
     assert "Missing on right:\n  (none)\n" in output
     assert "Differing:\n  (none)\n" in output
 
+
 def test_gpt_reversible_add_and_scale_roundtrip_has_no_diff(
     gpt_model_path: Path,
     tmp_path: Path,
@@ -142,13 +164,22 @@ def test_gpt_reversible_add_and_scale_roundtrip_has_no_diff(
         delta_name = f"delta.{name}"
         forward_transforms.extend(
             [
-                {"fill": {"from": f"work::{name}", "to": f"work::{delta_name}", "mode": "constant", "value": delta}},
+                {
+                    "fill": {
+                        "from": f"work::{name}",
+                        "to": f"work::{delta_name}",
+                        "mode": "constant",
+                        "value": delta,
+                    }
+                },
                 {"add_": {"from": f"work::{delta_name}", "to": f"work::{name}"}},
                 {"scale_": {"target": f"work::{name}", "by": forward_scale}},
                 {"delete": {"target": f"work::{delta_name}"}},
             ]
         )
-    forward_transforms.append({"save": {"path": str(edited_path), "alias": "work", "format": "safetensors"}})
+    forward_transforms.append(
+        {"save": {"path": str(edited_path), "alias": "work", "format": "safetensors"}}
+    )
 
     first_pipeline = {"inputs": [f"original::{gpt_model_path}"], "transforms": forward_transforms}
     provider = create_state_dict_provider(
@@ -175,7 +206,14 @@ def test_gpt_reversible_add_and_scale_roundtrip_has_no_diff(
         reverse_transforms.extend(
             [
                 {"scale_": {"target": f"work::{name}", "by": reverse_scale}},
-                {"fill": {"from": f"work::{name}", "to": f"work::{delta_name}", "mode": "constant", "value": delta}},
+                {
+                    "fill": {
+                        "from": f"work::{name}",
+                        "to": f"work::{delta_name}",
+                        "mode": "constant",
+                        "value": delta,
+                    }
+                },
                 {"subtract_": {"from": f"work::{delta_name}", "to": f"work::{name}"}},
                 {"delete": {"target": f"work::{delta_name}"}},
             ]

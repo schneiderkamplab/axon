@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 
-
 PACKAGE_ROOT = Path("brainsurgery")
 
 CONFIG = {

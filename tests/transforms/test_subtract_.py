@@ -2,13 +2,14 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.core import TensorRef
-
-from brainsurgery.core import BinaryMappingSpec
-
+from brainsurgery.core import BinaryMappingSpec, TensorRef
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 _module = import_module("brainsurgery.transforms.subtract")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_subtract_in_place_apply_success() -> None:
     class _Provider:
@@ -29,6 +30,7 @@ def test_subtract_in_place_apply_success() -> None:
     )
     SubtractInPlaceTransform().apply_item(spec, item, provider)
     assert provider._state_dict["dst"].tolist() == [4.0, 5.0]
+
 
 def test_subtract_in_place_dtype_mismatch() -> None:
     class _Provider:
@@ -52,6 +54,7 @@ def test_subtract_in_place_dtype_mismatch() -> None:
         assert "dtype mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected dtype mismatch")
+
 
 def test_subtract_in_place_compile_accepts_slices() -> None:
     spec = SubtractInPlaceTransform().compile(

@@ -2,13 +2,14 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.core import TensorRef
-
-from brainsurgery.core import TernaryMappingSpec
-
+from brainsurgery.core import TensorRef, TernaryMappingSpec
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 _module = import_module("brainsurgery.transforms.subtract")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_subtract_apply_success() -> None:
     class _Provider:
@@ -31,6 +32,7 @@ def test_subtract_apply_success() -> None:
     )
     SubtractTransform().apply_item(spec, item, provider)
     assert provider._state_dict["dst"].tolist() == [4.0, 5.0]
+
 
 def test_subtract_shape_mismatch() -> None:
     class _Provider:
@@ -56,6 +58,7 @@ def test_subtract_shape_mismatch() -> None:
         assert "shape mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected shape mismatch")
+
 
 def test_subtract_compile_slices_allowed() -> None:
     spec = SubtractTransform().compile(

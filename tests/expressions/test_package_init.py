@@ -1,8 +1,9 @@
+import pkgutil
 from importlib import import_module, reload
 from types import SimpleNamespace
 
-import pkgutil
 import pytest
+
 
 def test_expressions_package_skips_private_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
@@ -19,7 +20,9 @@ def test_expressions_package_skips_private_modules(monkeypatch: pytest.MonkeyPat
     assert calls == ["brainsurgery.expressions.visible"]
 
 
-def test_expressions_package_imports_modules_in_sorted_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_expressions_package_imports_modules_in_sorted_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
         pkgutil,
@@ -58,5 +61,8 @@ def test_expressions_package_import_failure_reports_module(monkeypatch: pytest.M
 
     monkeypatch.setattr(_importlib, "import_module", _raise)
     package = import_module("brainsurgery.expressions")
-    with pytest.raises(RuntimeError, match=r"Failed to import discovered expression module: brainsurgery\.expressions\.bad"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"Failed to import discovered expression module: brainsurgery\.expressions\.bad",
+    ):
         reload(package)

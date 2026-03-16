@@ -1,27 +1,28 @@
 from __future__ import annotations
 
 import base64
+import json
+import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
-import json
 from pathlib import Path
-import threading
-from typing import Any, Iterator
-from urllib.error import HTTPError
+from typing import Any
 from urllib import request
+from urllib.error import HTTPError
 
-from omegaconf import OmegaConf
 import pytest
-from safetensors.torch import save_file
 import torch
+from omegaconf import OmegaConf
+from safetensors.torch import save_file
 
 import brainsurgery  # noqa: F401
-
 from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.web.ui.handler import _handler_factory
 from brainsurgery.web.ui.session import _SessionState
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
@@ -40,6 +41,7 @@ def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, A
     assert isinstance(decoded, dict)
     return decoded
 
+
 def _get_json(base_url: str, path: str) -> dict[str, Any]:
     req = request.Request(
         url=base_url + path,
@@ -50,6 +52,7 @@ def _get_json(base_url: str, path: str) -> dict[str, Any]:
     decoded = json.loads(body)
     assert isinstance(decoded, dict)
     return decoded
+
 
 @contextmanager
 def _running_webui(tmp_path: Path) -> Iterator[str]:
@@ -82,6 +85,7 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
         server.server_close()
         thread.join(timeout=5)
         provider.close()
+
 
 def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
     tmp_path: Path,
@@ -135,8 +139,13 @@ def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
     summary_obj = OmegaConf.to_container(OmegaConf.create(output), resolve=True)
     assert isinstance(summary_obj, dict)
 
-    expected_transforms = [{"load": {"path": model_input, "alias": "model"}}, *transforms, {"exit": {}}]
+    expected_transforms = [
+        {"load": {"path": model_input, "alias": "model"}},
+        *transforms,
+        {"exit": {}},
+    ]
     assert summary_obj == {"transforms": expected_transforms}
+
 
 def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) -> None:
     with _running_webui(tmp_path) as base_url:
@@ -166,6 +175,7 @@ def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) 
         assert isinstance(flags_after_state, dict)
         assert flags_after_state.get("dry_run") is True
         assert flags_after_state.get("verbose") is True
+
 
 def test_webui_e2e_transforms_and_upload_dump_and_save_flows(tmp_path: Path) -> None:
     tiny_path = tmp_path / "tiny.safetensors"
@@ -238,7 +248,9 @@ def test_webui_e2e_transforms_and_upload_dump_and_save_flows(tmp_path: Path) -> 
             },
         )
         assert save_download.get("ok") is True, save_download.get("error")
-        assert isinstance(save_download.get("download_b64"), str) and save_download.get("download_b64")
+        assert isinstance(save_download.get("download_b64"), str) and save_download.get(
+            "download_b64"
+        )
         assert str(save_download.get("download_filename", "")).endswith(".safetensors")
 
         server_out = tmp_path / "server_saved.safetensors"

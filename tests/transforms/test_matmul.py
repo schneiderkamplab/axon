@@ -1,7 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.matmul")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_matmul_compile_rejects_sliced_destination() -> None:
     try:
@@ -13,6 +16,7 @@ def test_matmul_compile_rejects_sliced_destination() -> None:
         assert "destination must not be sliced" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected sliced destination rejection")
+
 
 def test_matmul_apply_success() -> None:
     class _Provider:

@@ -1,24 +1,22 @@
 from __future__ import annotations
 
 import io
-import json
 import tempfile
 import threading
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Optional
-
 from dataclasses import dataclass
+from pathlib import Path
+
 import pytest
 import typer
 
-from brainsurgery.engine import SurgeryPlan
-from brainsurgery.web.ui.session import _SessionState
 import brainsurgery.web.ui.backend as webui_backend
 import brainsurgery.web.ui.cli as webui_cli
 import brainsurgery.web.ui.handler as webui_handler
 import brainsurgery.web.ui.page as webui_page
 import brainsurgery.web.ui.server as webui_server
+from brainsurgery.engine import SurgeryPlan
+from brainsurgery.web.ui.session import _SessionState
+
 
 class _Provider:
     def __init__(self) -> None:
@@ -34,12 +32,16 @@ class _Provider:
     def close(self) -> None:
         self.closed = True
 
+
 def test_webui_configure_logging_and_bad_level() -> None:
     webui_cli.configure_logging("warning")
     with pytest.raises(typer.BadParameter):
         webui_cli.configure_logging("bogus")
 
-def test_webui_callback_handles_browser_error_and_wildcard_host(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_webui_callback_handles_browser_error_and_wildcard_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     served: list[tuple[str, int]] = []
     monkeypatch.setattr(webui_cli, "configure_logging", lambda _lvl: None)
 
@@ -47,9 +49,12 @@ def test_webui_callback_handles_browser_error_and_wildcard_host(monkeypatch: pyt
         raise RuntimeError("browser failed")
 
     monkeypatch.setattr(webui_cli.webbrowser, "open", _boom)
-    monkeypatch.setattr(webui_cli, "_serve_webui", lambda *, host, port: served.append((host, port)))
+    monkeypatch.setattr(
+        webui_cli, "_serve_webui", lambda *, host, port: served.append((host, port))
+    )
     webui_cli.webui(host="::", port=8124, log_level="info", open_browser=True)
     assert served == [("::", 8124)]
+
 
 def test_webui_backend_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     original_disabled = set(webui_backend.DISABLED_TRANSFORMS)
@@ -76,10 +81,13 @@ def test_webui_backend_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError):
         webui_backend._parse_filter_expr(1, alias="m")
 
-def test_webui_backend_boolean_keys_and_apply_transform_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_webui_backend_boolean_keys_and_apply_transform_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     @dataclass
     class _Spec:
-        dry_run: Optional[bool]
+        dry_run: bool | None
 
     class _DummyTransform:
         spec_type = _Spec
@@ -88,7 +96,9 @@ def test_webui_backend_boolean_keys_and_apply_transform_branches(monkeypatch: py
     out = webui_backend._boolean_keys_for_transform(_DummyTransform(), ["dry-run"])
     assert out == ["dry-run"]
 
-    monkeypatch.setattr(webui_backend, "get_type_hints", lambda _s: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        webui_backend, "get_type_hints", lambda _s: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
     assert webui_backend._boolean_keys_for_transform(_DummyTransform(), ["dry-run"]) == ["dry-run"]
 
     p = _Provider()
@@ -144,6 +154,7 @@ def test_webui_backend_boolean_keys_and_apply_transform_branches(monkeypatch: py
         default_model="only",
     )
 
+
 def test_webui_backend_render_dump_for_alias_no_matches() -> None:
     p = _Provider()
     p.models = {"m": {"w": object()}}
@@ -158,11 +169,13 @@ def test_webui_backend_render_dump_for_alias_no_matches() -> None:
     assert matched == 0
     assert total == 1
 
+
 def _make_session(tmp_path: Path) -> _SessionState:
     provider = _Provider()
     upload_root = tmp_path / "uploads"
     upload_root.mkdir(parents=True, exist_ok=True)
     return _SessionState(provider=provider, lock=threading.Lock(), upload_root=upload_root)
+
 
 def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     session = _make_session(tmp_path)
@@ -205,7 +218,11 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     h.path = "/api/load"
     h._read_json_body = lambda: {"server_path": "/x", "alias": "a"}
-    monkeypatch.setattr(webui_handler, "_apply_load_transform", lambda **_k: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(
+        webui_handler,
+        "_apply_load_transform",
+        lambda **_k: (_ for _ in ()).throw(RuntimeError("x")),
+    )
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is False
 
@@ -256,7 +273,10 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert h._json[-1][1]["ok"] is True
 
     h.path = "/api/_apply_transform"
-    h._read_json_body = lambda: {"transform": "assert", "payload": "equal:\n  left: a\n  right: a\n"}
+    h._read_json_body = lambda: {
+        "transform": "assert",
+        "payload": "equal:\n  left: a\n  right: a\n",
+    }
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is True
 
@@ -293,7 +313,12 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert h._json[-1][1]["ok"] is False
 
     h.path = "/api/model_dump"
-    h._read_json_body = lambda: {"alias": "x", "format": "compact", "verbosity": "shape", "filter": ".*"}
+    h._read_json_body = lambda: {
+        "alias": "x",
+        "format": "compact",
+        "verbosity": "shape",
+        "filter": ".*",
+    }
     monkeypatch.setattr(webui_handler, "_parse_filter_expr", lambda _v, alias: ".*")
     monkeypatch.setattr(webui_handler, "list_model_aliases", lambda _p: [])
     handler_cls.do_POST(h)
@@ -318,12 +343,16 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     handler_cls.do_POST(h)
     assert h._errors[-1][0] == 404
 
+
 def test_webui_page_contains_exit_summary_mode_selector() -> None:
-    transforms_ui_js = (webui_page._STATIC_DIR / "js" / "transforms_ui.js").read_text(encoding="utf-8")
+    transforms_ui_js = (webui_page._STATIC_DIR / "js" / "transforms_ui.js").read_text(
+        encoding="utf-8"
+    )
     assert '<script type="module" src="/static/js/main.js"></script>' in webui_page._HTML_PAGE
     assert "summary mode: raw" in transforms_ui_js
     assert "summaryModeSelect" in transforms_ui_js
     assert "mode: list aliases" in transforms_ui_js
+
 
 def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
@@ -375,33 +404,51 @@ def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path)
     with pytest.raises(ValueError, match="JSON object"):
         handler_cls._read_json_body(non_obj)
 
-    assert webui_handler._suggest_download_filename(
-        requested_name="x",
-        out_path=Path("x.safetensors"),
-        payload={},
-    ) == "x.safetensors"
-    assert webui_handler._suggest_download_filename(
-        requested_name="x.txt",
-        out_path=Path("x"),
-        payload={},
-    ) == "x.txt"
-    assert webui_handler._suggest_download_filename(
-        requested_name="x",
-        out_path=Path("x"),
-        payload={"format": "numpy"},
-    ) == "x.npy"
-    assert webui_handler._suggest_download_filename(
-        requested_name="x",
-        out_path=Path("x"),
-        payload={"format": "torch"},
-    ) == "x.pt"
-    assert webui_handler._suggest_download_filename(
-        requested_name="x",
-        out_path=Path("x"),
-        payload={"format": "unknown"},
-    ) == "x.bin"
+    assert (
+        webui_handler._suggest_download_filename(
+            requested_name="x",
+            out_path=Path("x.safetensors"),
+            payload={},
+        )
+        == "x.safetensors"
+    )
+    assert (
+        webui_handler._suggest_download_filename(
+            requested_name="x.txt",
+            out_path=Path("x"),
+            payload={},
+        )
+        == "x.txt"
+    )
+    assert (
+        webui_handler._suggest_download_filename(
+            requested_name="x",
+            out_path=Path("x"),
+            payload={"format": "numpy"},
+        )
+        == "x.npy"
+    )
+    assert (
+        webui_handler._suggest_download_filename(
+            requested_name="x",
+            out_path=Path("x"),
+            payload={"format": "torch"},
+        )
+        == "x.pt"
+    )
+    assert (
+        webui_handler._suggest_download_filename(
+            requested_name="x",
+            out_path=Path("x"),
+            payload={"format": "unknown"},
+        )
+        == "x.bin"
+    )
 
-def test_webui_handler_run_save_download_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+
+def test_webui_handler_run_save_download_branches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     session = _make_session(tmp_path)
     handler_cls = webui_handler._handler_factory(session)
     h = object.__new__(handler_cls)
@@ -431,6 +478,7 @@ def test_webui_handler_run_save_download_branches(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(tempfile, "TemporaryDirectory", lambda prefix=None: _TempDir(no_file_path))
     with pytest.raises(ValueError, match="did not produce a file or directory"):
         handler_cls._run_save_download(h, {"path": "missing"})
+
 
 def test_webui_server_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     events: list[str] = []

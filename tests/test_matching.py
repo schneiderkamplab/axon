@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.core.compile.matching import _MatchError, StructuredMatch, _StructuredPathMatcher
+from brainsurgery.core.compile.matching import StructuredMatch, _MatchError, _StructuredPathMatcher
+
 
 def test_structured_path_matcher_matches_and_rewrites_captures() -> None:
     matcher = _StructuredPathMatcher()
@@ -11,12 +12,14 @@ def test_structured_path_matcher_matches_and_rewrites_captures() -> None:
     assert match == StructuredMatch(bindings={"layer": "3", "tail": ["attn", "proj"]})
     assert matcher.rewrite(["decoder", "${layer}", "*tail"], match) == "decoder.3.attn.proj"
 
+
 def test_structured_path_matcher_supports_regex_captures() -> None:
     matcher = _StructuredPathMatcher()
 
     match = matcher.match(["layer", "~idx::([0-9]+)"], "layer.12")
     assert match == StructuredMatch(bindings={"idx": "12"})
     assert matcher.rewrite(["copy_${idx}"], match) == "copy_12"
+
 
 def test_structured_path_matcher_rejects_invalid_output_patterns() -> None:
     matcher = _StructuredPathMatcher()
@@ -35,19 +38,25 @@ def test_structured_path_matcher_rejects_invalid_output_patterns() -> None:
     with pytest.raises(_MatchError, match="cannot interpolate non-scalar variable"):
         matcher.rewrite(["$name"], StructuredMatch(bindings={"name": ["proj"]}))
 
+
 def test_structured_path_matcher_rejects_binding_count_mismatches() -> None:
     matcher = _StructuredPathMatcher()
 
     with pytest.raises(_MatchError, match="binds 2 variables but regex has 1 capturing groups"):
         matcher.match(["~left,right::(x)"], "x")
 
+
 def test_structured_path_matcher_match_and_rewrite_returns_none_when_unmatched() -> None:
     matcher = _StructuredPathMatcher()
-    assert matcher.match_and_rewrite(
-        from_pattern=["encoder", "$layer"],
-        to_pattern=["decoder", "${layer}"],
-        name="decoder.1",
-    ) is None
+    assert (
+        matcher.match_and_rewrite(
+            from_pattern=["encoder", "$layer"],
+            to_pattern=["decoder", "${layer}"],
+            name="decoder.1",
+        )
+        is None
+    )
+
 
 def test_structured_path_matcher_rejects_invalid_capture_and_regex_forms() -> None:
     matcher = _StructuredPathMatcher()
@@ -67,6 +76,7 @@ def test_structured_path_matcher_rejects_invalid_capture_and_regex_forms() -> No
     with pytest.raises(_MatchError, match="named groups are not allowed"):
         matcher.match(["~x::(?P<v>x)"], "x")
 
+
 def test_structured_path_matcher_rejects_regex_capture_none_values() -> None:
     matcher = _StructuredPathMatcher()
 
@@ -75,6 +85,7 @@ def test_structured_path_matcher_rejects_regex_capture_none_values() -> None:
 
     with pytest.raises(_MatchError, match="captured None"):
         matcher.match(["~x,y::(a)?(b)?"], "")
+
 
 def test_structured_path_matcher_rejects_invalid_variadic_output_bindings() -> None:
     matcher = _StructuredPathMatcher()

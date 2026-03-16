@@ -15,27 +15,33 @@ from brainsurgery.cli.interactive import (
     _collect_payload_candidates,
     _configure_readline_completion_bindings,
     _infer_active_transform,
-    _match_payload_candidates,
-    _readline_safe_prompt,
     _is_top_level_completion_position,
+    _match_payload_candidates,
     _parse_transform_block,
     _prompt_interactive_transform,
+    _readline_safe_prompt,
 )
+
 
 def test_parse_transform_block_accepts_canonical_help_mapping() -> None:
     parsed = _parse_transform_block("help: { assert: all }")
     assert parsed == [{"help": {"assert": "all"}}]
 
+
 def test_parse_transform_block_accepts_help_shorthand_via_oly() -> None:
     parsed = _parse_transform_block("help: assert: all")
     assert parsed == [{"help": {"assert": "all"}}]
+
 
 @contextmanager
 def _no_completion(*args: object, **kwargs: object):
     del args, kwargs
     yield
 
-def test_prompt_interactive_transform_ctrl_c_at_fresh_prompt_restarts(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_prompt_interactive_transform_ctrl_c_at_fresh_prompt_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     responses = iter([KeyboardInterrupt(), EOFError()])
 
     def fake_input(prompt: str) -> str:
@@ -48,6 +54,7 @@ def test_prompt_interactive_transform_ctrl_c_at_fresh_prompt_restarts(monkeypatc
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert _prompt_interactive_transform() is None
+
 
 def test_prompt_interactive_transform_ctrl_c_discards_partial_block(
     monkeypatch: pytest.MonkeyPatch,
@@ -75,6 +82,7 @@ def test_prompt_interactive_transform_ctrl_c_discards_partial_block(
     assert _prompt_interactive_transform() == [{"exit": {}}]
     assert history_entries == ["exit"]
 
+
 def test_collect_completion_candidates_includes_commands_keys_and_refs() -> None:
     candidates = _collect_completion_candidates(None)
 
@@ -83,6 +91,7 @@ def test_collect_completion_candidates_includes_commands_keys_and_refs() -> None
     assert "from:" not in candidates
     assert "base::" not in candidates
     assert "ln_f.weight" not in candidates
+
 
 def test_collect_completion_candidates_without_provider() -> None:
     candidates = _collect_completion_candidates(None)
@@ -93,12 +102,14 @@ def test_collect_completion_candidates_without_provider() -> None:
     assert "exit:" not in candidates
     assert "prefixes: " not in candidates
 
+
 def test_is_top_level_completion_position() -> None:
     assert _is_top_level_completion_position("", 0) is True
     assert _is_top_level_completion_position("co", 0) is True
     assert _is_top_level_completion_position("- ", 2) is True
     assert _is_top_level_completion_position("copy: {", 7) is False
     assert _is_top_level_completion_position("  from: x", 8) is False
+
 
 class _DummyProvider:
     def __init__(self) -> None:
@@ -111,9 +122,11 @@ class _DummyProvider:
     def list_model_aliases(self) -> set[str]:
         return {"base", "scratch"}
 
+
 def test_infer_active_transform_from_current_or_previous_lines() -> None:
     assert _infer_active_transform([], "copy: {") == "copy"
     assert _infer_active_transform(["copy: {"], "from: ") == "copy"
+
 
 def test_collect_payload_candidates_include_keys_aliases_tensors_and_yaml_tokens() -> None:
     candidates = _collect_payload_candidates(
@@ -128,10 +141,12 @@ def test_collect_payload_candidates_include_keys_aliases_tensors_and_yaml_tokens
     assert "{ " in candidates
     assert ": " not in candidates
 
+
 def test_payload_context_key_and_value_detection() -> None:
     assert _payload_context("copy: { ") == "key"
     assert _payload_context("copy: { from: ") == "value"
     assert _payload_context("copy: { from: x, ") == "key"
+
 
 def test_match_payload_candidates_filters_by_prefix_and_context() -> None:
     candidates = [
@@ -172,6 +187,7 @@ def test_match_payload_candidates_filters_by_prefix_and_context() -> None:
     assert "base::" in ref_matches
     assert "base::ln_f.weight" in ref_matches
 
+
 def test_transform_payload_start_only_suggests_open_brace() -> None:
     assert _is_transform_payload_start(
         line_buffer="copy: ",
@@ -186,6 +202,7 @@ def test_transform_payload_start_only_suggests_open_brace() -> None:
     )
     assert matches == ["{ "]
 
+
 def test_copy_mapping_start_suggests_keys_not_yaml_colon() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -197,6 +214,7 @@ def test_copy_mapping_start_suggests_keys_not_yaml_colon() -> None:
     assert "to: " in matches
     assert "{ " not in matches
 
+
 def test_key_context_filters_already_used_keys() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -206,6 +224,7 @@ def test_key_context_filters_already_used_keys() -> None:
         active_transform="copy",
     )
     assert matches == ["to: "]
+
 
 def test_value_context_for_reference_key_shows_aliases_and_tensors() -> None:
     matches = _match_payload_candidates(
@@ -220,6 +239,7 @@ def test_value_context_for_reference_key_shows_aliases_and_tensors() -> None:
     assert "base::ln_f.weight" in matches
     assert "from: " not in matches
 
+
 def test_value_context_short_prefix_keeps_reference_candidates() -> None:
     matches = _match_payload_candidates(
         text="b",
@@ -231,6 +251,7 @@ def test_value_context_short_prefix_keeps_reference_candidates() -> None:
     assert "base::" in matches
     assert "base::ln_f.weight" in matches
     assert "b, to: " not in matches
+
 
 def test_reference_value_completion_prefers_aliases_when_multiple_aliases_exist() -> None:
     matches = _match_payload_candidates(
@@ -252,6 +273,7 @@ def test_reference_value_completion_prefers_aliases_when_multiple_aliases_exist(
     )
     assert matches == ["base::", "scratch::"]
 
+
 def test_reference_value_prefix_with_multiple_aliases_filters_to_aliases() -> None:
     matches = _match_payload_candidates(
         text="s",
@@ -271,6 +293,7 @@ def test_reference_value_prefix_with_multiple_aliases_filters_to_aliases() -> No
     )
     assert matches == ["scratch::"]
 
+
 def test_reference_completion_adds_copy_to_continuation_snippet() -> None:
     matches = _match_payload_candidates(
         text="base::ln_f.weight",
@@ -280,6 +303,7 @@ def test_reference_completion_adds_copy_to_continuation_snippet() -> None:
         active_transform="copy",
     )
     assert matches == ["base::ln_f.weight", "base::ln_f.weight, to: "]
+
 
 def test_reference_completion_does_not_add_continuation_for_bare_alias() -> None:
     matches = _match_payload_candidates(
@@ -292,6 +316,7 @@ def test_reference_completion_does_not_add_continuation_for_bare_alias() -> None
     )
     assert matches == ["base::", "base::ln_f.weight"]
 
+
 def test_reference_completion_adds_assign_to_continuation_snippet() -> None:
     matches = _match_payload_candidates(
         text="base::ln_f.weight",
@@ -301,6 +326,7 @@ def test_reference_completion_adds_assign_to_continuation_snippet() -> None:
         active_transform="assign",
     )
     assert matches == ["base::ln_f.weight", "base::ln_f.weight, to: "]
+
 
 def test_reference_completion_adds_ternary_next_reference_key() -> None:
     matches = _match_payload_candidates(
@@ -312,6 +338,7 @@ def test_reference_completion_adds_ternary_next_reference_key() -> None:
     )
     assert matches == ["base::a.weight", "base::a.weight, from_b: "]
 
+
 def test_copy_after_both_keys_only_suggests_close_brace() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -322,6 +349,7 @@ def test_copy_after_both_keys_only_suggests_close_brace() -> None:
     )
     assert matches == ["}"]
 
+
 def test_copy_after_completed_to_with_trailing_space_only_suggests_close_brace() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -331,6 +359,7 @@ def test_copy_after_completed_to_with_trailing_space_only_suggests_close_brace()
         active_transform="copy",
     )
     assert matches == ["}"]
+
 
 def test_copy_after_first_key_suggests_remaining_key_and_close() -> None:
     matches = _match_payload_candidates(
@@ -343,6 +372,7 @@ def test_copy_after_first_key_suggests_remaining_key_and_close() -> None:
     assert ", to: " in matches
     assert "}" in matches
 
+
 def test_copy_after_comma_without_space_tab_can_insert_spaced_next_key() -> None:
     matches = _match_payload_candidates(
         text="model::h.0.attn.bias,",
@@ -353,6 +383,7 @@ def test_copy_after_comma_without_space_tab_can_insert_spaced_next_key() -> None
         active_transform="copy",
     )
     assert matches == ["model::h.0.attn.bias, to: "]
+
 
 def test_help_value_completion_suggests_commands() -> None:
     matches = _match_payload_candidates(
@@ -365,6 +396,7 @@ def test_help_value_completion_suggests_commands() -> None:
     assert "copy" in matches
     assert "exit" in matches
 
+
 def test_assert_value_completion_suggests_assert_expressions() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -375,6 +407,7 @@ def test_assert_value_completion_suggests_assert_expressions() -> None:
     )
     assert "equal" in matches
     assert "exists" in matches
+
 
 def test_assert_mapping_key_completion_suggests_assert_expressions() -> None:
     matches = _match_payload_candidates(
@@ -387,6 +420,7 @@ def test_assert_mapping_key_completion_suggests_assert_expressions() -> None:
     assert "equal: " in matches
     assert "exists: " in matches
 
+
 def test_help_mapping_key_completion_suggests_command_keys() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -397,6 +431,7 @@ def test_help_mapping_key_completion_suggests_command_keys() -> None:
     )
     assert "assert: " in matches
     assert "copy: " not in matches
+
 
 def test_help_mapping_start_with_open_brace_only_suggests_assert_key() -> None:
     matches = _match_payload_candidates(
@@ -409,6 +444,7 @@ def test_help_mapping_start_with_open_brace_only_suggests_assert_key() -> None:
     )
     assert matches == ["{ assert: "]
 
+
 def test_help_assert_value_completion_suggests_assert_expressions() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -420,6 +456,7 @@ def test_help_assert_value_completion_suggests_assert_expressions() -> None:
     assert "equal" in matches
     assert "exists" in matches
 
+
 def test_help_assert_committed_value_only_suggests_close_brace() -> None:
     matches = _match_payload_candidates(
         text="",
@@ -429,6 +466,7 @@ def test_help_assert_committed_value_only_suggests_close_brace() -> None:
         active_transform="help",
     )
     assert matches == ["}"]
+
 
 def test_prefixes_key_suggestions_depend_on_mode() -> None:
     matches_remove = _match_payload_candidates(
@@ -453,6 +491,7 @@ def test_prefixes_key_suggestions_depend_on_mode() -> None:
     assert "to: " in matches_rename
     assert "alias: " not in matches_rename
 
+
 def test_prefixes_alias_value_completion_uses_aliases() -> None:
     matches = _match_payload_candidates(
         text="s",
@@ -466,21 +505,34 @@ def test_prefixes_alias_value_completion_uses_aliases() -> None:
     assert "source" in matches
     assert "base" not in matches
 
+
 def test_prefixes_rename_from_value_completion_uses_aliases_not_tensor_refs() -> None:
     matches = _match_payload_candidates(
         text="s",
         line_buffer="prefixes: { mode: rename, from: s",
         begidx=len("prefixes: { mode: rename, from: s"),
-        payload_candidates=["scratch", "scratch::", "source", "source::", "mode: ", "from: ", "to: "],
+        payload_candidates=[
+            "scratch",
+            "scratch::",
+            "source",
+            "source::",
+            "mode: ",
+            "from: ",
+            "to: ",
+        ],
         active_transform="prefixes",
         model_aliases=["scratch", "source", "base"],
     )
     assert matches == ["scratch", "source"]
 
-def test_readline_safe_prompt_wraps_ansi_when_readline_available(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_readline_safe_prompt_wraps_ansi_when_readline_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(interactive_module, "readline", object())
     styled = "\x1b[36mbrainsurgery> \x1b[0m"
     assert _readline_safe_prompt(styled) == "\001\x1b[36m\002brainsurgery> \001\x1b[0m\002"
+
 
 def test_readline_safe_prompt_leaves_prompt_unchanged_without_readline(
     monkeypatch: pytest.MonkeyPatch,
@@ -489,12 +541,14 @@ def test_readline_safe_prompt_leaves_prompt_unchanged_without_readline(
     styled = "\x1b[36mbrainsurgery> \x1b[0m"
     assert _readline_safe_prompt(styled) == styled
 
+
 class _FakeReadline:
     def __init__(self) -> None:
         self.bound_commands: list[str] = []
 
     def parse_and_bind(self, command: str) -> None:
         self.bound_commands.append(command)
+
 
 def test_configure_readline_completion_bindings_uses_zsh_style_view_then_cycle(
     monkeypatch: pytest.MonkeyPatch,
@@ -513,6 +567,7 @@ def test_configure_readline_completion_bindings_uses_zsh_style_view_then_cycle(
         "tab: menu-complete",
         '"\\e[Z": menu-complete-backward',
     ]
+
 
 class _CompletionReadline:
     def __init__(self) -> None:
@@ -543,7 +598,10 @@ class _CompletionReadline:
     def set_completer(self, completer) -> None:
         self._completer = completer
 
-def test_interactive_completion_context_registers_and_restores_completer(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_interactive_completion_context_registers_and_restores_completer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake = _CompletionReadline()
     monkeypatch.setattr(interactive_module, "readline", fake)
 
@@ -561,6 +619,7 @@ def test_interactive_completion_context_registers_and_restores_completer(monkeyp
 
     assert fake.get_completer() is None
 
+
 def test_interactive_completion_no_readline_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(interactive_module, "readline", None)
     with interactive_module._interactive_completion(
@@ -570,7 +629,10 @@ def test_interactive_completion_no_readline_is_noop(monkeypatch: pytest.MonkeyPa
     ):
         pass
 
-def test_interactive_completion_handles_readline_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_interactive_completion_handles_readline_runtime_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _ErrorReadline(_CompletionReadline):
         def get_line_buffer(self) -> str:
             raise RuntimeError("broken line buffer")
@@ -592,6 +654,7 @@ def test_interactive_completion_handles_readline_runtime_errors(monkeypatch: pyt
         state_dict_provider=None,
     ):
         pass
+
 
 def test_interactive_completion_handles_restore_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     class _RestoreErrorReadline(_CompletionReadline):
@@ -615,7 +678,10 @@ def test_interactive_completion_handles_restore_errors(monkeypatch: pytest.Monke
     ):
         assert callable(fake.get_completer())
 
-def test_interactive_completion_fallback_without_get_endidx(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_interactive_completion_fallback_without_get_endidx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _NoEndidxReadline:
         def __init__(self) -> None:
             self._completer = None
@@ -651,13 +717,18 @@ def test_interactive_completion_fallback_without_get_endidx(monkeypatch: pytest.
         assert callable(fake.get_completer())
         assert fake._completer("", 0) == "{ "
 
+
 def test_interactive_completion_top_level_falls_back_to_payload_and_non_top_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _CompletionReadline()
     monkeypatch.setattr(interactive_module, "readline", fake)
-    monkeypatch.setattr(interactive_module, "_collect_payload_candidates", lambda **kwargs: ["from: ", "base::x"])
-    monkeypatch.setattr(interactive_module, "_match_payload_candidates", lambda **kwargs: ["from: "])
+    monkeypatch.setattr(
+        interactive_module, "_collect_payload_candidates", lambda **kwargs: ["from: ", "base::x"]
+    )
+    monkeypatch.setattr(
+        interactive_module, "_match_payload_candidates", lambda **kwargs: ["from: "]
+    )
     monkeypatch.setattr(interactive_module, "_list_model_aliases", lambda provider: {"base"})
 
     with interactive_module._interactive_completion(
@@ -674,6 +745,7 @@ def test_interactive_completion_top_level_falls_back_to_payload_and_non_top_leve
         fake.begidx = len("copy: { f")
         fake.endidx = fake.begidx
         assert fake._completer("f", 0) == "from: "
+
 
 def test_interactive_completion_handles_readline_exception_and_top_level_colon_fallback(
     monkeypatch: pytest.MonkeyPatch,
@@ -693,8 +765,12 @@ def test_interactive_completion_handles_readline_exception_and_top_level_colon_f
 
     fake = _CompletionReadline()
     monkeypatch.setattr(interactive_module, "readline", fake)
-    monkeypatch.setattr(interactive_module, "_collect_payload_candidates", lambda **kwargs: ["from: "])
-    monkeypatch.setattr(interactive_module, "_match_payload_candidates", lambda **kwargs: ["from: "])
+    monkeypatch.setattr(
+        interactive_module, "_collect_payload_candidates", lambda **kwargs: ["from: "]
+    )
+    monkeypatch.setattr(
+        interactive_module, "_match_payload_candidates", lambda **kwargs: ["from: "]
+    )
     monkeypatch.setattr(interactive_module, "_list_model_aliases", lambda provider: {"base"})
     with interactive_module._interactive_completion(
         top_level_candidates=["help: "],
@@ -706,7 +782,10 @@ def test_interactive_completion_handles_readline_exception_and_top_level_colon_f
         fake.endidx = len(fake.line_buffer)
         assert fake._completer("x", 0) == "from: "
 
-def test_prompt_interactive_transform_rejects_invalid_then_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_prompt_interactive_transform_rejects_invalid_then_accepts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     responses = iter(["copy: [", "", "exit", ""])
     history_entries: list[str] = []
 
@@ -722,7 +801,10 @@ def test_prompt_interactive_transform_rejects_invalid_then_accepts(monkeypatch: 
     assert _prompt_interactive_transform() == [{"exit": {}}]
     assert history_entries == ["exit"]
 
-def test_prompt_interactive_transform_ignores_leading_blank_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_prompt_interactive_transform_ignores_leading_blank_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     responses = iter(["", "exit", ""])
 
     def fake_input(prompt: str) -> str:
@@ -733,6 +815,7 @@ def test_prompt_interactive_transform_ignores_leading_blank_lines(monkeypatch: p
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert _prompt_interactive_transform() == [{"exit": {}}]
+
 
 def test_prompt_interactive_transform_executes_single_line_oly_immediately(
     monkeypatch: pytest.MonkeyPatch,

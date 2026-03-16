@@ -1,7 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.split")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_split_compile_requires_matching_sizes_and_outputs() -> None:
     try:
@@ -13,6 +16,7 @@ def test_split_compile_requires_matching_sizes_and_outputs() -> None:
         assert "length must match" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected split.sizes length validation error")
+
 
 def test_split_apply_success() -> None:
     class _Provider:

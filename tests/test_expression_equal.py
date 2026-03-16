@@ -5,12 +5,12 @@ from collections.abc import Callable
 import pytest
 import torch
 
-from brainsurgery.core import TransformError
+from brainsurgery.core import TensorRef, TransformError
 from brainsurgery.expressions.equal import EqualExpr, compile_equal_expr
-from brainsurgery.core import TensorRef
+
 
 def test_equal_dtype_compatibility(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -29,8 +29,9 @@ def test_equal_dtype_compatibility(
     with pytest.raises(TransformError, match="dtype mismatch"):
         expr.evaluate(provider)
 
+
 def test_equal_shape_compatibility(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -49,8 +50,9 @@ def test_equal_shape_compatibility(
     with pytest.raises(TransformError, match="shape mismatch"):
         expr.evaluate(provider)
 
+
 def test_equal_value_mismatch(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -69,12 +71,14 @@ def test_equal_value_mismatch(
     with pytest.raises(TransformError, match="!="):
         expr.evaluate(provider)
 
+
 def test_equal_compile_rejects_negative_eps() -> None:
     with pytest.raises(TransformError, match="equal.eps must be a non-negative number"):
         compile_equal_expr({"left": "x", "right": "y", "eps": -1e-3}, default_model="model")
 
+
 def test_equal_value_within_eps_succeeds(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -93,8 +97,9 @@ def test_equal_value_within_eps_succeeds(
 
     expr.evaluate(provider)
 
+
 def test_equal_value_outside_eps_fails(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -114,8 +119,9 @@ def test_equal_value_outside_eps_fails(
     with pytest.raises(TransformError, match="!="):
         expr.evaluate(provider)
 
+
 def test_equal_regex_mapping_success(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -137,8 +143,9 @@ def test_equal_regex_mapping_success(
 
     expr.evaluate(provider)
 
+
 def test_equal_regex_mapping_missing_destination(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {
@@ -160,8 +167,9 @@ def test_equal_regex_mapping_missing_destination(
     with pytest.raises(TransformError, match="destination missing"):
         expr.evaluate(provider)
 
+
 def test_equal_structured_mapping_success(
-    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object]
+    multi_model_provider: Callable[[dict[str, dict[str, torch.Tensor]]], object],
 ) -> None:
     provider = multi_model_provider(
         {

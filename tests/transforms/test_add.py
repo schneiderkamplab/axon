@@ -2,13 +2,14 @@ from importlib import import_module
 
 import torch
 
-from brainsurgery.core import TensorRef
-
-from brainsurgery.core import TernaryMappingSpec
-
+from brainsurgery.core import TensorRef, TernaryMappingSpec
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 _module = import_module("brainsurgery.transforms.add")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_add_apply_success() -> None:
     class _Provider:
@@ -32,6 +33,7 @@ def test_add_apply_success() -> None:
     AddTransform().apply_item(spec, item, provider)
     assert provider._state_dict["dst"].tolist() == [4.0, 6.0]
 
+
 def test_add_compile_requires_from_b() -> None:
     try:
         AddTransform().compile({"from_a": "a", "to": "b"}, default_model="m")
@@ -39,6 +41,7 @@ def test_add_compile_requires_from_b() -> None:
         assert "from_b" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected required-key validation error")
+
 
 def test_add_dtype_mismatch() -> None:
     class _Provider:

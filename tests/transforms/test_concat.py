@@ -1,7 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.transforms.concat")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_concat_compile_requires_list() -> None:
     try:
@@ -10,6 +13,7 @@ def test_concat_compile_requires_list() -> None:
         assert "list of at least two" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected concat.from validation error")
+
 
 def test_concat_compile_rejects_sliced_to() -> None:
     try:

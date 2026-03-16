@@ -6,17 +6,20 @@ import pytest
 
 from brainsurgery.engine.workers import _choose_num_io_workers, _run_threadpool_tasks_with_progress
 
+
 def test_choose_num_io_workers_validates_inputs() -> None:
     with pytest.raises(ValueError, match="num_items"):
         _choose_num_io_workers(-1, 1)
     with pytest.raises(ValueError, match="max_io_workers"):
         _choose_num_io_workers(1, 0)
 
+
 def test_choose_num_io_workers_bounds_to_items() -> None:
     assert _choose_num_io_workers(0, 8) == 1
     assert _choose_num_io_workers(1, 8) == 1
     assert _choose_num_io_workers(4, 8) == 4
     assert _choose_num_io_workers(8, 4) == 4
+
 
 @dataclass
 class _Progress:
@@ -32,6 +35,7 @@ class _Progress:
 
     def close(self) -> None:
         self.closed = True
+
 
 def test_run_threadpool_tasks_with_progress_reports_results() -> None:
     progress_items: list[_Progress] = []

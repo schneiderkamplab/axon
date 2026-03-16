@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import brainsurgery
 
+
 def test_normalize_cli_args_handles_mixed_flags_and_values() -> None:
     args = [
         "examples/gpt2.yaml",
@@ -21,10 +22,12 @@ def test_normalize_cli_args_handles_mixed_flags_and_values() -> None:
         "output.path=models/out",
     ]
 
+
 def test_normalize_cli_args_keeps_dashdash_separator() -> None:
     args = ["plan.yaml", "--", "-i", "--log-level", "debug"]
     normalized = brainsurgery._normalize_cli_args(args)
     assert normalized == ["plan.yaml", "--", "-i", "--log-level", "debug"]
+
 
 def test_normalize_cli_args_handles_summary_mode_option() -> None:
     args = [

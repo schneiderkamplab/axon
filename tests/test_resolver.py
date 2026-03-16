@@ -3,17 +3,22 @@ from __future__ import annotations
 import pytest
 import torch
 
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
-from brainsurgery.core import TensorRef
+from brainsurgery.core import TensorRef, TransformError
 from brainsurgery.core.compile.resolver import (
-    _resolve_tensor_mappings as resolve_tensor_mappings,
-    _resolve_tensors as resolve_tensors,
     _resolve_target_names,
 )
-from brainsurgery.core import TransformError
+from brainsurgery.core.compile.resolver import (
+    _resolve_tensor_mappings as resolve_tensor_mappings,
+)
+from brainsurgery.core.compile.resolver import (
+    _resolve_tensors as resolve_tensors,
+)
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 
 class _ResolverError(TransformError):
     pass
+
 
 class _Provider:
     def __init__(self) -> None:
@@ -28,15 +33,19 @@ class _Provider:
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
 
+
 def _resolve_names(ref: TensorRef, provider: _Provider, *, op_name: str) -> list[str]:
     del op_name
     return _resolve_target_names(
         target_ref=ref,
         provider=provider,
         op_name="assert",
-        match_names=lambda **kwargs: [name for name in kwargs["names"] if name.startswith("weight")],
+        match_names=lambda **kwargs: [
+            name for name in kwargs["names"] if name.startswith("weight")
+        ],
         error_type=_ResolverError,
     )
+
 
 def test_resolve_single_tensor_requires_single_match() -> None:
     provider = _Provider()
@@ -48,6 +57,7 @@ def test_resolve_single_tensor_requires_single_match() -> None:
         resolve_names=_resolve_names,
     )
     assert len(resolved) == 2
+
 
 def test_resolve_tensors_applies_slice_and_concretizes_names() -> None:
     provider = _Provider()
@@ -61,6 +71,7 @@ def test_resolve_tensors_applies_slice_and_concretizes_names() -> None:
 
     assert [ref.expr for ref, _ in resolved] == ["weight.0", "weight.1"]
     assert torch.equal(resolved[0][1], torch.tensor([1, 4]))
+
 
 def test_resolve_tensor_mappings_requires_existing_destination() -> None:
     provider = _Provider()

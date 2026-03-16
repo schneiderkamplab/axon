@@ -10,6 +10,7 @@ from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 
+
 def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dict[str, object]]]:
     plan = compile_plan(raw_plan)
     return _execute_transform_pairs(
@@ -18,11 +19,13 @@ def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dic
         interactive=False,
     )
 
+
 def _assert_no_diff_output(output: str) -> None:
     assert "No differences found." in output
     assert "Missing on left:\n  (none)\n" in output
     assert "Missing on right:\n  (none)\n" in output
     assert "Differing:\n  (none)\n" in output
+
 
 def _toy_tensors() -> dict[str, torch.Tensor]:
     return {
@@ -39,8 +42,10 @@ def _toy_tensors() -> dict[str, torch.Tensor]:
         "x.square": torch.arange(16, dtype=torch.float32).reshape(4, 4),
     }
 
+
 def _write_toy_checkpoint(path: Path) -> None:
     save_safetensors_file(_toy_tensors(), str(path))
+
 
 def test_sharded_hf_style_migration_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -64,15 +69,24 @@ def test_sharded_hf_style_migration_roundtrip_has_no_diff(
     forward_rules = [
         (r"base::wte\.weight", r"hf::model.embed_tokens.weight"),
         (r"base::ln_f\.weight", r"hf::model.norm.weight"),
-        (r"base::h\.(\d+)\.attn\.c_attn\.(weight|bias)", r"hf::model.layers.\1.self_attn.qkv_proj.\2"),
-        (r"base::h\.(\d+)\.attn\.c_proj\.(weight|bias)", r"hf::model.layers.\1.self_attn.o_proj.\2"),
+        (
+            r"base::h\.(\d+)\.attn\.c_attn\.(weight|bias)",
+            r"hf::model.layers.\1.self_attn.qkv_proj.\2",
+        ),
+        (
+            r"base::h\.(\d+)\.attn\.c_proj\.(weight|bias)",
+            r"hf::model.layers.\1.self_attn.o_proj.\2",
+        ),
         (r"base::h\.(\d+)\.mlp\.c_fc\.(weight|bias)", r"hf::model.layers.\1.mlp.up_proj.\2"),
         (r"base::h\.(\d+)\.mlp\.c_proj\.(weight|bias)", r"hf::model.layers.\1.mlp.down_proj.\2"),
     ]
     reverse_rules = [
         (r"hf::model\.embed_tokens\.weight", r"hf::wte.weight"),
         (r"hf::model\.norm\.weight", r"hf::ln_f.weight"),
-        (r"hf::model\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)", r"hf::h.\1.attn.c_attn.\2"),
+        (
+            r"hf::model\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)",
+            r"hf::h.\1.attn.c_attn.\2",
+        ),
         (r"hf::model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)", r"hf::h.\1.attn.c_proj.\2"),
         (r"hf::model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)", r"hf::h.\1.mlp.c_fc.\2"),
         (r"hf::model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", r"hf::h.\1.mlp.c_proj.\2"),
@@ -82,7 +96,16 @@ def test_sharded_hf_style_migration_roundtrip_has_no_diff(
         "inputs": [f"base::{original_path}"],
         "transforms": [{"prefixes": {"mode": "add", "alias": "hf"}}]
         + [{"copy": {"from": src, "to": dst}} for src, dst in forward_rules]
-        + [{"save": {"path": str(sharded_dir), "alias": "hf", "format": "safetensors", "shard": "1KB"}}],
+        + [
+            {
+                "save": {
+                    "path": str(sharded_dir),
+                    "alias": "hf",
+                    "format": "safetensors",
+                    "shard": "1KB",
+                }
+            }
+        ],
     }
     provider = create_state_dict_provider(
         provider="arena",
@@ -129,6 +152,7 @@ def test_sharded_hf_style_migration_roundtrip_has_no_diff(
     assert "Missing on right:\n  (none)\n" in output
     assert "Differing:\n  (none)\n" in output
 
+
 def test_reversible_arithmetic_pipeline_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -163,13 +187,22 @@ def test_reversible_arithmetic_pipeline_roundtrip_has_no_diff(
         delta_name = f"delta.{name}"
         forward_transforms.extend(
             [
-                {"fill": {"from": f"work::{name}", "to": f"work::{delta_name}", "mode": "constant", "value": delta}},
+                {
+                    "fill": {
+                        "from": f"work::{name}",
+                        "to": f"work::{delta_name}",
+                        "mode": "constant",
+                        "value": delta,
+                    }
+                },
                 {"add_": {"from": f"work::{delta_name}", "to": f"work::{name}"}},
                 {"scale_": {"target": f"work::{name}", "by": 0.5}},
                 {"delete": {"target": f"work::{delta_name}"}},
             ]
         )
-    forward_transforms.append({"save": {"path": str(edited_path), "alias": "work", "format": "safetensors"}})
+    forward_transforms.append(
+        {"save": {"path": str(edited_path), "alias": "work", "format": "safetensors"}}
+    )
 
     pipeline1 = {"inputs": [f"base::{original_path}"], "transforms": forward_transforms}
     provider = create_state_dict_provider(
@@ -188,13 +221,22 @@ def test_reversible_arithmetic_pipeline_roundtrip_has_no_diff(
 
     assert edited_path.exists()
 
-    reverse_transforms: list[dict[str, object]] = [{"load": {"path": str(edited_path), "alias": "work"}}]
+    reverse_transforms: list[dict[str, object]] = [
+        {"load": {"path": str(edited_path), "alias": "work"}}
+    ]
     for name in targets:
         delta_name = f"delta.{name}"
         reverse_transforms.extend(
             [
                 {"scale_": {"target": f"work::{name}", "by": 2.0}},
-                {"fill": {"from": f"work::{name}", "to": f"work::{delta_name}", "mode": "constant", "value": delta}},
+                {
+                    "fill": {
+                        "from": f"work::{name}",
+                        "to": f"work::{delta_name}",
+                        "mode": "constant",
+                        "value": delta,
+                    }
+                },
                 {"subtract_": {"from": f"work::{delta_name}", "to": f"work::{name}"}},
                 {"delete": {"target": f"work::{delta_name}"}},
             ]
@@ -223,6 +265,7 @@ def test_reversible_arithmetic_pipeline_roundtrip_has_no_diff(
 
     output = capsys.readouterr().out
     _assert_no_diff_output(output)
+
 
 def test_prefix_rename_remove_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -282,6 +325,7 @@ def test_prefix_rename_remove_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
+
 def test_split_concat_permute_reshape_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -295,8 +339,21 @@ def test_split_concat_permute_reshape_roundtrip_has_no_diff(
         "transforms": [
             {"prefixes": {"mode": "add", "alias": "work"}},
             {"copy": {"from": r"base::(.+)", "to": r"work::\1"}},
-            {"split": {"from": "work::x.square", "to": ["work::x.left", "work::x.right"], "sizes": [2, 2], "dim": 1}},
-            {"concat": {"from": ["work::x.left", "work::x.right"], "to": "work::x.rebuilt", "dim": 1}},
+            {
+                "split": {
+                    "from": "work::x.square",
+                    "to": ["work::x.left", "work::x.right"],
+                    "sizes": [2, 2],
+                    "dim": 1,
+                }
+            },
+            {
+                "concat": {
+                    "from": ["work::x.left", "work::x.right"],
+                    "to": "work::x.rebuilt",
+                    "dim": 1,
+                }
+            },
             {"delete": {"target": "work::x.square"}},
             {"move": {"from": "work::x.rebuilt", "to": "work::x.square"}},
             {"permute": {"from": "work::x.square", "to": "work::x.transposed", "order": [1, 0]}},
@@ -350,6 +407,7 @@ def test_split_concat_permute_reshape_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
+
 
 def test_cast_and_dtype_assert_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -413,6 +471,7 @@ def test_cast_and_dtype_assert_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
+
 def test_matmul_multiply_sidepath_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -426,10 +485,22 @@ def test_matmul_multiply_sidepath_roundtrip_has_no_diff(
         "transforms": [
             {"prefixes": {"mode": "add", "alias": "work"}},
             {"copy": {"from": r"base::(.+)", "to": r"work::\1"}},
-            {"matmul": {"from_a": "work::mat.left", "from_b": "work::mat.right", "to": "work::mat.tmp"}},
+            {
+                "matmul": {
+                    "from_a": "work::mat.left",
+                    "from_b": "work::mat.right",
+                    "to": "work::mat.tmp",
+                }
+            },
             {"add_": {"from": "work::mat.tmp", "to": "work::mat.target"}},
             {"subtract_": {"from": "work::mat.tmp", "to": "work::mat.target"}},
-            {"multiply": {"from_a": "work::mat.target", "from_b": "work::ones.2x2", "to": "work::mat.target"}},
+            {
+                "multiply": {
+                    "from_a": "work::mat.target",
+                    "from_b": "work::ones.2x2",
+                    "to": "work::mat.target",
+                }
+            },
             {"delete": {"target": "work::mat.tmp"}},
             {"save": {"path": str(edited_path), "alias": "work", "format": "safetensors"}},
         ],
@@ -471,6 +542,7 @@ def test_matmul_multiply_sidepath_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
+
 
 def test_assign_slice_restore_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -529,6 +601,7 @@ def test_assign_slice_restore_roundtrip_has_no_diff(
         provider.close()
 
     _assert_no_diff_output(capsys.readouterr().out)
+
 
 def test_tensor_save_load_reinject_roundtrip_has_no_diff(
     tmp_path: Path,
@@ -590,6 +663,7 @@ def test_tensor_save_load_reinject_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
+
 def test_expression_gated_pipeline_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -603,16 +677,31 @@ def test_expression_gated_pipeline_roundtrip_has_no_diff(
         "transforms": [
             {"prefixes": {"mode": "add", "alias": "work"}},
             {"copy": {"from": r"base::(.+)", "to": r"work::\1"}},
-            {"assert": {"all": [
-                {"exists": "work::wte.weight"},
-                {"dtype": {"of": "work::ln_f.weight", "is": "float32"}},
-                {"shape": {"of": "work::h.0.attn.c_proj.weight", "is": [4, 4]}},
-                {"dimensions": {"of": "work::x.square", "is": 2}},
-            ]}},
-            {"assert": {"any": [{"exists": "work::does_not_exist"}, {"exists": "work::wte.weight"}]}},
+            {
+                "assert": {
+                    "all": [
+                        {"exists": "work::wte.weight"},
+                        {"dtype": {"of": "work::ln_f.weight", "is": "float32"}},
+                        {"shape": {"of": "work::h.0.attn.c_proj.weight", "is": [4, 4]}},
+                        {"dimensions": {"of": "work::x.square", "is": 2}},
+                    ]
+                }
+            },
+            {
+                "assert": {
+                    "any": [{"exists": "work::does_not_exist"}, {"exists": "work::wte.weight"}]
+                }
+            },
             {"assert": {"not": {"exists": "work::does_not_exist"}}},
             {"assert": {"count": {"of": "work::h\\.0\\..*", "is": 4}}},
-            {"fill": {"from": "work::ln_f.weight", "to": "work::delta.ln_f", "mode": "constant", "value": 1.0}},
+            {
+                "fill": {
+                    "from": "work::ln_f.weight",
+                    "to": "work::delta.ln_f",
+                    "mode": "constant",
+                    "value": 1.0,
+                }
+            },
             {"add_": {"from": "work::delta.ln_f", "to": "work::ln_f.weight"}},
             {"subtract_": {"from": "work::delta.ln_f", "to": "work::ln_f.weight"}},
             {"delete": {"target": "work::delta.ln_f"}},
@@ -657,6 +746,7 @@ def test_expression_gated_pipeline_roundtrip_has_no_diff(
 
     _assert_no_diff_output(capsys.readouterr().out)
 
+
 def test_sharded_save_load_provider_mix_roundtrip_has_no_diff(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -668,7 +758,14 @@ def test_sharded_save_load_provider_mix_roundtrip_has_no_diff(
     pipeline1 = {
         "inputs": [f"base::{original_path}"],
         "transforms": [
-            {"save": {"path": str(sharded_dir), "alias": "base", "format": "safetensors", "shard": "1KB"}},
+            {
+                "save": {
+                    "path": str(sharded_dir),
+                    "alias": "base",
+                    "format": "safetensors",
+                    "shard": "1KB",
+                }
+            },
         ],
     }
     provider = create_state_dict_provider(

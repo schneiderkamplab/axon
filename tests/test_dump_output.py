@@ -7,9 +7,10 @@ import pytest
 import torch
 
 import brainsurgery.transforms.dump as dump_module
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.transforms.dump import DumpTransform
 
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 class _Provider:
     def __init__(self, state_dict) -> None:
         self._state_dict = state_dict
@@ -17,6 +18,7 @@ class _Provider:
     def get_state_dict(self, model: str):
         assert model == "model"
         return self._state_dict
+
 
 class _MultiProvider:
     def __init__(self, state_dicts: dict[str, _InMemoryStateDict]) -> None:
@@ -29,9 +31,11 @@ class _MultiProvider:
     def list_model_aliases(self) -> set[str]:
         return set(self.state_dicts)
 
+
 class _NoAliasProvider:
     def get_state_dict(self, model: str):  # pragma: no cover - should never be called
         raise AssertionError(f"unexpected state_dict access for {model!r}")
+
 
 @pytest.fixture
 def sample_state_dict() -> _InMemoryStateDict:
@@ -42,6 +46,7 @@ def sample_state_dict() -> _InMemoryStateDict:
     state_dict["block.1.weight"] = torch.tensor([1.0, 2.0])
     state_dict["block.2.weight"] = torch.tensor([9.0, 8.0, 7.0])
     return state_dict
+
 
 def _run_dump(
     monkeypatch: pytest.MonkeyPatch,
@@ -66,6 +71,7 @@ def _run_dump(
     assert result.count == 3
     return capsys.readouterr().out.strip()
 
+
 @pytest.mark.parametrize("verbosity", ["shape", "stat", "full"])
 def test_dump_tree_does_not_group_list_entries(
     monkeypatch: pytest.MonkeyPatch,
@@ -85,6 +91,7 @@ def test_dump_tree_does_not_group_list_entries(
     assert "[1]" in output
     assert "[2]" in output
 
+
 @pytest.mark.parametrize("verbosity", ["shape", "stat", "full"])
 def test_dump_compact_groups_list_entries_with_same_structure(
     monkeypatch: pytest.MonkeyPatch,
@@ -103,6 +110,7 @@ def test_dump_compact_groups_list_entries_with_same_structure(
     assert "[2]" in output
     assert "[0]\n" not in output
     assert "[1]\n" not in output
+
 
 @pytest.mark.parametrize("fmt", ["tree", "compact"])
 @pytest.mark.parametrize("verbosity", ["shape", "stat", "full"])
@@ -153,6 +161,7 @@ def test_dump_text_output_respects_verbosity(
         assert "max=" not in output
         assert "mean=" not in output
 
+
 @pytest.mark.parametrize("verbosity", ["shape", "stat", "full"])
 def test_dump_json_output_respects_verbosity(
     monkeypatch: pytest.MonkeyPatch,
@@ -194,6 +203,7 @@ def test_dump_json_output_respects_verbosity(
         assert leaf0["reads"] >= 1
         assert leaf0["writes"] == 1
 
+
 def test_dump_without_target_dumps_all_models_as_root_nodes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -225,6 +235,7 @@ def test_dump_without_target_dumps_all_models_as_root_nodes(
     assert merged["base"]["ln_f"]["weight"]["shape"] == [2]
     assert merged["edited"]["ln_f"]["weight"]["shape"] == [2]
 
+
 def test_dump_without_target_and_no_aliases_is_empty_output(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -238,6 +249,7 @@ def test_dump_without_target_and_no_aliases_is_empty_output(
     result = transform.apply(spec, _NoAliasProvider())
     assert result.count == 0
     assert json.loads(capsys.readouterr().out.strip()) == {}
+
 
 def test_dump_without_target_text_does_not_connect_model_roots(
     monkeypatch: pytest.MonkeyPatch,

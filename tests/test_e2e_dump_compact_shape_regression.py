@@ -6,16 +6,17 @@ import pytest
 import torch
 
 import brainsurgery.transforms.dump as dump_module
-
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
-
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
+
 @dataclass(frozen=True)
 class _Case:
     state_dict: _InMemoryStateDict
     transforms: list[dict[str, object]]
     expected_dump: str
+
 
 class _Provider:
     def __init__(self, state_dict: _InMemoryStateDict) -> None:
@@ -25,14 +26,17 @@ class _Provider:
         assert model == "model"
         return self._state_dict
 
+
 def _make_state_dict(values: dict[str, torch.Tensor]) -> _InMemoryStateDict:
     sd = _InMemoryStateDict()
     for key, value in values.items():
         sd[key] = value
     return sd
 
+
 def _dump_line(name: str, shape: tuple[int, ...]) -> str:
     return f"└── {name}  shape={list(shape)}"
+
 
 def _shape_for_slot(slot: int) -> tuple[int, int]:
     grid = [
@@ -48,6 +52,7 @@ def _shape_for_slot(slot: int) -> tuple[int, int]:
         (4, 2),
     ]
     return grid[slot]
+
 
 def _build_case(case_id: int) -> _Case:
     family = case_id % 10
@@ -95,7 +100,9 @@ def _build_case(case_id: int) -> _Case:
         expected_shape = (rows, cols)
     elif family == 4:
         split_cols = max(cols, 2)
-        split_base = torch.arange(1, rows * split_cols + 1, dtype=torch.float32).reshape(rows, split_cols)
+        split_base = torch.arange(1, rows * split_cols + 1, dtype=torch.float32).reshape(
+            rows, split_cols
+        )
         left = max(1, split_cols // 2)
         right = split_cols - left
         if right == 0:
@@ -176,6 +183,7 @@ def _build_case(case_id: int) -> _Case:
         transforms=transforms,
         expected_dump=_dump_line(out, expected_shape),
     )
+
 
 @pytest.mark.parametrize("case_id", range(100), ids=lambda value: f"e2e_{value:03d}")
 def test_e2e_multi_transform_dump_compact_shape_regression(

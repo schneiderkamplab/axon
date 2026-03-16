@@ -4,15 +4,15 @@ import pytest
 import torch
 
 import brainsurgery.core.compile.name_mapping as name_mapping_module
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.core import (
+    TensorRef,
+    TransformError,
     match_expr_names,
     resolve_name_mappings,
 )
 from brainsurgery.core.compile.name_mapping import _require_dest_missing, _require_dest_present
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 
-from brainsurgery.core import TensorRef
-from brainsurgery.core import TransformError
 
 class _Provider:
     def __init__(self) -> None:
@@ -25,6 +25,7 @@ class _Provider:
 
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
+
 
 def test_match_expr_names_supports_regex_and_structured_patterns() -> None:
     names = {"encoder.0.proj", "encoder.1.ffn", "decoder.0.proj"}
@@ -42,6 +43,7 @@ def test_match_expr_names_supports_regex_and_structured_patterns() -> None:
         role="source",
     ) == ["encoder.0.proj", "encoder.1.ffn"]
 
+
 def test_resolve_name_mappings_regex_rewrites_and_parses_slices() -> None:
     provider = _Provider()
 
@@ -57,6 +59,7 @@ def test_resolve_name_mappings_regex_rewrites_and_parses_slices() -> None:
         ("layer.1.weight", "copy.1.weight", (slice(None, 1, None),)),
     ]
 
+
 def test_resolve_name_mappings_structured_rewrites() -> None:
     provider = _Provider()
 
@@ -71,6 +74,7 @@ def test_resolve_name_mappings_structured_rewrites() -> None:
         ("layer.0.weight", "block.0.copy"),
         ("layer.1.weight", "block.1.copy"),
     ]
+
 
 def test_require_dest_missing_and_present_validate_destination_state() -> None:
     provider = _Provider()
@@ -88,6 +92,7 @@ def test_require_dest_missing_and_present_validate_destination_state() -> None:
 
     _require_dest_present(mappings=mappings, provider=provider, op_name="copy")
 
+
 def test_resolve_name_mappings_rejects_mixed_expression_kinds() -> None:
     provider = _Provider()
 
@@ -98,6 +103,7 @@ def test_resolve_name_mappings_rejects_mixed_expression_kinds() -> None:
             provider=provider,
             op_name="copy",
         )
+
 
 def test_match_expr_names_and_structured_helpers_wrap_invalid_patterns() -> None:
     with pytest.raises(TransformError, match="invalid source regex"):
@@ -121,6 +127,7 @@ def test_match_expr_names_and_structured_helpers_wrap_invalid_patterns() -> None
             op_name="copy",
             role="destination",
         )
+
 
 def test_resolve_name_mappings_regex_and_structured_error_paths() -> None:
     provider = _Provider()
@@ -167,7 +174,10 @@ def test_resolve_name_mappings_regex_and_structured_error_paths() -> None:
             op_name="copy",
         )
 
-def test_resolve_name_mappings_slice_type_and_internal_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_resolve_name_mappings_slice_type_and_internal_empty_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _Provider()
 
     with pytest.raises(TransformError, match="source slice must be a string"):
@@ -195,7 +205,9 @@ def test_resolve_name_mappings_slice_type_and_internal_empty_results(monkeypatch
             op_name="copy",
         )
 
-    monkeypatch.setattr(name_mapping_module, "_resolve_name_mappings_structured", lambda **kwargs: [])
+    monkeypatch.setattr(
+        name_mapping_module, "_resolve_name_mappings_structured", lambda **kwargs: []
+    )
     with pytest.raises(TransformError, match="resolved zero mappings"):
         resolve_name_mappings(
             from_ref=TensorRef(model="src", expr=["layer", "$i", "weight"]),
@@ -203,6 +215,7 @@ def test_resolve_name_mappings_slice_type_and_internal_empty_results(monkeypatch
             provider=provider,
             op_name="copy",
         )
+
 
 def test_require_dest_present_rejects_missing_destination() -> None:
     provider = _Provider()

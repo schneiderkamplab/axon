@@ -1,5 +1,7 @@
-from brainsurgery.engine import get_runtime_flags, reset_runtime_flags, set_runtime_flag
 import pytest
+
+from brainsurgery.engine import get_runtime_flags, reset_runtime_flags, set_runtime_flag
+
 
 def test_engine_flags_defaults_and_updates() -> None:
     reset_runtime_flags()
@@ -14,6 +16,7 @@ def test_engine_flags_defaults_and_updates() -> None:
     assert flags.verbose is True
 
     reset_runtime_flags()
+
 
 def test_engine_flags_reject_unknown_flag() -> None:
     with pytest.raises(ValueError, match="unknown runtime flag"):

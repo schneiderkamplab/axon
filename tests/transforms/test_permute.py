@@ -3,7 +3,10 @@ from importlib import import_module
 import torch
 
 _module = import_module("brainsurgery.transforms.permute")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_permute_compile_rejects_non_list_order() -> None:
     try:
@@ -12,6 +15,7 @@ def test_permute_compile_rejects_non_list_order() -> None:
         assert "non-empty list of integers" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected order validation error")
+
 
 def test_permute_apply_success() -> None:
     class _Provider:

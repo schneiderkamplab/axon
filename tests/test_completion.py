@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import brainsurgery
 import pytest
 
 import brainsurgery.cli.complete as complete_module
@@ -13,13 +12,13 @@ from brainsurgery.cli.complete import (
 from brainsurgery.cli.interactive import (
     _collect_completion_candidates,
     _collect_payload_candidates,
-    _configure_readline_completion_bindings,
     _infer_active_transform,
     _is_top_level_completion_position,
     _list_model_aliases,
     _match_payload_candidates,
 )
 from brainsurgery.core import get_transform, list_transforms
+
 
 @dataclass
 class _MiniProvider:
@@ -28,6 +27,7 @@ class _MiniProvider:
 
     def list_model_aliases(self) -> set[str]:
         return set(self.state_dicts)
+
 
 SINGLE_ALIAS_PROVIDER = _MiniProvider(
     model_paths={"model": Path("/tmp/model.safetensors")},
@@ -102,12 +102,14 @@ _REFERENCE_TRANSFORMS = [
     if _PREFERRED_KEYS.get(name) in set(get_transform(name).completion_reference_keys())
 ]
 
+
 def _top_level_candidate(transform_name: str) -> str:
     candidates = _collect_completion_candidates(None)
     with_payload = f"{transform_name}: "
     if with_payload in candidates:
         return with_payload
     return transform_name
+
 
 def _shortest_unique_prefix(target: str, candidates: list[str]) -> str:
     for index in range(1, len(target) + 1):
@@ -116,6 +118,7 @@ def _shortest_unique_prefix(target: str, candidates: list[str]) -> str:
         if matches == [target]:
             return prefix
     return target
+
 
 def _shortest_unique_key_prefix(target_key_candidate: str, candidates: list[str]) -> str:
     bare_key = target_key_candidate[:-2]
@@ -126,11 +129,13 @@ def _shortest_unique_key_prefix(target_key_candidate: str, candidates: list[str]
             return prefix
     return bare_key
 
+
 def _current_token_bounds(buffer: str) -> tuple[int, int]:
     last_delim = max(buffer.rfind(" "), buffer.rfind("\t"), buffer.rfind("\n"))
     begidx = last_delim + 1
     endidx = len(buffer)
     return begidx, endidx
+
 
 def _completion_matches(buffer: str, provider: object | None) -> list[str]:
     begidx, endidx = _current_token_bounds(buffer)
@@ -155,6 +160,7 @@ def _completion_matches(buffer: str, provider: object | None) -> list[str]:
         model_aliases=sorted(_list_model_aliases(provider)),
     )
 
+
 def _complete_unique(buffer: str, provider: object | None) -> str:
     matches = _completion_matches(buffer, provider)
     assert matches, f"expected completion matches for {buffer!r}"
@@ -162,9 +168,11 @@ def _complete_unique(buffer: str, provider: object | None) -> str:
     begidx, endidx = _current_token_bounds(buffer)
     return f"{buffer[:begidx]}{matches[0]}{buffer[endidx:]}"
 
+
 def _transform_reference_keys(transform_name: str) -> list[str]:
     transform = get_transform(transform_name)
     return transform.completion_reference_keys()
+
 
 def _next_reference_key(transform_name: str, current_key: str) -> str | None:
     ordered = _transform_reference_keys(transform_name)
@@ -175,17 +183,20 @@ def _next_reference_key(transform_name: str, current_key: str) -> str | None:
         return None
     return ordered[current_index + 1]
 
+
 def _first_base_tensor_match(matches: list[str]) -> str:
     for match in matches:
         if match.startswith("base::") and match != "base::":
             return match
     raise AssertionError(f"expected a base-qualified tensor match, got {matches!r}")
 
+
 @pytest.mark.parametrize("transform_name", list_transforms(), ids=list_transforms())
 def test_top_level_unique_completion_for_each_transform(transform_name: str) -> None:
     candidate = _top_level_candidate(transform_name)
     prefix = _shortest_unique_prefix(candidate, _collect_completion_candidates(None))
     assert _complete_unique(prefix, None) == candidate
+
 
 @pytest.mark.parametrize(
     "transform_name",
@@ -196,10 +207,13 @@ def test_single_alias_typical_completion_sequence_for_each_non_special_transform
     transform_name: str,
 ) -> None:
     candidate = _top_level_candidate(transform_name)
-    assert _complete_unique(
-        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
-        SINGLE_ALIAS_PROVIDER,
-    ) == candidate
+    assert (
+        _complete_unique(
+            _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+            SINGLE_ALIAS_PROVIDER,
+        )
+        == candidate
+    )
 
     assert _complete_unique(candidate, SINGLE_ALIAS_PROVIDER) == f"{candidate}{{ "
 
@@ -211,10 +225,13 @@ def test_single_alias_typical_completion_sequence_for_each_non_special_transform
     key_prefix = _shortest_unique_key_prefix(key_candidate, mapping_start_matches)
     key_prefix_matches = [match for match in mapping_start_matches if match.startswith(key_prefix)]
     if key_prefix_matches == [key_candidate]:
-        assert _complete_unique(
-            f"{candidate}{{ {key_prefix}",
-            SINGLE_ALIAS_PROVIDER,
-        ) == f"{candidate}{{ {key_candidate}"
+        assert (
+            _complete_unique(
+                f"{candidate}{{ {key_prefix}",
+                SINGLE_ALIAS_PROVIDER,
+            )
+            == f"{candidate}{{ {key_candidate}"
+        )
     else:
         assert key_candidate in key_prefix_matches
 
@@ -226,10 +243,7 @@ def test_single_alias_typical_completion_sequence_for_each_non_special_transform
         SINGLE_ALIAS_PROVIDER,
     )
     assert "model::" in reference_matches
-    assert any(
-        match.startswith("model::") and match != "model::"
-        for match in reference_matches
-    )
+    assert any(match.startswith("model::") and match != "model::" for match in reference_matches)
     assert any(
         "::" not in match and not match.endswith(": ") and match not in {"{ ", "}", "[ ", "]", ", "}
         for match in reference_matches
@@ -244,6 +258,7 @@ def test_single_alias_typical_completion_sequence_for_each_non_special_transform
         SINGLE_ALIAS_PROVIDER,
     )
     assert f"model::ln_f.weight, {next_reference_key}: " in continuation_matches
+
 
 @pytest.mark.parametrize(
     "transform_name",
@@ -282,12 +297,16 @@ def test_multi_alias_reference_completion_sequence_for_reference_transforms(
     )
     assert f"{full_ref}, {next_reference_key}: " in continuation_matches
 
+
 def test_help_completion_sequence() -> None:
     candidate = _top_level_candidate("help")
-    assert _complete_unique(
-        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
-        SINGLE_ALIAS_PROVIDER,
-    ) == candidate
+    assert (
+        _complete_unique(
+            _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+            SINGLE_ALIAS_PROVIDER,
+        )
+        == candidate
+    )
 
     payload_start_matches = _completion_matches(candidate, SINGLE_ALIAS_PROVIDER)
     assert "{ " in payload_start_matches
@@ -299,12 +318,16 @@ def test_help_completion_sequence() -> None:
 
     assert _complete_unique("help: { assert: eq", SINGLE_ALIAS_PROVIDER) == "help: { assert: equal"
 
+
 def test_assert_completion_sequence() -> None:
     candidate = _top_level_candidate("assert")
-    assert _complete_unique(
-        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
-        SINGLE_ALIAS_PROVIDER,
-    ) == candidate
+    assert (
+        _complete_unique(
+            _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+            SINGLE_ALIAS_PROVIDER,
+        )
+        == candidate
+    )
 
     payload_start_matches = _completion_matches(candidate, SINGLE_ALIAS_PROVIDER)
     assert "{ " in payload_start_matches
@@ -318,12 +341,16 @@ def test_assert_completion_sequence() -> None:
     assert "equal: " in mapping_start_matches
     assert "exists: " in mapping_start_matches
 
+
 def test_prefixes_completion_sequence() -> None:
     candidate = _top_level_candidate("prefixes")
-    assert _complete_unique(
-        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
-        MULTI_ALIAS_PROVIDER,
-    ) == candidate
+    assert (
+        _complete_unique(
+            _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+            MULTI_ALIAS_PROVIDER,
+        )
+        == candidate
+    )
 
     assert _complete_unique("prefixes: { m", MULTI_ALIAS_PROVIDER) == "prefixes: { mode: "
 
@@ -345,12 +372,16 @@ def test_prefixes_completion_sequence() -> None:
     )
     assert alias_matches == ["base", "scratch"]
 
+
 def test_diff_completion_sequence() -> None:
     candidate = _top_level_candidate("diff")
-    assert _complete_unique(
-        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
-        MULTI_ALIAS_PROVIDER,
-    ) == candidate
+    assert (
+        _complete_unique(
+            _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+            MULTI_ALIAS_PROVIDER,
+        )
+        == candidate
+    )
 
     assert _complete_unique(candidate, MULTI_ALIAS_PROVIDER) == f"{candidate}{{ "
 
@@ -370,12 +401,17 @@ def test_diff_completion_sequence() -> None:
     )
     assert alias_matches == ["base", "scratch"]
 
+
 def test_exit_completion_sequence() -> None:
     candidate = _top_level_candidate("exit")
-    assert _complete_unique(
-        _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
-        None,
-    ) == candidate
+    assert (
+        _complete_unique(
+            _shortest_unique_prefix(candidate, _collect_completion_candidates(None)),
+            None,
+        )
+        == candidate
+    )
+
 
 def test_list_model_aliases_handles_provider_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -385,6 +421,7 @@ def test_list_model_aliases_handles_provider_errors(monkeypatch: pytest.MonkeyPa
     )
     assert _list_model_aliases(object()) == set()
 
+
 def test_list_loaded_tensor_names_handles_provider_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         complete_module,
@@ -393,27 +430,37 @@ def test_list_loaded_tensor_names_handles_provider_errors(monkeypatch: pytest.Mo
     )
     assert complete_module.list_loaded_tensor_names(object()) == {}
 
+
 def test_extract_transform_name_handles_yaml_list_prefix_and_unknown_command() -> None:
     assert complete_module._extract_transform_name("- copy: { from: a, to: b }") == "copy"
     assert complete_module._extract_transform_name("unknown: {}") is None
     assert complete_module._extract_transform_name(": {}") is None
 
+
 def test_is_top_level_completion_position_rejects_out_of_bounds_begidx() -> None:
     assert _is_top_level_completion_position("copy", 999) is False
 
+
 def test_is_transform_payload_start_clamps_endidx_bounds() -> None:
-    assert _is_transform_payload_start(
-        line_buffer="copy: ",
-        begidx=0,
-        endidx=999,
-        active_transform="copy",
-    ) is True
-    assert _is_transform_payload_start(
-        line_buffer="copy: ",
-        begidx=0,
-        endidx=-2,
-        active_transform="copy",
-    ) is False
+    assert (
+        _is_transform_payload_start(
+            line_buffer="copy: ",
+            begidx=0,
+            endidx=999,
+            active_transform="copy",
+        )
+        is True
+    )
+    assert (
+        _is_transform_payload_start(
+            line_buffer="copy: ",
+            begidx=0,
+            endidx=-2,
+            active_transform="copy",
+        )
+        is False
+    )
+
 
 class _FakeReadline:
     def __init__(self) -> None:
@@ -422,8 +469,10 @@ class _FakeReadline:
     def parse_and_bind(self, command: str) -> None:
         self.commands.append(command)
 
+
 def test_configure_readline_completion_bindings_accepts_none() -> None:
     complete_module._configure_readline_completion_bindings(None)
+
 
 def test_configure_readline_completion_bindings_ignores_parse_failures() -> None:
     class _BrokenReadline:
@@ -433,10 +482,14 @@ def test_configure_readline_completion_bindings_ignores_parse_failures() -> None
 
     complete_module._configure_readline_completion_bindings(_BrokenReadline())
 
+
 def test_infer_active_transform_returns_none_when_unknown() -> None:
     assert _infer_active_transform(["something without colon"], "also invalid") is None
 
-def test_collect_payload_candidates_handles_get_transform_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_collect_payload_candidates_handles_get_transform_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         complete_module,
         "get_transform",
@@ -444,6 +497,7 @@ def test_collect_payload_candidates_handles_get_transform_failure(monkeypatch: p
     )
     candidates = _collect_payload_candidates(active_transform="copy", state_dict_provider=None)
     assert "{ " in candidates
+
 
 def test_match_payload_candidates_covers_structural_prefix_and_any_context() -> None:
     matches = _match_payload_candidates(
@@ -462,6 +516,7 @@ def test_match_payload_candidates_covers_structural_prefix_and_any_context() -> 
     )
     assert any_ctx == ["x", "y"]
 
+
 def test_match_payload_candidates_handles_negative_endidx_and_close_brace_prefix() -> None:
     matches = _match_payload_candidates(
         text="}",
@@ -471,6 +526,7 @@ def test_match_payload_candidates_handles_negative_endidx_and_close_brace_prefix
         payload_candidates=["{ ", "}", "from: "],
     )
     assert matches == ["from: "]
+
 
 def test_match_payload_candidates_colon_prefix_key_context_spacing() -> None:
     matches = _match_payload_candidates(
@@ -490,13 +546,16 @@ def test_match_payload_candidates_colon_prefix_key_context_spacing() -> None:
     )
     assert comma_no_space == [" from: "]
 
+
 def test_match_payload_candidates_with_custom_transform_key_candidates() -> None:
     class _T:
         def completion_key_candidates(self, before_cursor: str, prefix_text: str):
             del before_cursor, prefix_text
             return ["alpha: ", "}"]
 
-        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+        def completion_value_candidates(
+            self, value_key: str | None, prefix_text: str, model_aliases: list[str]
+        ):
             del value_key, prefix_text, model_aliases
             return None
 
@@ -536,13 +595,18 @@ def test_match_payload_candidates_with_custom_transform_key_candidates() -> None
     finally:
         monkeypatch.undo()
 
-def test_match_payload_candidates_value_transform_override_and_reference_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_match_payload_candidates_value_transform_override_and_reference_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _T:
         def completion_key_candidates(self, before_cursor: str, prefix_text: str):
             del before_cursor, prefix_text
             return None
 
-        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+        def completion_value_candidates(
+            self, value_key: str | None, prefix_text: str, model_aliases: list[str]
+        ):
             del model_aliases
             if value_key == "from":
                 return []
@@ -591,7 +655,10 @@ def test_match_payload_candidates_value_transform_override_and_reference_filters
     )
     assert "zeta" in fallback_values
 
-def test_match_payload_candidates_additional_uncovered_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_match_payload_candidates_additional_uncovered_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         complete_module,
         "get_transform",
@@ -613,7 +680,9 @@ def test_match_payload_candidates_additional_uncovered_branches(monkeypatch: pyt
             del before_cursor, prefix_text
             return ["from: ", "}"]
 
-        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+        def completion_value_candidates(
+            self, value_key: str | None, prefix_text: str, model_aliases: list[str]
+        ):
             del value_key, prefix_text, model_aliases
             return None
 
@@ -706,13 +775,17 @@ def test_match_payload_candidates_additional_uncovered_branches(monkeypatch: pyt
         active_transform=None,
     ) == ["from: "]
 
-    assert _match_payload_candidates(
-        text="x",
-        line_buffer="copy: { mode: alpha ",
-        begidx=len("copy: { mode: alpha "),
-        payload_candidates=["from: ", "to: ", "}"],
-        active_transform=None,
-    ) == []
+    assert (
+        _match_payload_candidates(
+            text="x",
+            line_buffer="copy: { mode: alpha ",
+            begidx=len("copy: { mode: alpha "),
+            payload_candidates=["from: ", "to: ", "}"],
+            active_transform=None,
+        )
+        == []
+    )
+
 
 def test_match_payload_candidates_hits_remaining_reference_and_key_paths(
     monkeypatch: pytest.MonkeyPatch,
@@ -725,7 +798,9 @@ def test_match_payload_candidates_hits_remaining_reference_and_key_paths(
             del before_cursor, prefix_text
             return None
 
-        def completion_value_candidates(self, value_key: str | None, prefix_text: str, model_aliases: list[str]):
+        def completion_value_candidates(
+            self, value_key: str | None, prefix_text: str, model_aliases: list[str]
+        ):
             del value_key, prefix_text, model_aliases
             return None
 
@@ -762,10 +837,12 @@ def test_match_payload_candidates_hits_remaining_reference_and_key_paths(
         active_transform=None,
     ) == ["from: "]
 
+
 def test_payload_cursor_state_handles_quoted_value_delimiters() -> None:
     assert complete_module._payload_context('copy: from: "a,b:c"') == "value"
     assert complete_module._current_value_key('copy: from: "a,b:c"') == "from"
     assert complete_module._current_value_fragment('copy: from: "a,b:c"') == ' "a,b:c"'
+
 
 def test_match_payload_candidates_does_not_treat_nested_keys_as_used() -> None:
     matches = _match_payload_candidates(
@@ -775,6 +852,7 @@ def test_match_payload_candidates_does_not_treat_nested_keys_as_used() -> None:
         payload_candidates=["from: ", "to: "],
     )
     assert matches == ["from: ", "to: "]
+
 
 def test_load_path_completion_suggests_matching_filesystem_entries(
     tmp_path: Path,
@@ -796,6 +874,7 @@ def test_load_path_completion_suggests_matching_filesystem_entries(
     assert "models/" in matches
     assert "meta.txt" not in matches
 
+
 def test_save_path_completion_supports_quoted_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -814,22 +893,25 @@ def test_save_path_completion_supports_quoted_prefix(
     assert '"out_dir/' in matches
     assert '"out.pt' in matches
 
+
 def test_cursor_helpers_cover_nested_quotes_and_invalid_keys() -> None:
-    segment = "'a:b' \"x\\\"y:z\" (u:v) [k:l] {m:n}: tail"
+    segment = '\'a:b\' "x\\"y:z" (u:v) [k:l] {m:n}: tail'
     colon_index = complete_module._find_top_level_colon(segment)
     assert colon_index is not None
     assert segment[colon_index] == ":"
     assert complete_module._parse_key_from_segment("from: x") == "from"
     assert complete_module._parse_key_from_segment("1bad: x") is None
 
+
 def test_split_top_level_segments_handles_quotes_and_closing_brace_boundary() -> None:
     completed, current = complete_module._split_top_level_segments(
-        '{ from: "x\\\"y,z", note: \'a,b\', paren: (u,v), arr: [k,l] } trailing'
+        '{ from: "x\\"y,z", note: \'a,b\', paren: (u,v), arr: [k,l] } trailing'
     )
     assert any("from:" in segment for segment in completed)
     assert any("note:" in segment for segment in completed)
     assert any("paren:" in segment for segment in completed)
     assert "arr:" in current
+
 
 def test_match_payload_candidates_any_context_falls_back_to_prefix_filter() -> None:
     matches = _match_payload_candidates(

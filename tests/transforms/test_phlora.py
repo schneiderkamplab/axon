@@ -2,6 +2,7 @@ import torch
 
 from brainsurgery.transforms.phlora import PhloraTransform, PhloraTransformError
 
+
 def test_phlora_compile_rejects_non_integral_rank() -> None:
     try:
         PhloraTransform().compile(
@@ -12,6 +13,7 @@ def test_phlora_compile_rejects_non_integral_rank() -> None:
         assert "positive integer" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected rank validation error")
+
 
 def test_phlora_split_mode_writes_a_b_and_deletes_original_by_default() -> None:
     class _Provider:
@@ -41,6 +43,7 @@ def test_phlora_split_mode_writes_a_b_and_deletes_original_by_default() -> None:
     assert "proj.weight" not in sd
     assert "proj.a" in sd
     assert "proj.b" in sd
+
 
 def test_phlora_split_mode_can_keep_original_when_configured() -> None:
     class _Provider:

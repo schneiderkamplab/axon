@@ -5,22 +5,16 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
-from brainsurgery.engine.plan import PlanStep, SurgeryPlan
-
-from brainsurgery.core import (
-    TransformError,
-)
 from brainsurgery.core import (
     BaseTransform,
     CompiledTransform,
+    TransformError,
     TransformResult,
     get_transform,
     list_transforms,
     register_transform,
 )
 from brainsurgery.core.runtime.transform import REGISTRY
-from brainsurgery.engine.output_model import _infer_output_model
 from brainsurgery.core.specs.validation import (
     ensure_mapping_payload,
     require_expr,
@@ -28,9 +22,13 @@ from brainsurgery.core.specs.validation import (
     require_numeric,
     validate_payload_keys,
 )
+from brainsurgery.engine.output_model import _infer_output_model
+from brainsurgery.engine.plan import PlanStep, SurgeryPlan
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.transforms.copy import CopyTransform
 from brainsurgery.transforms.help import HelpTransform
 from brainsurgery.transforms.save import SaveTransform
+
 
 @dataclass(frozen=True)
 class _Spec:
@@ -38,6 +36,7 @@ class _Spec:
 
     def collect_models(self) -> set[str]:
         return {self.model, "other"}
+
 
 class _Transform(BaseTransform):
     name = "dummy"
@@ -54,12 +53,14 @@ class _Transform(BaseTransform):
         assert isinstance(spec, _Spec)
         return spec.model
 
+
 class _FallbackTransform(_Transform):
     name = "fallback"
 
     def _infer_output_model(self, spec: object) -> str:
         del spec
         raise TransformError("needs provider")
+
 
 class _Provider:
     def __init__(self) -> None:
@@ -72,6 +73,7 @@ class _Provider:
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
 
+
 class _SpecBadCollect:
     def collect_models(self) -> list[str]:
         return ["model"]
@@ -83,6 +85,7 @@ def _plan_with(compiled: list[CompiledTransform]) -> SurgeryPlan:
         output=None,
         steps=[PlanStep(raw={}, compiled=item) for item in compiled],
     )
+
 
 def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
     original_registry = dict(REGISTRY)
@@ -100,9 +103,11 @@ def test_transform_registry_registers_lists_and_rejects_duplicates() -> None:
         REGISTRY.clear()
         REGISTRY.update(original_registry)
 
+
 def test_infer_output_model_uses_provider_fallback_when_needed() -> None:
     plan = _plan_with([CompiledTransform(_FallbackTransform(), _Spec("model"))])
     assert _infer_output_model(plan, _Provider()) == "model"
+
 
 def test_infer_output_model_skips_non_contributing_transforms() -> None:
     plan = _plan_with(
@@ -110,21 +115,29 @@ def test_infer_output_model_skips_non_contributing_transforms() -> None:
             CompiledTransform(HelpTransform(), HelpTransform().compile("copy", default_model=None)),
             CompiledTransform(
                 SaveTransform(),
-                SaveTransform().compile({"path": "/tmp/out.safetensors", "alias": "model"}, default_model=None),
+                SaveTransform().compile(
+                    {"path": "/tmp/out.safetensors", "alias": "model"}, default_model=None
+                ),
             ),
             CompiledTransform(
                 CopyTransform(),
-                CopyTransform().compile({"from": "model::w", "to": "model::w_copy"}, default_model=None),
+                CopyTransform().compile(
+                    {"from": "model::w", "to": "model::w_copy"}, default_model=None
+                ),
             ),
         ]
     )
 
     assert _infer_output_model(plan, _Provider()) == "model"
 
+
 def test_infer_output_model_raises_when_no_destination_model() -> None:
-    plan = _plan_with([CompiledTransform(HelpTransform(), HelpTransform().compile({}, default_model=None))])
+    plan = _plan_with(
+        [CompiledTransform(HelpTransform(), HelpTransform().compile({}, default_model=None))]
+    )
     with pytest.raises(TransformError, match="cannot infer output model uniquely"):
         _infer_output_model(plan, _Provider())
+
 
 def test_infer_output_model_raises_when_multiple_destination_models() -> None:
     provider = _Provider()
@@ -138,18 +151,23 @@ def test_infer_output_model_raises_when_multiple_destination_models() -> None:
     with pytest.raises(TransformError, match="cannot infer output model uniquely"):
         _infer_output_model(plan, provider)
 
+
 def test_infer_output_model_fallback_requires_provider() -> None:
     plan = _plan_with([CompiledTransform(_FallbackTransform(), _Spec("model"))])
     with pytest.raises(TransformError, match="needs provider"):
         _infer_output_model(plan, None)
+
 
 def test_infer_output_model_fallback_rejects_non_set_collect_models() -> None:
     plan = _plan_with([CompiledTransform(_FallbackTransform(), _SpecBadCollect())])
     with pytest.raises(TransformError, match="needs provider"):
         _infer_output_model(plan, _Provider())
 
+
 def test_validate_payload_helpers_cover_required_unknown_and_type_errors() -> None:
-    validate_payload_keys({"from": "a"}, op_name="copy", allowed_keys={"from"}, required_keys={"from"})
+    validate_payload_keys(
+        {"from": "a"}, op_name="copy", allowed_keys={"from"}, required_keys={"from"}
+    )
     assert ensure_mapping_payload({"x": 1}, "copy") == {"x": 1}
     assert require_nonempty_string({"alias": "base"}, op_name="load", key="alias") == "base"
     assert require_expr({"from": ["a", "b"]}, op_name="copy", key="from") == ["a", "b"]

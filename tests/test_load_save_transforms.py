@@ -1,27 +1,29 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import json
 import warnings
+from pathlib import Path
+
 import pytest
 import torch
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.engine.execution import _execute_transform_pairs
-from brainsurgery.engine.plan import compile_plan
+import brainsurgery.transforms.save as save_module
 from brainsurgery.engine import create_state_dict_provider
 from brainsurgery.engine.checkpoint_io import _load_state_dict_from_path
-import brainsurgery.transforms.save as save_module
+from brainsurgery.engine.execution import _execute_transform_pairs
+from brainsurgery.engine.plan import compile_plan
 
 try:
     import numpy as np
 except Exception:  # pragma: no cover
     np = None  # type: ignore[assignment]
 
+
 def _write_checkpoint(path: Path, values: dict[str, torch.Tensor]) -> None:
     save_safetensors_file(values, str(path))
+
 
 def _write_dcp_checkpoint(path: Path, values: dict[str, torch.Tensor]) -> None:
     dcp = pytest.importorskip("torch.distributed.checkpoint")
@@ -40,6 +42,7 @@ def _write_dcp_checkpoint(path: Path, values: dict[str, torch.Tensor]) -> None:
             category=UserWarning,
         )
         dcp.save(values, checkpoint_id=path, no_dist=True)
+
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_load_state_dict_then_save_state_dict(provider_name: str, tmp_path: Path) -> None:
@@ -81,8 +84,11 @@ def test_load_state_dict_then_save_state_dict(provider_name: str, tmp_path: Path
     assert "x" in saved
     assert torch.equal(saved["x"], torch.tensor([1.0, 2.0], dtype=torch.float32))
 
+
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
-def test_yaml_plan_accepts_dcp_directory_in_inputs_default_model(provider_name: str, tmp_path: Path) -> None:
+def test_yaml_plan_accepts_dcp_directory_in_inputs_default_model(
+    provider_name: str, tmp_path: Path
+) -> None:
     dcp_path = tmp_path / "model_dcp"
     out_path = tmp_path / "saved_from_dcp.safetensors"
     expected = {
@@ -121,8 +127,11 @@ def test_yaml_plan_accepts_dcp_directory_in_inputs_default_model(provider_name: 
     for key, tensor in expected.items():
         assert torch.equal(saved[key], tensor)
 
+
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
-def test_yaml_plan_accepts_dcp_directory_in_inputs_with_alias(provider_name: str, tmp_path: Path) -> None:
+def test_yaml_plan_accepts_dcp_directory_in_inputs_with_alias(
+    provider_name: str, tmp_path: Path
+) -> None:
     dcp_path = tmp_path / "aliased_dcp"
     out_path = tmp_path / "saved_alias.pt"
     expected = {
@@ -161,6 +170,7 @@ def test_yaml_plan_accepts_dcp_directory_in_inputs_with_alias(provider_name: str
     assert set(saved) == set(expected)
     for key, tensor in expected.items():
         assert torch.equal(saved[key], tensor)
+
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_save_state_dict_as_dcp_directory(provider_name: str, tmp_path: Path) -> None:
@@ -205,6 +215,7 @@ def test_save_state_dict_as_dcp_directory(provider_name: str, tmp_path: Path) ->
     for key, tensor in expected.items():
         assert torch.equal(loaded[key], tensor)
 
+
 def test_output_writes_dcp_directory(tmp_path: Path) -> None:
     in_path = tmp_path / "in.safetensors"
     out_dir = tmp_path / "output_dcp"
@@ -244,6 +255,7 @@ def test_output_writes_dcp_directory(tmp_path: Path) -> None:
     assert set(loaded) == {"x", "x_copy"}
     assert torch.equal(loaded["x"], expected["x"])
     assert torch.equal(loaded["x_copy"], expected["x"])
+
 
 @pytest.mark.skipif(np is None, reason="numpy not available")
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
@@ -288,6 +300,7 @@ def test_load_tensor_npy_then_save_tensor_npy(provider_name: str, tmp_path: Path
     assert loaded.dtype == np.float32
     assert float(loaded[1, 1]) == 4.0
 
+
 def test_save_requires_alias_when_multiple_models(tmp_path: Path) -> None:
     left = tmp_path / "left.safetensors"
     right = tmp_path / "right.safetensors"
@@ -318,6 +331,7 @@ def test_save_requires_alias_when_multiple_models(tmp_path: Path) -> None:
             )
     finally:
         provider.close()
+
 
 def test_save_default_format_is_safetensors(tmp_path: Path) -> None:
     in_path = tmp_path / "in.safetensors"
@@ -351,6 +365,7 @@ def test_save_default_format_is_safetensors(tmp_path: Path) -> None:
     assert len(executed) == 1
     saved = load_safetensors_file(str(out_path))
     assert torch.equal(saved["x"], torch.tensor([3.0], dtype=torch.float32))
+
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_save_state_dict_sharded_writes_index(provider_name: str, tmp_path: Path) -> None:
@@ -397,6 +412,7 @@ def test_save_state_dict_sharded_writes_index(provider_name: str, tmp_path: Path
     assert set(weight_map) == {"a", "b", "c"}
     assert len(set(weight_map.values())) >= 2
 
+
 def test_save_shard_rejects_tensor_target(tmp_path: Path) -> None:
     in_path = tmp_path / "in.safetensors"
     _write_checkpoint(in_path, {"x": torch.tensor([3.0], dtype=torch.float32)})
@@ -405,9 +421,12 @@ def test_save_shard_rejects_tensor_target(tmp_path: Path) -> None:
         compile_plan(
             {
                 "inputs": [str(in_path)],
-                "transforms": [{"save": {"path": str(tmp_path / "x"), "target": "model::x", "shard": "1MB"}}],
+                "transforms": [
+                    {"save": {"path": str(tmp_path / "x"), "target": "model::x", "shard": "1MB"}}
+                ],
             }
         )
+
 
 def test_save_shard_rejects_torch_format(tmp_path: Path) -> None:
     in_path = tmp_path / "in.safetensors"
@@ -420,11 +439,16 @@ def test_save_shard_rejects_torch_format(tmp_path: Path) -> None:
         compile_plan(
             {
                 "inputs": [str(in_path)],
-                "transforms": [{"save": {"path": str(tmp_path / "x.pt"), "format": "torch", "shard": "1MB"}}],
+                "transforms": [
+                    {"save": {"path": str(tmp_path / "x.pt"), "format": "torch", "shard": "1MB"}}
+                ],
             }
         )
 
-def test_save_shard_uses_provider_max_io_workers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+
+def test_save_shard_uses_provider_max_io_workers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     in_path = tmp_path / "in.safetensors"
     out_dir = tmp_path / "out_sharded"
     _write_checkpoint(

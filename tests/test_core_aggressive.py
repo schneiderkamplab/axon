@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.core import (
     BaseTransform,
     BinaryMappingSpec,
@@ -15,26 +14,28 @@ from brainsurgery.core import (
     DeclarativeUnaryTransform,
     DestinationPolicy,
     Docs,
+    TensorRef,
     TernaryMappingSpec,
     TernaryMappingTransform,
-    TensorRef,
     TransformError,
     TypedTransform,
     UnarySpec,
     UnaryTransform,
 )
 from brainsurgery.core.compile.expression import compile_tensor_ref_expr, get_assert_expr_help
-from brainsurgery.core.compile.matching import _MatchError, StructuredMatch, _StructuredPathMatcher
+from brainsurgery.core.compile.matching import StructuredMatch, _MatchError, _StructuredPathMatcher
 from brainsurgery.core.compile.name_mapping import resolve_name_mappings
 from brainsurgery.core.compile.resolver import _resolve_target_names, _resolve_tensors
-from brainsurgery.core.specs.scalar_comparison import ScalarComparison, parse_scalar_comparison
 from brainsurgery.core.runtime.transform import REGISTRY, register_transform
+from brainsurgery.core.specs.scalar_comparison import ScalarComparison, parse_scalar_comparison
 from brainsurgery.core.specs.types import StateDictLike
 from brainsurgery.core.specs.validation import (
     require_expr,
     require_same_shape_dtype_device,
     require_same_shape_dtype_device3,
 )
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+
 
 class _Provider:
     def __init__(self) -> None:
@@ -51,25 +52,31 @@ class _Provider:
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
 
+
 class _CoreError(TransformError):
     pass
+
 
 class _NoDocsUnary(DeclarativeUnaryTransform[UnarySpec]):
     name = "nodocs_u"
     apply_fn = staticmethod(lambda spec, name, provider: None)
 
+
 class _NoDocsBinary(DeclarativeBinaryTransform[BinaryMappingSpec]):
     name = "nodocs_b"
     apply_fn = staticmethod(lambda spec, src_name, dst_name, provider: None)
+
 
 class _NoDocsTernary(DeclarativeTernaryTransform[TernaryMappingSpec]):
     name = "nodocs_t"
     apply_fn = staticmethod(lambda spec, src_a_name, src_b_name, dst_name, provider: None)
 
+
 class _DocUnary(DeclarativeUnaryTransform[UnarySpec]):
     name = "doc_u"
     docs = Docs(summary="doc unary")
     apply_fn = staticmethod(lambda spec, name, provider: None)
+
 
 class _DocBinaryAny(DeclarativeBinaryTransform[BinaryMappingSpec]):
     name = "doc_b_any"
@@ -77,11 +84,13 @@ class _DocBinaryAny(DeclarativeBinaryTransform[BinaryMappingSpec]):
     destination_policy = DestinationPolicy.ANY
     apply_fn = staticmethod(lambda spec, src_name, dst_name, provider: None)
 
+
 class _DocTernaryAny(DeclarativeTernaryTransform[TernaryMappingSpec]):
     name = "doc_t_any"
     docs = Docs(summary="doc ternary any")
     destination_policy = DestinationPolicy.ANY
     apply_fn = staticmethod(lambda spec, src_a_name, src_b_name, dst_name, provider: None)
+
 
 def test_core_base_abstract_methods_raise() -> None:
     with pytest.raises(NotImplementedError):
@@ -99,6 +108,7 @@ def test_core_base_abstract_methods_raise() -> None:
         StateDictLike.access_counts(object(), "x")
     with pytest.raises(NotImplementedError):
         StateDictLike.mark_write(object(), "x")
+
 
 def test_typed_transform_require_spec_and_register_transform_validation() -> None:
     class _Typed(TypedTransform[int]):
@@ -147,6 +157,7 @@ def test_typed_transform_require_spec_and_register_transform_validation() -> Non
         REGISTRY.clear()
         REGISTRY.update(snapshot)
 
+
 class _Unary(UnaryTransform[UnarySpec]):
     name = "u"
     spec_type = UnarySpec
@@ -155,6 +166,7 @@ class _Unary(UnaryTransform[UnarySpec]):
     def apply_to_target(self, spec: UnarySpec, name: str, provider: _Provider) -> None:
         del spec, name, provider
 
+
 class _BinaryNoApply(BinaryMappingTransform[BinaryMappingSpec]):
     name = "b"
     spec_type = BinaryMappingSpec
@@ -162,9 +174,11 @@ class _BinaryNoApply(BinaryMappingTransform[BinaryMappingSpec]):
     def validate_refs(self, from_ref: TensorRef, to_ref: TensorRef) -> None:
         del from_ref, to_ref
 
+
 @dataclass(frozen=True)
 class _TernarySpec(TernaryMappingSpec):
     pass
+
 
 class _Ternary(TernaryMappingTransform[_TernarySpec]):
     name = "t"
@@ -174,7 +188,9 @@ class _Ternary(TernaryMappingTransform[_TernarySpec]):
     def __init__(self) -> None:
         self.applied: list[str] = []
 
-    def validate_refs(self, from_a_ref: TensorRef, from_b_ref: TensorRef, to_ref: TensorRef) -> None:
+    def validate_refs(
+        self, from_a_ref: TensorRef, from_b_ref: TensorRef, to_ref: TensorRef
+    ) -> None:
         del from_a_ref, from_b_ref, to_ref
 
     def apply_mapping(
@@ -187,6 +203,7 @@ class _Ternary(TernaryMappingTransform[_TernarySpec]):
     ) -> None:
         del spec, src_a_name, src_b_name, provider
         self.applied.append(dst_name)
+
 
 def test_core_transform_infer_and_apply_error_paths() -> None:
     unary = _Unary()
@@ -227,6 +244,7 @@ def test_core_transform_infer_and_apply_error_paths() -> None:
         _Provider(),
     )
     assert ternary.applied == ["z.1"]
+
 
 def test_core_ternary_transform_error_branches() -> None:
     provider = _Provider()
@@ -326,6 +344,7 @@ def test_core_ternary_transform_error_branches() -> None:
             provider,
         )
 
+
 def test_core_resolver_and_expression_error_paths() -> None:
     provider = _Provider()
 
@@ -338,12 +357,15 @@ def test_core_resolver_and_expression_error_paths() -> None:
             error_type=_CoreError,
         )
 
-    assert _resolve_tensors(
-        TensorRef(model="a", expr=r"x\..*"),
-        provider,
-        op_name="assert",
-        resolve_names=lambda ref, p, op_name: [],
-    ) == []
+    assert (
+        _resolve_tensors(
+            TensorRef(model="a", expr=r"x\..*"),
+            provider,
+            op_name="assert",
+            resolve_names=lambda ref, p, op_name: [],
+        )
+        == []
+    )
 
     with pytest.raises(TransformError, match="unknown assert op"):
         get_assert_expr_help("missing-op")
@@ -352,6 +374,7 @@ def test_core_resolver_and_expression_error_paths() -> None:
 
     with pytest.raises(TransformError, match="non-empty string reference"):
         compile_tensor_ref_expr(["ok", ""], default_model="a", op_name="assert.equal")
+
 
 def test_core_scalar_comparison_and_validation_error_paths() -> None:
     cmp = ScalarComparison(exact=2, ge=1, gt=None, le=3, lt=None)
@@ -413,16 +436,22 @@ def test_core_scalar_comparison_and_validation_error_paths() -> None:
                 symbol="+",
             )
 
+
 def test_core_matching_uncovered_paths() -> None:
     matcher = _StructuredPathMatcher()
-    assert matcher.match_and_rewrite(
-        from_pattern=["x", "$i"],
-        to_pattern=["y", "${i}"],
-        name="x.1",
-    ) == "y.1"
+    assert (
+        matcher.match_and_rewrite(
+            from_pattern=["x", "$i"],
+            to_pattern=["y", "${i}"],
+            name="x.1",
+        )
+        == "y.1"
+    )
 
     assert matcher.match(["$x", "$x"], "a.a") == StructuredMatch(bindings={"x": "a"})
-    assert matcher.match(["*tail", "x", "*tail"], "a.x.a") == StructuredMatch(bindings={"tail": ["a"]})
+    assert matcher.match(["*tail", "x", "*tail"], "a.x.a") == StructuredMatch(
+        bindings={"tail": ["a"]}
+    )
     assert matcher.match(["~[0-9]+"], "7") == StructuredMatch(bindings={})
 
     with pytest.raises(_MatchError, match="invalid regex binding list"):
@@ -439,6 +468,7 @@ def test_core_matching_uncovered_paths() -> None:
 
     with pytest.raises(_MatchError, match="cannot interpolate non-scalar"):
         matcher.rewrite(["${x}"], StructuredMatch(bindings={"x": ["a"]}))
+
 
 def test_core_name_mapping_structured_collision_and_zero_match() -> None:
     provider = _Provider()
@@ -460,6 +490,7 @@ def test_core_name_mapping_structured_collision_and_zero_match() -> None:
             op_name="copy",
         )
 
+
 def test_core_resolver_slice_happy_path() -> None:
     provider = _Provider()
     provider.state_dicts["a"]["x.2"] = torch.arange(6).reshape(2, 3)
@@ -470,6 +501,7 @@ def test_core_resolver_slice_happy_path() -> None:
         resolve_names=lambda ref, p, op_name: ["x.2"],
     )[0][1]
     assert tensor.shape == (2, 2)
+
 
 def test_core_declarative_uncovered_paths() -> None:
     no_docs_u = _NoDocsUnary()
@@ -490,6 +522,7 @@ def test_core_declarative_uncovered_paths() -> None:
         _DocBinaryAny().apply_mapping(object(), "x", "y", _Provider())  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError):
         _DocTernaryAny().apply_mapping(object(), "a", "b", "c", _Provider())  # type: ignore[arg-type]
+
 
 def test_core_ternary_validate_any_policy_returns_early() -> None:
     provider = _Provider()

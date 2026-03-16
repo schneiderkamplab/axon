@@ -3,7 +3,10 @@ from importlib import import_module
 from brainsurgery.core import BinaryMappingSpec, TensorRef
 
 _module = import_module("brainsurgery.transforms.move")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_move_compile_rejects_sliced_source() -> None:
     try:
@@ -13,6 +16,7 @@ def test_move_compile_rejects_sliced_source() -> None:
     else:  # pragma: no cover
         raise AssertionError("expected move sliced source error")
 
+
 def test_move_compile_rejects_sliced_destination() -> None:
     try:
         MoveTransform().compile({"from": "a", "to": "b::[:]"}, default_model="model")
@@ -20,6 +24,7 @@ def test_move_compile_rejects_sliced_destination() -> None:
         assert "destination must not be sliced" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected move sliced destination error")
+
 
 def test_move_apply_moves_slot() -> None:
     class _StateDict(dict):

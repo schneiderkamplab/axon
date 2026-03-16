@@ -6,22 +6,26 @@ from pathlib import Path
 import pytest
 import torch
 
+import brainsurgery.engine.arena as arena_module
 import brainsurgery.engine.checkpoint_io as checkpoint_io_module
 import brainsurgery.engine.output_model as output_model_module
 import brainsurgery.engine.output_paths as output_paths_module
 import brainsurgery.engine.provider_utils as provider_utils_module
 import brainsurgery.engine.providers as providers_module
-import brainsurgery.engine.arena as arena_module
 from brainsurgery.core import CompiledTransform, TransformError
-
-from brainsurgery.engine.arena import ArenaSegment, ProviderError, _SegmentedFileBackedArena, torch_element_size
+from brainsurgery.engine.arena import (
+    ArenaSegment,
+    ProviderError,
+    _SegmentedFileBackedArena,
+    torch_element_size,
+)
 from brainsurgery.engine.output_model import _infer_output_model
-from brainsurgery.engine.plan import _OutputSpec, PlanStep, SurgeryPlan, parse_output
-from brainsurgery.engine.render import _shape_only, render_tree, summarize_tensor
-from brainsurgery.engine.state_dicts import _ArenaStateDict
-
-from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.engine.plan import PlanStep, SurgeryPlan, _OutputSpec, parse_output
 from brainsurgery.engine.providers import InMemoryStateDictProvider
+from brainsurgery.engine.render import _shape_only, render_tree, summarize_tensor
+from brainsurgery.engine.state_dicts import _ArenaStateDict, _InMemoryStateDict
+
+
 class _OutputModelProvider:
     def __init__(self) -> None:
         self.state_dicts = {
@@ -33,12 +37,14 @@ class _OutputModelProvider:
     def get_state_dict(self, model: str) -> _InMemoryStateDict:
         return self.state_dicts[model]
 
+
 @dataclass(frozen=True)
 class _Spec:
     model: str
 
     def collect_models(self) -> set[str]:
         return {self.model}
+
 
 class _Transform:
     name = "x"
@@ -51,18 +57,22 @@ class _Transform:
         assert isinstance(spec, _Spec)
         return spec.model
 
+
 class _FallbackTransform(_Transform):
     def _infer_output_model(self, spec: object) -> str:
         del spec
         raise TransformError("fallback needed")
 
 
-def _plan_with(compiled: list[CompiledTransform], *, output: _OutputSpec | None = None) -> SurgeryPlan:
+def _plan_with(
+    compiled: list[CompiledTransform], *, output: _OutputSpec | None = None
+) -> SurgeryPlan:
     return SurgeryPlan(
         inputs={},
         output=output,
         steps=[PlanStep(raw={}, compiled=item) for item in compiled],
     )
+
 
 def test_engine_output_model_uncovered_paths() -> None:
     provider = _OutputModelProvider()
@@ -102,6 +112,7 @@ def test_engine_output_model_uncovered_paths() -> None:
 
     assert output_model_module._has_any_tensor(_BrokenProvider(), "x") is False
 
+
 def test_engine_state_dict_uncovered_paths(tmp_path: Path) -> None:
     state_dict = _InMemoryStateDict()
     state_dict["w"] = torch.ones(2)
@@ -128,6 +139,7 @@ def test_engine_state_dict_uncovered_paths(tmp_path: Path) -> None:
         arena_sd.slot("missing")
     arena.close()
 
+
 def test_engine_render_uncovered_paths() -> None:
     empty = summarize_tensor(
         torch.empty(0),
@@ -146,6 +158,7 @@ def test_engine_render_uncovered_paths() -> None:
     )
     assert "leaf  3" in render_tree({"leaf": 3}, compact=True)
     assert render_tree({"items": [None, None]}, compact=True).splitlines() == ["└── items"]
+
 
 def test_engine_arena_uncovered_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ProviderError, match="positive"):
@@ -193,6 +206,7 @@ def test_engine_arena_uncovered_paths(tmp_path: Path, monkeypatch: pytest.Monkey
     with pytest.raises(ProviderError, match="unsupported dtype"):
         torch_element_size(torch.complex64)
 
+
 def test_engine_provider_utils_and_providers_uncovered_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -235,7 +249,9 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
         base.load_alias_from_path("x", tmp_path / "m.safetensors")
 
     with pytest.raises(ProviderError, match="save_output requires plan.output"):
-        base.save_output(SurgeryPlan(inputs={}, output=None), default_shard_size="1MB", max_io_workers=1)
+        base.save_output(
+            SurgeryPlan(inputs={}, output=None), default_shard_size="1MB", max_io_workers=1
+        )
 
     class _P(providers_module.BaseStateDictProvider):
         def get_state_dict(self, model: str):
@@ -275,6 +291,7 @@ def test_engine_provider_utils_and_providers_uncovered_paths(
             arena_segment_size="none",
         )
 
+
 def test_engine_output_paths_plan_and_checkpoint_edges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -302,7 +319,9 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
         "safetensors",
     )
 
-    assert parse_output({"path": str(tmp_path / "x.safetensors")}) == _OutputSpec(path=tmp_path / "x.safetensors")
+    assert parse_output({"path": str(tmp_path / "x.safetensors")}) == _OutputSpec(
+        path=tmp_path / "x.safetensors"
+    )
 
     with pytest.raises(RuntimeError, match="max_shard_size must be positive"):
         checkpoint_io_module.shard_state_dict({"a": torch.ones(1)}, 0)
@@ -313,7 +332,9 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
     )
     assert len(shards) >= 2
 
-    monkeypatch.setattr(checkpoint_io_module, "shard_state_dict", lambda state_dict, max_shard_size: [{}])
+    monkeypatch.setattr(
+        checkpoint_io_module, "shard_state_dict", lambda state_dict, max_shard_size: [{}]
+    )
     with pytest.raises(RuntimeError, match="coverage mismatch"):
         checkpoint_io_module.save_sharded_safetensors(
             {"a": torch.ones(1)},
@@ -339,7 +360,9 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
     monkeypatch.setattr(checkpoint_io_module, "load_state_dict_from_directory", _fake_dir_loader)
     root_dir = tmp_path / "root_dir"
     root_dir.mkdir()
-    checkpoint_io_module._load_state_dict_from_path(root_dir, _InMemoryStateDict(), max_io_workers=1)
+    checkpoint_io_module._load_state_dict_from_path(
+        root_dir, _InMemoryStateDict(), max_io_workers=1
+    )
     assert called["dir"] is True
     monkeypatch.setattr(checkpoint_io_module, "load_state_dict_from_directory", real_dir_loader)
 
@@ -367,7 +390,9 @@ def test_engine_output_paths_plan_and_checkpoint_edges(
     mismatch_dir.mkdir()
     torch.save({"w": torch.ones(1)}, mismatch_dir / "one.pt")
     monkeypatch.setattr(checkpoint_io_module, "_choose_num_io_workers", lambda n, max_io_workers: 1)
-    monkeypatch.setattr(checkpoint_io_module, "_run_threadpool_tasks_with_progress", lambda **kwargs: None)
+    monkeypatch.setattr(
+        checkpoint_io_module, "_run_threadpool_tasks_with_progress", lambda **kwargs: None
+    )
     with pytest.raises(RuntimeError, match="progress count mismatch"):
         checkpoint_io_module.load_state_dict_from_directory(
             mismatch_dir,

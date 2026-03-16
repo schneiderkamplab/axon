@@ -7,16 +7,17 @@ import pytest
 import torch
 from safetensors.torch import save_file as save_safetensors_file
 
-from brainsurgery.io import infer_tensor_file_format
-from brainsurgery.io import torch as torch_io
-from brainsurgery.engine.tensor_files import load_tensor_from_path, save_tensor_to_path
+from brainsurgery.engine.checkpoint_io import shard_state_dict
 from brainsurgery.engine.output_paths import (
-    parse_shard_size,
     _resolve_output_destination,
     _resolve_sharded_output_directory,
+    parse_shard_size,
 )
-from brainsurgery.engine.checkpoint_io import shard_state_dict
 from brainsurgery.engine.plan import _OutputSpec
+from brainsurgery.engine.tensor_files import load_tensor_from_path, save_tensor_to_path
+from brainsurgery.io import infer_tensor_file_format
+from brainsurgery.io import torch as torch_io
+
 
 def test_resolve_output_destination_infers_directory_and_explicit_torch(tmp_path: Path) -> None:
     directory = tmp_path / "outdir"
@@ -37,6 +38,7 @@ def test_resolve_output_destination_infers_directory_and_explicit_torch(tmp_path
     )
     assert dcp_explicit == (tmp_path / "dcp_out", "dcp", None)
 
+
 def test_parse_shard_size_and_shard_state_dict_cover_boundaries() -> None:
     assert parse_shard_size("2KB") == 2048
     assert parse_shard_size("none") is None
@@ -51,6 +53,7 @@ def test_parse_shard_size_and_shard_state_dict_cover_boundaries() -> None:
 
     with pytest.raises(RuntimeError, match="expected values like"):
         parse_shard_size("5XB")
+
 
 def test_load_tensor_from_path_supports_numpy_safetensors_and_torch(tmp_path: Path) -> None:
     numpy_path = tmp_path / "tensor.npy"
@@ -68,16 +71,21 @@ def test_load_tensor_from_path_supports_numpy_safetensors_and_torch(tmp_path: Pa
     assert torch.equal(load_tensor_from_path(torch_path), torch.arange(3))
     assert infer_tensor_file_format(torch_path) == "torch"
 
+
 def test_validate_state_dict_mapping_rejects_non_tensor_values(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="plain tensor state_dict"):
         torch_io._validate_state_dict_mapping({"bad": 1}, tmp_path / "bad.pt")
 
-def test_resolve_output_destination_rejects_incompatible_explicit_safetensors(tmp_path: Path) -> None:
+
+def test_resolve_output_destination_rejects_incompatible_explicit_safetensors(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(RuntimeError, match="incompatible"):
         _resolve_output_destination(
             _OutputSpec(path=tmp_path / "model.pt", format="safetensors"),
             default_shard_size="none",
         )
+
 
 def test_resolve_output_destination_rejects_torch_directory_path(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
@@ -87,6 +95,7 @@ def test_resolve_output_destination_rejects_torch_directory_path(tmp_path: Path)
             _OutputSpec(path=output_dir, format="torch"),
             default_shard_size="none",
         )
+
 
 def test_resolve_output_destination_rejects_dcp_file_style_path(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="directory-style path"):
@@ -102,6 +111,7 @@ def test_resolve_output_destination_rejects_dcp_file_style_path(tmp_path: Path) 
             default_shard_size="none",
         )
 
+
 def test_resolve_sharded_output_directory_rejects_file_style_path(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="directory-style output path"):
         _resolve_sharded_output_directory(
@@ -109,7 +119,10 @@ def test_resolve_sharded_output_directory_rejects_file_style_path(tmp_path: Path
             resolved_path=tmp_path / "model.safetensors",
         )
 
-def test_load_tensor_from_path_covers_npz_and_error_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_load_tensor_from_path_covers_npz_and_error_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     npz_path = tmp_path / "one.npz"
     np.savez(npz_path, only=np.array([1, 2], dtype=np.float32))
     assert torch.equal(load_tensor_from_path(npz_path), torch.tensor([1.0, 2.0]))
@@ -122,6 +135,7 @@ def test_load_tensor_from_path_covers_npz_and_error_branches(tmp_path: Path, mon
     monkeypatch.setattr("brainsurgery.io.npy.np.load", lambda *args, **kwargs: object())
     with pytest.raises(RuntimeError, match="unsupported numpy payload"):
         load_tensor_from_path(tmp_path / "x.npy")
+
 
 def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
     tmp_path: Path,
@@ -138,7 +152,10 @@ def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
 
     torch_numpy = tmp_path / "array.pt"
     torch_numpy.write_bytes(b"placeholder")
-    monkeypatch.setattr("brainsurgery.io.torch.torch.load", lambda *args, **kwargs: np.array([1, 2], dtype=np.float32))
+    monkeypatch.setattr(
+        "brainsurgery.io.torch.torch.load",
+        lambda *args, **kwargs: np.array([1, 2], dtype=np.float32),
+    )
     assert torch.equal(load_tensor_from_path(torch_numpy), torch.tensor([1.0, 2.0]))
 
     torch_many = tmp_path / "many.pt"
@@ -156,6 +173,7 @@ def test_load_tensor_from_path_covers_safetensors_and_torch_errors(
     with pytest.raises(RuntimeError, match="unsupported tensor payload"):
         load_tensor_from_path(bad)
 
+
 def test_save_tensor_to_path_covers_all_formats(tmp_path: Path) -> None:
     tensor = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     torch_out = tmp_path / "x.pt"
@@ -171,13 +189,16 @@ def test_save_tensor_to_path_covers_all_formats(tmp_path: Path) -> None:
     save_tensor_to_path("x", tensor, safe_out, format="safetensors")
     assert torch.equal(load_tensor_from_path(safe_out, format="safetensors"), tensor)
 
+
 def test_output_paths_additional_branches(tmp_path: Path) -> None:
     out_file = tmp_path / "model.bin"
     resolved = _resolve_output_destination(_OutputSpec(path=out_file), default_shard_size="none")
     assert resolved == (out_file, "torch", None)
 
     with pytest.raises(RuntimeError, match="unsupported output format"):
-        _resolve_output_destination(_OutputSpec(path=tmp_path / "out.abc"), default_shard_size="none")
+        _resolve_output_destination(
+            _OutputSpec(path=tmp_path / "out.abc"), default_shard_size="none"
+        )
 
     with pytest.raises(RuntimeError, match="only supported for safetensors"):
         _resolve_output_destination(

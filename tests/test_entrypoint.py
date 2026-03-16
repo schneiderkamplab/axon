@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import brainsurgery
 
+
 def test_main_passes_explicit_subcommand_through(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
 
@@ -13,6 +14,7 @@ def test_main_passes_explicit_subcommand_through(monkeypatch) -> None:
     brainsurgery.main(["cli", "examples/gpt2.yaml"])
 
     assert calls == [(["cli", "examples/gpt2.yaml"], "brainsurgery")]
+
 
 def test_main_passes_empty_args_without_defaulting(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
@@ -26,6 +28,7 @@ def test_main_passes_empty_args_without_defaulting(monkeypatch) -> None:
 
     assert calls == [(["webcli", "--port", "9000"], "brainsurgery")]
 
+
 def test_main_defaults_to_cli_when_no_subcommand(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
 
@@ -37,6 +40,7 @@ def test_main_defaults_to_cli_when_no_subcommand(monkeypatch) -> None:
     brainsurgery.main(["examples/gpt2.yaml"])
 
     assert calls == [(["cli", "examples/gpt2.yaml"], "brainsurgery")]
+
 
 def test_main_preserves_explicit_webui_subcommand(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
@@ -50,6 +54,7 @@ def test_main_preserves_explicit_webui_subcommand(monkeypatch) -> None:
 
     assert calls == [(["webui", "--port", "9010"], "brainsurgery")]
 
+
 def test_main_reorders_cli_options_after_config_items(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
 
@@ -61,6 +66,7 @@ def test_main_reorders_cli_options_after_config_items(monkeypatch) -> None:
     brainsurgery.main(["cli", "examples/gpt2.yaml", "-i"])
 
     assert calls == [(["cli", "-i", "examples/gpt2.yaml"], "brainsurgery")]
+
 
 def test_main_default_cli_reorders_options_after_config_items(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []

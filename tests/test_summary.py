@@ -6,8 +6,9 @@ import typer
 from brainsurgery.cli.summary import _write_executed_plan_summary
 from brainsurgery.core import CompiledTransform, TensorRef
 from brainsurgery.engine import compile_plan
-from brainsurgery.engine.summary import executed_plan_summary_doc, parse_summary_mode
 from brainsurgery.engine.plan import PlanStep, SurgeryPlan
+from brainsurgery.engine.summary import executed_plan_summary_doc, parse_summary_mode
+
 
 def test_write_executed_plan_summary_writes_yaml(tmp_path, monkeypatch) -> None:
     echoed: list[str] = []
@@ -34,6 +35,7 @@ def test_write_executed_plan_summary_writes_yaml(tmp_path, monkeypatch) -> None:
     )
     assert echoed
 
+
 def test_parse_summary_mode_rejects_invalid_mode() -> None:
     assert parse_summary_mode("resolve") == "resolve"
     assert parse_summary_mode(" raw ") == "raw"
@@ -43,6 +45,7 @@ def test_parse_summary_mode_rejects_invalid_mode() -> None:
         assert "summary mode must be one of" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected invalid summary mode error")
+
 
 def test_executed_plan_summary_doc_resolve_mode_reconstructs_compiled_step() -> None:
     @dataclass(frozen=True)
@@ -77,14 +80,28 @@ def test_executed_plan_summary_doc_resolve_mode_reconstructs_compiled_step() -> 
         "transforms": [{"scale": {"target": "model::x", "scale": 2.0}}],
     }
 
+
 def test_executed_plan_summary_doc_resolve_mode_serializes_assert_and_fill_payloads() -> None:
     plan = compile_plan(
         {
             "inputs": ["model::/tmp/in.safetensors", "orig::/tmp/orig.safetensors"],
             "transforms": [
                 {"assert": {"equal": {"left": "model::(.+)", "right": "orig::\\1"}}},
-                {"fill": {"from": "model::demo.x", "to": "model::demo.filled", "mode": "constant", "value": 1.0}},
-                {"fill_": {"target": "model::demo.filled", "mode": "tensor", "values": [0, 1, 2, 3]}},
+                {
+                    "fill": {
+                        "from": "model::demo.x",
+                        "to": "model::demo.filled",
+                        "mode": "constant",
+                        "value": 1.0,
+                    }
+                },
+                {
+                    "fill_": {
+                        "target": "model::demo.filled",
+                        "mode": "tensor",
+                        "values": [0, 1, 2, 3],
+                    }
+                },
             ],
         }
     )
@@ -116,6 +133,7 @@ def test_executed_plan_summary_doc_resolve_mode_serializes_assert_and_fill_paylo
             "values": [0, 1, 2, 3],
         }
     }
+
 
 def test_executed_plan_summary_doc_resolve_mode_is_replayable_for_help_prefixes_dump() -> None:
     source = {

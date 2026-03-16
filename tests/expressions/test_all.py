@@ -1,7 +1,10 @@
 from importlib import import_module
 
 _module = import_module("brainsurgery.expressions.all")
-globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")})
+globals().update(
+    {name: getattr(_module, name) for name in dir(_module) if not name.startswith("_")}
+)
+
 
 def test_all_compile_rejects_empty_list() -> None:
     try:
@@ -10,6 +13,7 @@ def test_all_compile_rejects_empty_list() -> None:
         assert "all must be a non-empty list" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected non-empty list validation error")
+
 
 def test_all_evaluate_short_success_path() -> None:
     class _Expr:

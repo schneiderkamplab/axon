@@ -2,7 +2,6 @@ import ast
 from collections import defaultdict
 from pathlib import Path
 
-
 PACKAGE_ROOT = Path("brainsurgery")
 TARGET_PACKAGES = (
     "core",
@@ -95,7 +94,10 @@ def test_symbol_visibility_contract_for_core_io_engine() -> None:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                     module_loads[module].add(node.id)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.decorator_list:
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    and node.decorator_list
+                ):
                     module_decorated_defs[module].add(node.name)
 
                 if isinstance(node, ast.ImportFrom):
@@ -127,9 +129,9 @@ def test_symbol_visibility_contract_for_core_io_engine() -> None:
                     )
 
                 # Non-exported symbols must be used either locally or by siblings.
-                locally_used = symbol in module_loads.get(module, set()) or symbol in module_decorated_defs.get(
+                locally_used = symbol in module_loads.get(
                     module, set()
-                )
+                ) or symbol in module_decorated_defs.get(module, set())
                 if not importers and not locally_used:
                     dead_symbol_violations.append(f"{module}:{symbol}")
 

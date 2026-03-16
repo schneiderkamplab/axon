@@ -8,8 +8,10 @@ SPECS_DIR = CORE_DIR / "specs"
 COMPILE_DIR = CORE_DIR / "compile"
 RUNTIME_DIR = CORE_DIR / "runtime"
 
+
 def _iter_python_files(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
+
 
 def _core_exports() -> set[str]:
     tree = ast.parse(CORE_INIT.read_text(encoding="utf-8"), filename=str(CORE_INIT))
@@ -20,6 +22,7 @@ def _core_exports() -> set[str]:
                 if alias.name != "*":
                     exports.add(alias.asname or alias.name)
     return exports
+
 
 def _assert_subpackage_import_policy(
     *,
@@ -37,8 +40,10 @@ def _assert_subpackage_import_policy(
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-                if node.level == 0 and module.startswith("brainsurgery.") and not module.startswith(
-                    "brainsurgery.core"
+                if (
+                    node.level == 0
+                    and module.startswith("brainsurgery.")
+                    and not module.startswith("brainsurgery.core")
                 ):
                     offenders.append(f"{path}:{node.lineno}")
                     continue
@@ -73,7 +78,9 @@ def _assert_subpackage_import_policy(
 
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("brainsurgery.") and not alias.name.startswith("brainsurgery.core"):
+                    if alias.name.startswith("brainsurgery.") and not alias.name.startswith(
+                        "brainsurgery.core"
+                    ):
                         offenders.append(f"{path}:{node.lineno}")
                         continue
                     if alias.name.startswith(f"brainsurgery.core.{subpackage_name}."):
@@ -83,9 +90,9 @@ def _assert_subpackage_import_policy(
                         offenders.append(f"{path}:{node.lineno}")
 
     assert not offenders, (
-        f"core.{subpackage_name}: invalid imports detected. "
-        f"Offenders: {', '.join(offenders)}"
+        f"core.{subpackage_name}: invalid imports detected. Offenders: {', '.join(offenders)}"
     )
+
 
 def test_core_specs_import_policy() -> None:
     _assert_subpackage_import_policy(
@@ -94,6 +101,7 @@ def test_core_specs_import_policy() -> None:
         allowed_core_packages=set(),
     )
 
+
 def test_core_compile_import_policy() -> None:
     _assert_subpackage_import_policy(
         subpackage_dir=COMPILE_DIR,
@@ -101,12 +109,14 @@ def test_core_compile_import_policy() -> None:
         allowed_core_packages={"specs"},
     )
 
+
 def test_core_runtime_import_policy() -> None:
     _assert_subpackage_import_policy(
         subpackage_dir=RUNTIME_DIR,
         subpackage_name="runtime",
         allowed_core_packages={"specs", "compile"},
     )
+
 
 def test_non_core_modules_do_not_import_core_submodules_directly() -> None:
     offenders: list[str] = []
@@ -131,6 +141,7 @@ def test_non_core_modules_do_not_import_core_submodules_directly() -> None:
         "(core.__init__), not core submodules directly. "
         f"Offenders: {', '.join(offenders)}"
     )
+
 
 def test_core_reexports_are_used_by_non_core_package_modules() -> None:
     exports = _core_exports()

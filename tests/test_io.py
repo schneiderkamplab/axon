@@ -9,6 +9,7 @@ from brainsurgery.io import dcp as dcp_io
 from brainsurgery.io import safetensors as safetensors_io
 from brainsurgery.io import torch as torch_io
 
+
 @pytest.mark.parametrize(
     "validator",
     [
