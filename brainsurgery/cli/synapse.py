@@ -24,51 +24,6 @@ def _emit_model_code(spec: dict[str, Any], class_name: str) -> str:
     return emit_fn(spec, class_name=class_name)
 
 
-@app.command("emit-gpt2")
-def emit_gpt2(
-    spec_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to a Synapse YAML spec.",
-    ),
-    output_path: Path = typer.Argument(
-        ...,
-        help="Destination Python file for generated model code.",
-    ),
-    class_name: str = typer.Option(
-        "GeneratedGPT2LMHeadModel",
-        "--class-name",
-        help="Name of the generated model class.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite output file if it already exists.",
-    ),
-) -> None:
-    """Generate standalone PyTorch model code from Synapse YAML."""
-    if output_path.exists() and not force:
-        raise typer.BadParameter(
-            f"Refusing to overwrite existing file: {output_path}. Use --force to overwrite."
-        )
-    if output_path.suffix != ".py":
-        raise typer.BadParameter("Output path must end with .py")
-
-    spec = _load_yaml_mapping(spec_path)
-    try:
-        source = _emit_model_code(spec, class_name)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(source, encoding="utf-8")
-    typer.echo(f"Wrote generated model code to {output_path}")
-
-
 @app.command("emit")
 def emit_generic(
     spec_path: Path = typer.Argument(
@@ -114,4 +69,4 @@ def emit_generic(
     typer.echo(f"Wrote generated model code to {output_path}")
 
 
-__all__ = ["app", "emit_gpt2", "emit_generic"]
+__all__ = ["app", "emit_generic"]

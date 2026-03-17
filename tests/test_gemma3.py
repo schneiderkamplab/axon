@@ -10,6 +10,14 @@ from omegaconf import OmegaConf
 from brainsurgery.synapse import emit_model_code_from_synapse_spec
 
 
+def _auto_device() -> torch.device:
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     loaded = OmegaConf.load(path)
     data = OmegaConf.to_container(loaded, resolve=True)
@@ -30,6 +38,7 @@ def _build_model_from_spec(
 def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -> None:
     transformers = pytest.importorskip("transformers")
     safetensors = pytest.importorskip("safetensors")
+    device = _auto_device()
 
     spec_path = repo_root / "examples" / "gemma3_270m_synapse.yaml"
     weights_path = gemma3_local_path / "model.safetensors"
@@ -39,7 +48,7 @@ def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -
     st = safetensors.safe_open(str(weights_path), framework="pt")
     state_dict = {
         (key[len("model.") :] if key.startswith("model.") else key): st.get_tensor(key).to(
-            torch.float32
+            device=device, dtype=torch.float32
         )
         for key in st.keys()
     }
@@ -47,20 +56,24 @@ def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(gemma3_local_path), local_files_only=True
     )
-    hf_model = transformers.AutoModelForCausalLM.from_pretrained(
-        str(gemma3_local_path), local_files_only=True, dtype=torch.float32
+    hf_model = (
+        transformers.AutoModelForCausalLM.from_pretrained(
+            str(gemma3_local_path), local_files_only=True, dtype=torch.float32
+        )
+        .to(device)
+        .eval()
     )
-    hf_model.eval()
 
     # Match deterministic greedy decoding behavior used by the synapse generated model.
     hf_model.generation_config.do_sample = False
     hf_model.generation_config.top_p = None
     hf_model.generation_config.top_k = None
 
-    synapse_model = _build_model_from_spec(spec_path, "Gemma3Generated", state_dict)
-    synapse_model.eval()
+    synapse_model = (
+        _build_model_from_spec(spec_path, "Gemma3Generated", state_dict).to(device).eval()
+    )
 
-    inputs = tokenizer("I eat my own", return_tensors="pt")
+    inputs = tokenizer("I eat my own", return_tensors="pt").to(device)
     input_ids = inputs["input_ids"]
     max_len = input_ids.shape[1] + 12
 

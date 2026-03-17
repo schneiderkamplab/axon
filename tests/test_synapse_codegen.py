@@ -6,11 +6,8 @@ import pytest
 import torch
 import typer
 
-from brainsurgery.cli.synapse import emit_generic, emit_gpt2
-from brainsurgery.synapse import (
-    emit_gpt2_model_code_from_synapse_spec,
-    emit_model_code_from_synapse_spec,
-)
+from brainsurgery.cli.synapse import emit_generic
+from brainsurgery.synapse import emit_model_code_from_synapse_spec
 
 
 def _spec_dict() -> dict[str, object]:
@@ -46,34 +43,12 @@ model:
 """
 
 
-def test_emit_code_executes_and_runs_forward() -> None:
-    source = emit_gpt2_model_code_from_synapse_spec(_spec_dict(), class_name="ToyGPT2")
-
-    namespace: dict[str, object] = {}
-    exec(source, namespace)  # noqa: S102 - test-controlled generated source
-    model_cls = namespace["ToyGPT2"]
-    model = model_cls()
-
-    input_ids = torch.randint(low=0, high=32, size=(2, 5), dtype=torch.long)
-    logits = model(input_ids)
-    assert logits.shape == (2, 5, 32)
-    for value in model.state_dict().values():
-        if value.is_floating_point():
-            value.zero_()
-    generated = model.generate(torch.tensor([[1, 2]], dtype=torch.long), eos_token_id=0, max_len=10)
-    assert generated.shape == (1, 3)
-    assert generated[0, -1].item() == 0
-    logits, past = model.forward_with_past(torch.tensor([[1, 2]], dtype=torch.long))
-    assert logits.shape == (1, 2, 32)
-    assert past is not None
-
-
-def test_cli_emit_synapse_gpt2_writes_python_file(tmp_path: Path) -> None:
+def test_cli_emit_synapse_writes_python_file(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"
     out_path = tmp_path / "generated_model.py"
     spec_path.write_text(_spec_yaml(), encoding="utf-8")
 
-    emit_gpt2(spec_path=spec_path, output_path=out_path, class_name="FromCli", force=False)
+    emit_generic(spec_path=spec_path, output_path=out_path, class_name="FromCli", force=False)
 
     assert out_path.exists()
     contents = out_path.read_text(encoding="utf-8")
@@ -88,12 +63,12 @@ def test_cli_emit_requires_force_for_existing_output(tmp_path: Path) -> None:
     out_path.write_text("# existing\n", encoding="utf-8")
 
     with pytest.raises(typer.BadParameter) as exc_info:
-        emit_gpt2(spec_path=spec_path, output_path=out_path, class_name="FromCli", force=False)
+        emit_generic(spec_path=spec_path, output_path=out_path, class_name="FromCli", force=False)
 
     assert "overwrite" in str(exc_info.value)
 
 
-def test_emit_uses_op_map_validation() -> None:
+def test_emit_accepts_minimal_op_map() -> None:
     bad_op_map = {
         "ops": {
             "embedding": {"target": "torch.nn.Embedding"},
@@ -102,8 +77,8 @@ def test_emit_uses_op_map_validation() -> None:
             "attention": {"target": "torch.nn.MultiheadAttention"},
         }
     }
-    with pytest.raises(ValueError, match="scaled_dot_product_attention"):
-        emit_gpt2_model_code_from_synapse_spec(_spec_dict(), class_name="BadMap", op_map=bad_op_map)
+    source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="BadMap", op_map=bad_op_map)
+    assert "class BadMap(nn.Module):" in source
 
 
 def test_emit_generic_from_gemma3_spec(tmp_path: Path) -> None:

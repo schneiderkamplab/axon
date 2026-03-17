@@ -10,6 +10,14 @@ from omegaconf import OmegaConf
 from brainsurgery.synapse import emit_model_code_from_synapse_spec
 
 
+def _auto_device() -> torch.device:
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     loaded = OmegaConf.load(path)
     data = OmegaConf.to_container(loaded, resolve=True)
@@ -52,22 +60,28 @@ def test_generated_gpt2_variants_match_hf(
     transformers = pytest.importorskip("transformers")
     safetensors = pytest.importorskip("safetensors")
 
+    device = _auto_device()
+
     synapse_weights, hf_model_dir = gpt2_local_paths
     spec_path = repo_root / "examples" / spec_name
 
     st = safetensors.safe_open(str(synapse_weights), framework="pt")
-    state_dict = {key: st.get_tensor(key).to(torch.float32) for key in st.keys()}
+    state_dict = {
+        key: st.get_tensor(key).to(device=device, dtype=torch.float32) for key in st.keys()
+    }
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(str(hf_model_dir), local_files_only=True)
-    hf_model = transformers.AutoModelForCausalLM.from_pretrained(
-        str(hf_model_dir), local_files_only=True, dtype=torch.float32
+    hf_model = (
+        transformers.AutoModelForCausalLM.from_pretrained(
+            str(hf_model_dir), local_files_only=True, dtype=torch.float32
+        )
+        .to(device)
+        .eval()
     )
-    hf_model.eval()
 
-    synapse_model = _build_model_from_spec(spec_path, class_name, state_dict)
-    synapse_model.eval()
+    synapse_model = _build_model_from_spec(spec_path, class_name, state_dict).to(device).eval()
 
-    inputs = tokenizer("I eat my own", return_tensors="pt")
+    inputs = tokenizer("I eat my own", return_tensors="pt").to(device)
     input_ids = inputs["input_ids"]
     max_len = input_ids.shape[1] + 12
 

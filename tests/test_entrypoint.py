@@ -63,9 +63,9 @@ def test_main_preserves_explicit_synapse_subcommand(monkeypatch) -> None:
 
     monkeypatch.setattr(brainsurgery, "app", _fake_app)
 
-    brainsurgery.main(["synapse", "emit-gpt2", "spec.yaml", "out.py"])
+    brainsurgery.main(["synapse", "emit", "spec.yaml", "out.py"])
 
-    assert calls == [(["synapse", "emit-gpt2", "spec.yaml", "out.py"], "brainsurgery")]
+    assert calls == [(["synapse", "emit", "spec.yaml", "out.py"], "brainsurgery")]
 
 
 def test_main_reorders_cli_options_after_config_items(monkeypatch) -> None:

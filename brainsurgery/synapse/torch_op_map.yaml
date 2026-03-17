@@ -28,6 +28,8 @@ ops:
       in_features: required
       out_features: required
       bias: optional
+    call:
+      weight_layout: optional
 
   layernorm:
     kind: module
@@ -73,6 +75,21 @@ ops:
     call:
       dim: required
       dtype: optional
+
+  topk:
+    kind: tensor_fn
+    target: torch.topk
+    stateful: false
+    call:
+      k: required
+      dim: optional
+      largest: optional
+      sorted: optional
+
+  zeros_like:
+    kind: tensor_fn
+    target: torch.zeros_like
+    stateful: false
 
   attention:
     kind: functional
@@ -124,17 +141,10 @@ ops:
     target: Tensor.permute
     stateful: false
 
-adapters:
-  conv1d:
-    canonical_op: linear
-    note: "HF GPT-2 Conv1D stores weight as [in_features, out_features]."
-    checkpoint_layout:
-      weight: [in_features, out_features]
-      bias: [out_features]
-    lowering:
-      runtime: "emit torch.matmul(x, weight) + bias"
-      equivalent_module: torch.nn.Linear
-      to_linear_weight_transform: transpose_if_needed
+  kv_seq_len:
+    kind: adapter
+    target: synapse.kv_seq_len
+    stateful: false
 
 profiles:
   gpt2:

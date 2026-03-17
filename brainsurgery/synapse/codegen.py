@@ -350,10 +350,8 @@ class _Emitter:
         return op in {
             "embedding",
             "linear",
-            "conv1d",
             "layernorm",
             "rmsnorm",
-            "moe_router_topk",
         }
 
     def _node_output_names(self, node_spec: dict[str, Any]) -> list[str]:
@@ -489,18 +487,17 @@ class _Emitter:
                 bias_expr = f"self._state.get({infer_param('bias')})"
             else:
                 bias_expr = "None"
-            lines.append(
-                f"{indent}{out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
-            )
-            return lines
-
-        if op == "conv1d":
-            src = read(str(node_spec.get("in")))
-            out_name = str(node_spec.get("out"))
-            out_var = assign_out_var(out_name)
-            w = f"self._param({infer_param('weight')})"
-            b = f"self._param({infer_param('bias')})"
-            lines.append(f"{indent}{out_var} = torch.matmul({src}, {w}) + {b}")
+            weight_layout = str(node_spec.get("weight_layout", "oi"))
+            if weight_layout == "oi":
+                lines.append(
+                    f"{indent}{out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
+                )
+            elif weight_layout == "io":
+                lines.append(f"{indent}{out_var} = torch.matmul({src}, self._param({weight_expr}))")
+                lines.append(f"{indent}if {bias_expr} is not None:")
+                lines.append(f"{indent}    {out_var} = {out_var} + {bias_expr}")
+            else:
+                raise ValueError(f"Unsupported linear weight_layout: {weight_layout}")
             return lines
 
         if op == "layernorm":
@@ -559,145 +556,268 @@ class _Emitter:
                 raise ValueError(f"Unsupported activation kind: {kind}")
             return lines
 
-        if op == "moe_router_topk":
+        if op == "softmax":
             src = read(str(node_spec.get("in")))
-            outs = node_spec.get("out")
-            if not isinstance(outs, list) or len(outs) != 3:
-                raise ValueError(
-                    "moe_router_topk expects out=[router_probs,topk_scores,topk_indices]"
-                )
-            num_experts = self._expr_code(node_spec.get("num_experts"), env)
-            k = self._expr_code(node_spec.get("k"), env)
-            renorm = bool(node_spec.get("renorm_topk", False))
-            softmax_dtype = str(node_spec.get("softmax_dtype", "float32"))
-            flat = self._fresh("hidden_flat")
-            logits = self._fresh("router_logits")
-            probs = assign_out_var(str(outs[0]))
-            topv = assign_out_var(str(outs[1]))
-            topi = assign_out_var(str(outs[2]))
-            bias_expr = "None"
-            if node_spec.get("bias", False):
-                bias_expr = f"self._state.get({infer_param('bias')})"
-            lines.append(f"{indent}{flat} = {src}.reshape(-1, {src}.shape[-1])")
-            lines.append(
-                f"{indent}{logits} = F.linear({flat}, self._param({infer_param('weight')}), {bias_expr})"
-            )
-            lines.append(f"{indent}if int({num_experts}) != {logits}.shape[-1]:")
-            lines.append(f"{indent}    raise ValueError('moe_router_topk num_experts mismatch')")
-            if softmax_dtype == "float32":
-                lines.append(f"{indent}{probs} = F.softmax({logits}, dim=-1, dtype=torch.float32)")
-            else:
-                lines.append(f"{indent}{probs} = F.softmax({logits}, dim=-1)")
-            lines.append(f"{indent}{topv}, {topi} = torch.topk({probs}, int({k}), dim=-1)")
-            if renorm:
-                lines.append(f"{indent}{topv} = {topv} / {topv}.sum(dim=-1, keepdim=True)")
-            lines.append(f"{indent}{topv} = {topv}.to({probs}.dtype)")
-            return lines
-
-        if op == "moe_experts_ffn":
-            ins = node_spec.get("in")
-            if not isinstance(ins, list) or len(ins) != 3:
-                raise ValueError("moe_experts_ffn expects in=[hidden,topk_scores,topk_indices]")
-            src = read(str(ins[0]))
-            topk_scores = read(str(ins[1]))
-            topk_indices = read(str(ins[2]))
             out_name = str(node_spec.get("out"))
             out_var = assign_out_var(out_name)
-            num_experts = self._expr_code(node_spec.get("num_experts"), env)
+            dim = self._expr_code(node_spec.get("dim", -1), env)
+            dtype_name = node_spec.get("dtype")
+            if dtype_name is None:
+                lines.append(f"{indent}{out_var} = F.softmax({src}, dim=int({dim}))")
+            else:
+                if not isinstance(dtype_name, str):
+                    raise ValueError("softmax dtype must be a string when provided")
+                dtype_map: dict[str, str] = {
+                    "float32": "torch.float32",
+                    "float16": "torch.float16",
+                    "bfloat16": "torch.bfloat16",
+                }
+                if dtype_name not in dtype_map:
+                    raise ValueError(f"Unsupported softmax dtype: {dtype_name}")
+                lines.append(
+                    f"{indent}{out_var} = F.softmax({src}, dim=int({dim}), dtype={dtype_map[dtype_name]})"
+                )
+            return lines
+
+        if op == "topk":
+            src = read(str(node_spec.get("in")))
+            outs = node_spec.get("out")
+            if not isinstance(outs, list) or len(outs) != 2:
+                raise ValueError("topk expects out=[values,indices]")
+            values_var = assign_out_var(str(outs[0]))
+            indices_var = assign_out_var(str(outs[1]))
+            k = self._expr_code(node_spec.get("k"), env)
+            dim = self._expr_code(node_spec.get("dim", -1), env)
+            largest = bool(node_spec.get("largest", True))
+            sorted_flag = bool(node_spec.get("sorted", True))
+            lines.append(
+                f"{indent}{values_var}, {indices_var} = torch.topk({src}, int({k}), dim=int({dim}), largest={largest}, sorted={sorted_flag})"
+            )
+            return lines
+
+        if op == "zeros_like":
+            src = read(str(node_spec.get("in")))
+            out_name = str(node_spec.get("out"))
+            out_var = assign_out_var(out_name)
+            lines.append(f"{indent}{out_var} = torch.zeros_like({src})")
+            return lines
+
+        if op == "moe_select_tokens":
+            ins = node_spec.get("in")
+            outs = node_spec.get("out")
+            if (
+                not isinstance(ins, list)
+                or len(ins) != 3
+                or not isinstance(outs, list)
+                or len(outs) != 4
+            ):
+                raise ValueError(
+                    "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
+                    "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
+                )
+            hidden = read(str(ins[0]))
+            topk_scores = read(str(ins[1]))
+            topk_indices = read(str(ins[2]))
+            selected_hidden = assign_out_var(str(outs[0]))
+            token_idx = assign_out_var(str(outs[1]))
+            topk_pos = assign_out_var(str(outs[2]))
+            selected_scores = assign_out_var(str(outs[3]))
+            expert = self._expr_code(node_spec.get("expert"), env)
+            hidden_flat = self._fresh("hidden_flat")
+            topk_scores_flat = self._fresh("topk_scores_flat")
+            topk_indices_flat = self._fresh("topk_indices_flat")
+            expert_pos = self._fresh("expert_pos")
+            lines.append(f"{indent}{hidden_flat} = {hidden}.reshape(-1, {hidden}.shape[-1])")
+            lines.append(
+                f"{indent}{topk_scores_flat} = {topk_scores}.reshape(-1, {topk_scores}.shape[-1])"
+            )
+            lines.append(
+                f"{indent}{topk_indices_flat} = {topk_indices}.reshape(-1, {topk_indices}.shape[-1])"
+            )
+            lines.append(
+                f"{indent}{expert_pos} = ({topk_indices_flat} == int({expert})).nonzero(as_tuple=False)"
+            )
+            lines.append(f"{indent}{token_idx} = {expert_pos}[:, 0]")
+            lines.append(f"{indent}{topk_pos} = {expert_pos}[:, 1]")
+            lines.append(f"{indent}{selected_hidden} = {hidden_flat}[{token_idx}]")
+            lines.append(
+                f"{indent}{selected_scores} = {topk_scores_flat}[{token_idx}, {topk_pos}].to({selected_hidden}.dtype)"
+            )
+            return lines
+
+        if op == "moe_expert_ffn":
+            src = read(str(node_spec.get("in")))
+            out_name = str(node_spec.get("out"))
+            out_var = assign_out_var(out_name)
+            expert = self._expr_code(node_spec.get("expert"), env)
             experts_scope = node_spec.get("experts_scope", "experts")
             if not isinstance(experts_scope, str):
-                raise ValueError("moe_experts_ffn experts_scope must be string")
+                raise ValueError("moe_expert_ffn experts_scope must be string")
             experts_base = self._fresh("experts_base")
-            hidden_flat = self._fresh("hidden_flat")
-            final_hidden = self._fresh("final_hidden")
-            expert_idx = self._fresh("expert_idx")
-            expert_pos = self._fresh("expert_pos")
-            token_idx = self._fresh("token_idx")
-            topk_pos = self._fresh("topk_pos")
-            current = self._fresh("current_state")
-            current_hidden = self._fresh("current_hidden")
-            gate = self._fresh("gate")
-            up = self._fresh("up")
-            packed_gate_up = self._fresh("packed_gate_up")
-            packed_down = self._fresh("packed_down")
-            packed_gate_up_w = self._fresh("packed_gate_up_w")
-            packed_down_w = self._fresh("packed_down_w")
-            gate_w = self._fresh("gate_w")
-            up_w = self._fresh("up_w")
-            down_w = self._fresh("down_w")
-            gate_name = str(node_spec.get("gate_proj_name", "gate_proj.weight"))
-            up_name = str(node_spec.get("up_proj_name", "up_proj.weight"))
-            down_name = str(node_spec.get("down_proj_name", "down_proj.weight"))
-            activation = str(node_spec.get("activation", "silu"))
-
-            lines.append(f"{indent}{hidden_flat} = {src}.reshape(-1, {src}.shape[-1])")
-            lines.append(f"{indent}{final_hidden} = torch.zeros_like({hidden_flat})")
+            experts_parent = self._fresh("experts_parent")
             lines.append(
                 f"{indent}{experts_base} = self._join_scope({scope_var}, {experts_scope!r})"
             )
             lines.append(
+                f"{indent}{experts_parent} = {experts_base}.rsplit('.', 1)[0] if '.' in {experts_base} else ''"
+            )
+            gate_name = str(node_spec.get("gate_proj_name", "gate_proj.weight"))
+            up_name = str(node_spec.get("up_proj_name", "up_proj.weight"))
+            down_name = str(node_spec.get("down_proj_name", "down_proj.weight"))
+            activation = str(node_spec.get("activation", "silu"))
+            packed_gate_up = self._fresh("packed_gate_up")
+            packed_down = self._fresh("packed_down")
+            packed_gate_up_parent = self._fresh("packed_gate_up_parent")
+            packed_down_parent = self._fresh("packed_down_parent")
+            packed_gate_up_key = self._fresh("packed_gate_up_key")
+            packed_down_key = self._fresh("packed_down_key")
+            packed_gate_up_w = self._fresh("packed_gate_up_w")
+            down_w = self._fresh("down_w")
+            gate = self._fresh("gate")
+            up = self._fresh("up")
+            hidden_var = self._fresh("hidden")
+            lines.append(
                 f"{indent}{packed_gate_up} = self._join_scope({experts_base}, 'gate_up_proj')"
             )
             lines.append(f"{indent}{packed_down} = self._join_scope({experts_base}, 'down_proj')")
-            lines.append(f"{indent}for {expert_idx} in range(int({num_experts})):")
             lines.append(
-                f"{indent}    {expert_pos} = ({topk_indices} == {expert_idx}).nonzero(as_tuple=False)"
-            )
-            lines.append(f"{indent}    if {expert_pos}.numel() == 0:")
-            lines.append(f"{indent}        continue")
-            lines.append(f"{indent}    {token_idx} = {expert_pos}[:, 0]")
-            lines.append(f"{indent}    {topk_pos} = {expert_pos}[:, 1]")
-            lines.append(f"{indent}    {current} = {hidden_flat}[{token_idx}]")
-            lines.append(
-                f"{indent}    if {packed_gate_up} in self._state and {packed_down} in self._state:"
-            )
-            lines.append(f"{indent}        {packed_gate_up_w} = self._param({packed_gate_up})")
-            lines.append(f"{indent}        if {packed_gate_up_w}.ndim == 3:")
-            lines.append(
-                f"{indent}            {packed_gate_up_w} = {packed_gate_up_w}[{expert_idx}]"
+                f"{indent}{packed_gate_up_parent} = self._join_scope({experts_parent}, 'gate_up_proj') if {experts_parent} else ''"
             )
             lines.append(
-                f"{indent}        {gate}, {up} = F.linear({current}, {packed_gate_up_w}, None).chunk(2, dim=-1)"
+                f"{indent}{packed_down_parent} = self._join_scope({experts_parent}, 'down_proj') if {experts_parent} else ''"
             )
-            lines.append(f"{indent}        {packed_down_w} = self._param({packed_down})")
-            lines.append(f"{indent}        if {packed_down_w}.ndim == 3:")
-            lines.append(f"{indent}            {packed_down_w} = {packed_down_w}[{expert_idx}]")
-            lines.append(f"{indent}        {down_w} = {packed_down_w}")
-            lines.append(f"{indent}        {current_hidden} = None")
+            lines.append(
+                f"{indent}{packed_gate_up_key} = {packed_gate_up} if {packed_gate_up} in self._state else ({packed_gate_up_parent} if {packed_gate_up_parent} in self._state else None)"
+            )
+            lines.append(
+                f"{indent}{packed_down_key} = {packed_down} if {packed_down} in self._state else ({packed_down_parent} if {packed_down_parent} in self._state else None)"
+            )
+            lines.append(f"{indent}if {src}.numel() == 0:")
+            lines.append(f"{indent}    if {packed_down_key} is not None:")
+            lines.append(f"{indent}        _down_shape = self._param({packed_down_key}).shape")
+            lines.append(f"{indent}        {out_var} = {src}.new_zeros((0, int(_down_shape[-2])))")
             lines.append(f"{indent}    else:")
             lines.append(
-                f"{indent}        {gate_w} = self._param(self._join_scope({experts_base}, f'{{{expert_idx}}}.{gate_name}'))"
+                f"{indent}        _dw_indexed = self._join_scope({experts_base}, f'{{int({expert})}}.{down_name}')"
             )
             lines.append(
-                f"{indent}        {up_w} = self._param(self._join_scope({experts_base}, f'{{{expert_idx}}}.{up_name}'))"
+                f"{indent}        _dw_scoped = self._join_scope({experts_base}, {down_name!r})"
+            )
+            lines.append(f"{indent}        _dw_candidates = [_dw_indexed, _dw_scoped]")
+            lines.append(f"{indent}        if {experts_parent}:")
+            lines.append(
+                f"{indent}            _dw_candidates.extend([self._join_scope({experts_parent}, f'{{int({expert})}}.{down_name}'), self._join_scope({experts_parent}, {down_name!r})])"
+            )
+            lines.append(f"{indent}        _dw = None")
+            lines.append(f"{indent}        for _p in _dw_candidates:")
+            lines.append(f"{indent}            if _p in self._state:")
+            lines.append(f"{indent}                _dw = self._state[_p]")
+            lines.append(f"{indent}                break")
+            lines.append(f"{indent}        if _dw is None:")
+            lines.append(f"{indent}            raise KeyError(_dw_candidates[0])")
+            lines.append(f"{indent}        {out_var} = {src}.new_zeros((0, int(_dw.shape[-2])))")
+            lines.append(f"{indent}else:")
+            lines.append(
+                f"{indent}    if {packed_gate_up_key} is not None and {packed_down_key} is not None:"
+            )
+            lines.append(f"{indent}        {packed_gate_up_w} = self._param({packed_gate_up_key})")
+            lines.append(f"{indent}        if {packed_gate_up_w}.ndim == 3:")
+            lines.append(
+                f"{indent}            {packed_gate_up_w} = {packed_gate_up_w}[int({expert})]"
             )
             lines.append(
-                f"{indent}        {down_w} = self._param(self._join_scope({experts_base}, f'{{{expert_idx}}}.{down_name}'))"
+                f"{indent}        {gate}, {up} = F.linear({src}, {packed_gate_up_w}, None).chunk(2, dim=-1)"
             )
-            lines.append(f"{indent}        {gate} = F.linear({current}, {gate_w}, None)")
-            lines.append(f"{indent}        {up} = F.linear({current}, {up_w}, None)")
+            lines.append(f"{indent}        {down_w} = self._param({packed_down_key})")
+            lines.append(f"{indent}        if {down_w}.ndim == 3:")
+            lines.append(f"{indent}            {down_w} = {down_w}[int({expert})]")
+            lines.append(f"{indent}    else:")
+            lines.append(
+                f"{indent}        _gw_indexed = self._join_scope({experts_base}, f'{{int({expert})}}.{gate_name}')"
+            )
+            lines.append(
+                f"{indent}        _uw_indexed = self._join_scope({experts_base}, f'{{int({expert})}}.{up_name}')"
+            )
+            lines.append(
+                f"{indent}        _dw_indexed = self._join_scope({experts_base}, f'{{int({expert})}}.{down_name}')"
+            )
+            lines.append(
+                f"{indent}        _gw_scoped = self._join_scope({experts_base}, {gate_name!r})"
+            )
+            lines.append(
+                f"{indent}        _uw_scoped = self._join_scope({experts_base}, {up_name!r})"
+            )
+            lines.append(
+                f"{indent}        _dw_scoped = self._join_scope({experts_base}, {down_name!r})"
+            )
+            lines.append(f"{indent}        _gw_candidates = [_gw_indexed, _gw_scoped]")
+            lines.append(f"{indent}        _uw_candidates = [_uw_indexed, _uw_scoped]")
+            lines.append(f"{indent}        _dw_candidates = [_dw_indexed, _dw_scoped]")
+            lines.append(f"{indent}        if {experts_parent}:")
+            lines.append(
+                f"{indent}            _gw_candidates.extend([self._join_scope({experts_parent}, f'{{int({expert})}}.{gate_name}'), self._join_scope({experts_parent}, {gate_name!r})])"
+            )
+            lines.append(
+                f"{indent}            _uw_candidates.extend([self._join_scope({experts_parent}, f'{{int({expert})}}.{up_name}'), self._join_scope({experts_parent}, {up_name!r})])"
+            )
+            lines.append(
+                f"{indent}            _dw_candidates.extend([self._join_scope({experts_parent}, f'{{int({expert})}}.{down_name}'), self._join_scope({experts_parent}, {down_name!r})])"
+            )
+            lines.append(f"{indent}        _gw = None")
+            lines.append(f"{indent}        _uw = None")
+            lines.append(f"{indent}        {down_w} = None")
+            lines.append(f"{indent}        for _p in _gw_candidates:")
+            lines.append(f"{indent}            if _p in self._state:")
+            lines.append(f"{indent}                _gw = self._state[_p]")
+            lines.append(f"{indent}                break")
+            lines.append(f"{indent}        for _p in _uw_candidates:")
+            lines.append(f"{indent}            if _p in self._state:")
+            lines.append(f"{indent}                _uw = self._state[_p]")
+            lines.append(f"{indent}                break")
+            lines.append(f"{indent}        for _p in _dw_candidates:")
+            lines.append(f"{indent}            if _p in self._state:")
+            lines.append(f"{indent}                {down_w} = self._state[_p]")
+            lines.append(f"{indent}                break")
+            lines.append(f"{indent}        if _gw is None:")
+            lines.append(f"{indent}            raise KeyError(_gw_candidates[0])")
+            lines.append(f"{indent}        if _uw is None:")
+            lines.append(f"{indent}            raise KeyError(_uw_candidates[0])")
+            lines.append(f"{indent}        if {down_w} is None:")
+            lines.append(f"{indent}            raise KeyError(_dw_candidates[0])")
+            lines.append(f"{indent}        {gate} = F.linear({src}, _gw, None)")
+            lines.append(f"{indent}        {up} = F.linear({src}, _uw, None)")
             if activation in {"gelu_new", "gelu_pytorch_tanh"}:
                 lines.append(
-                    f"{indent}    {current_hidden} = 0.5 * {gate} * (1.0 + torch.tanh(0.7978845608028654 * ({gate} + 0.044715 * {gate} * {gate} * {gate}))) * {up}"
+                    f"{indent}    {hidden_var} = 0.5 * {gate} * (1.0 + torch.tanh(0.7978845608028654 * ({gate} + 0.044715 * {gate} * {gate} * {gate}))) * {up}"
                 )
             elif activation == "gelu":
-                lines.append(f"{indent}    {current_hidden} = F.gelu({gate}) * {up}")
+                lines.append(f"{indent}    {hidden_var} = F.gelu({gate}) * {up}")
             elif activation == "relu":
-                lines.append(f"{indent}    {current_hidden} = F.relu({gate}) * {up}")
+                lines.append(f"{indent}    {hidden_var} = F.relu({gate}) * {up}")
             elif activation == "silu":
-                lines.append(f"{indent}    {current_hidden} = F.silu({gate}) * {up}")
+                lines.append(f"{indent}    {hidden_var} = F.silu({gate}) * {up}")
             else:
-                raise ValueError(f"Unsupported moe_experts_ffn activation kind: {activation}")
+                raise ValueError(f"Unsupported moe_expert_ffn activation kind: {activation}")
+            lines.append(f"{indent}    {out_var} = F.linear({hidden_var}, {down_w}, None)")
+            return lines
+
+        if op == "moe_scatter_add":
+            ins = node_spec.get("in")
+            if not isinstance(ins, list) or len(ins) != 4:
+                raise ValueError("moe_scatter_add expects in=[accum,token_idx,updates,scores]")
+            accum = read(str(ins[0]))
+            token_idx = read(str(ins[1]))
+            updates = read(str(ins[2]))
+            scores = read(str(ins[3]))
+            out_name = str(node_spec.get("out"))
+            out_var = assign_out_var(out_name)
+            lines.append(f"{indent}{out_var} = {accum}")
+            lines.append(f"{indent}if {token_idx}.numel() != 0:")
+            lines.append(f"{indent}    _acc = {out_var}.reshape(-1, {out_var}.shape[-1])")
             lines.append(
-                f"{indent}    {current_hidden} = F.linear({current_hidden}, {down_w}, None)"
+                f"{indent}    _upd = {updates} * {scores}.unsqueeze(-1).to({updates}.dtype)"
             )
-            lines.append(
-                f"{indent}    {current_hidden} = {current_hidden} * {topk_scores}[{token_idx}, {topk_pos}].unsqueeze(-1).to({current_hidden}.dtype)"
-            )
-            lines.append(
-                f"{indent}    {final_hidden}.index_add_(0, {token_idx}, {current_hidden}.to({final_hidden}.dtype))"
-            )
-            lines.append(f"{indent}{out_var} = {final_hidden}.reshape_as({src})")
+            lines.append(f"{indent}    _acc.index_add_(0, {token_idx}, _upd.to(_acc.dtype))")
             return lines
 
         if op in {"add", "mul"}:
@@ -805,8 +925,9 @@ class _Emitter:
             lines.append(
                 f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype={q}.dtype) / float({half})))"
             )
+            offset = self._expr_code(node_spec.get("offset", 0), env)
             lines.append(
-                f"{indent}{pos} = torch.arange({q}.shape[-2], device={q}.device, dtype={q}.dtype)"
+                f"{indent}{pos} = torch.arange(int({offset}), int({offset}) + {q}.shape[-2], device={q}.device, dtype={q}.dtype)"
             )
             lines.append(f"{indent}{ang} = torch.einsum('t,d->td', {pos}, {inv_freq})")
             lines.append(f"{indent}{cos} = torch.cos({ang})[None, None, :, :]")
@@ -821,6 +942,19 @@ class _Emitter:
             lines.append(
                 f"{indent}{k_out} = torch.cat([{k1} * {cos} - {k2} * {sin}, {k1} * {sin} + {k2} * {cos}], dim=-1)"
             )
+            return lines
+
+        if op == "kv_seq_len":
+            ref = node_spec.get("in")
+            if not isinstance(ref, str):
+                raise ValueError("kv_seq_len.in must be string")
+            out_name = str(node_spec.get("out"))
+            out_var = assign_out_var(out_name)
+            src = read(ref)
+            lines.append(f"{indent}if {src} is None:")
+            lines.append(f"{indent}    {out_var} = 0")
+            lines.append(f"{indent}else:")
+            lines.append(f"{indent}    {out_var} = int({src}[0].shape[-2])")
             return lines
 
         if op == "repeat_kv":
@@ -1085,10 +1219,12 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
     known_runtime_builtin_ops = {
         "embedding",
         "linear",
-        "conv1d",
         "layernorm",
         "rmsnorm",
         "activation",
+        "softmax",
+        "topk",
+        "zeros_like",
         "add",
         "mul",
         "arange_positions",
@@ -1096,12 +1232,14 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
         "reshape_heads_triplet",
         "reshape_heads",
         "apply_rope_pair",
+        "kv_seq_len",
         "repeat_kv",
         "merge_heads",
         "attention",
         "causal_mask",
-        "moe_router_topk",
-        "moe_experts_ffn",
+        "moe_select_tokens",
+        "moe_expert_ffn",
+        "moe_scatter_add",
         "index",
         "init_list",
         "append",

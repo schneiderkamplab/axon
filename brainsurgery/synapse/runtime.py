@@ -264,20 +264,15 @@ class SynapseProgramModel(nn.Module):
                     node_spec, node_path=node_path, param_name="bias"
                 )
                 bias = self._state.get(bias_path)
+            weight_layout = str(node_spec.get("weight_layout", "oi"))
             out = self._require_name(node_spec.get("out"), field="linear.out")
-            env[out] = F.linear(x, weight, bias)
-            return
-
-        if op == "conv1d":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            weight = self._state[
-                self._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-            ]
-            bias = self._state[
-                self._infer_param_path(node_spec, node_path=node_path, param_name="bias")
-            ]
-            out = self._require_name(node_spec.get("out"), field="conv1d.out")
-            env[out] = torch.matmul(x, weight) + bias
+            if weight_layout == "oi":
+                env[out] = F.linear(x, weight, bias)
+            elif weight_layout == "io":
+                y = torch.matmul(x, weight)
+                env[out] = y + bias if bias is not None else y
+            else:
+                raise ValueError(f"Unsupported linear weight_layout: {weight_layout}")
             return
 
         if op == "layernorm":
@@ -331,121 +326,189 @@ class SynapseProgramModel(nn.Module):
                 raise ValueError(f"Unsupported activation kind: {kind}")
             return
 
-        if op == "moe_router_topk":
+        if op == "softmax":
             x = self._read_tensor_input(node_spec.get("in"), env)
-            outs = node_spec.get("out")
-            if not isinstance(outs, list) or len(outs) != 3:
-                raise ValueError(
-                    "moe_router_topk expects out=[router_probs,topk_scores,topk_indices]"
-                )
-            hidden_flat = x.reshape(-1, x.shape[-1])
-            weight = self._state[
-                self._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-            ]
-            bias = None
-            if node_spec.get("bias", False):
-                bias = self._state.get(
-                    self._infer_param_path(node_spec, node_path=node_path, param_name="bias")
-                )
-            router_logits = F.linear(hidden_flat, weight, bias)
-            num_experts = int(self._eval_expr(node_spec.get("num_experts"), env, symbols))
-            if router_logits.shape[-1] != num_experts:
-                raise ValueError(
-                    f"moe_router_topk num_experts mismatch: expected {num_experts}, got {router_logits.shape[-1]}"
-                )
-            softmax_dtype = str(node_spec.get("softmax_dtype", "float32"))
-            if softmax_dtype == "float32":
-                router_probs = F.softmax(router_logits, dim=-1, dtype=torch.float32)
+            out = self._require_name(node_spec.get("out"), field="softmax.out")
+            dim = int(self._eval_expr(node_spec.get("dim", -1), env, symbols))
+            dtype_name = node_spec.get("dtype")
+            if dtype_name is None:
+                env[out] = F.softmax(x, dim=dim)
             else:
-                router_probs = F.softmax(router_logits, dim=-1)
-            top_k = int(self._eval_expr(node_spec.get("k"), env, symbols))
-            topk_scores, topk_indices = torch.topk(router_probs, top_k, dim=-1)
-            if bool(node_spec.get("renorm_topk", False)):
-                topk_scores = topk_scores / topk_scores.sum(dim=-1, keepdim=True)
-            topk_scores = topk_scores.to(router_probs.dtype)
-            env[outs[0]] = router_probs
-            env[outs[1]] = topk_scores
-            env[outs[2]] = topk_indices
+                if not isinstance(dtype_name, str):
+                    raise ValueError("softmax dtype must be a string when provided")
+                dtype_map: dict[str, torch.dtype] = {
+                    "float32": torch.float32,
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                }
+                if dtype_name not in dtype_map:
+                    raise ValueError(f"Unsupported softmax dtype: {dtype_name}")
+                env[out] = F.softmax(x, dim=dim, dtype=dtype_map[dtype_name])
             return
 
-        if op == "moe_experts_ffn":
+        if op == "topk":
+            x = self._read_tensor_input(node_spec.get("in"), env)
+            outs = node_spec.get("out")
+            if not isinstance(outs, list) or len(outs) != 2:
+                raise ValueError("topk expects out=[values,indices]")
+            k = int(self._eval_expr(node_spec.get("k"), env, symbols))
+            dim = int(self._eval_expr(node_spec.get("dim", -1), env, symbols))
+            largest = bool(node_spec.get("largest", True))
+            sorted_flag = bool(node_spec.get("sorted", True))
+            values, indices = torch.topk(x, k, dim=dim, largest=largest, sorted=sorted_flag)
+            env[outs[0]] = values
+            env[outs[1]] = indices
+            return
+
+        if op == "zeros_like":
+            x = self._read_tensor_input(node_spec.get("in"), env)
+            out = self._require_name(node_spec.get("out"), field="zeros_like.out")
+            env[out] = torch.zeros_like(x)
+            return
+
+        if op == "moe_select_tokens":
             ins = node_spec.get("in")
-            if not isinstance(ins, list) or len(ins) != 3:
-                raise ValueError("moe_experts_ffn expects in=[hidden,topk_scores,topk_indices]")
+            outs = node_spec.get("out")
+            if (
+                not isinstance(ins, list)
+                or len(ins) != 3
+                or not isinstance(outs, list)
+                or len(outs) != 4
+            ):
+                raise ValueError(
+                    "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
+                    "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
+                )
             hidden = self._read_tensor_input(ins[0], env)
-            topk_scores_name = self._require_name(ins[1], field="moe_experts_ffn.in[1]")
-            topk_indices_name = self._require_name(ins[2], field="moe_experts_ffn.in[2]")
-            topk_scores = env[topk_scores_name]
-            topk_indices = env[topk_indices_name]
-            if not torch.is_tensor(topk_scores) or not torch.is_tensor(topk_indices):
-                raise ValueError("moe_experts_ffn topk_scores/topk_indices must be tensors")
+            topk_scores = self._read_tensor_input(ins[1], env)
+            topk_indices = self._read_tensor_input(ins[2], env)
+            expert = int(self._eval_expr(node_spec.get("expert"), env, symbols))
             hidden_flat = hidden.reshape(-1, hidden.shape[-1])
-            final_hidden = torch.zeros_like(hidden_flat)
-            num_experts = int(self._eval_expr(node_spec.get("num_experts"), env, symbols))
+            topk_scores_flat = topk_scores.reshape(-1, topk_scores.shape[-1])
+            topk_indices_flat = topk_indices.reshape(-1, topk_indices.shape[-1])
+            expert_pos = (topk_indices_flat == expert).nonzero(as_tuple=False)
+            token_idx = expert_pos[:, 0]
+            topk_pos = expert_pos[:, 1]
+            selected_hidden = hidden_flat[token_idx]
+            selected_scores = topk_scores_flat[token_idx, topk_pos].to(selected_hidden.dtype)
+            env[outs[0]] = selected_hidden
+            env[outs[1]] = token_idx
+            env[outs[2]] = topk_pos
+            env[outs[3]] = selected_scores
+            return
+
+        if op == "moe_expert_ffn":
+            x = self._read_tensor_input(node_spec.get("in"), env)
+            out = self._require_name(node_spec.get("out"), field="moe_expert_ffn.out")
+            expert = int(self._eval_expr(node_spec.get("expert"), env, symbols))
             experts_scope = node_spec.get("experts_scope", "experts")
             if not isinstance(experts_scope, str):
-                raise ValueError("moe_experts_ffn experts_scope must be string")
+                raise ValueError("moe_expert_ffn experts_scope must be string")
             experts_base = self._join(scope, experts_scope)
+            experts_parent = experts_base.rsplit(".", 1)[0] if "." in experts_base else ""
             gate_name = str(node_spec.get("gate_proj_name", "gate_proj.weight"))
             up_name = str(node_spec.get("up_proj_name", "up_proj.weight"))
             down_name = str(node_spec.get("down_proj_name", "down_proj.weight"))
             activation = str(node_spec.get("activation", "silu"))
-
             packed_gate_up = self._join(experts_base, "gate_up_proj")
             packed_down = self._join(experts_base, "down_proj")
+            packed_gate_up_parent = (
+                self._join(experts_parent, "gate_up_proj") if experts_parent else ""
+            )
+            packed_down_parent = self._join(experts_parent, "down_proj") if experts_parent else ""
 
-            for expert_idx in range(num_experts):
-                expert_pos = (topk_indices == expert_idx).nonzero(as_tuple=False)
-                if expert_pos.numel() == 0:
-                    continue
-                token_idx = expert_pos[:, 0]
-                topk_pos = expert_pos[:, 1]
-                current_state = hidden_flat[token_idx]
+            def resolve_expert_weight(name: str) -> torch.Tensor:
+                candidates = [
+                    self._join(experts_base, f"{expert}.{name}"),
+                    self._join(experts_base, name),
+                ]
+                if experts_parent:
+                    candidates.append(self._join(experts_parent, f"{expert}.{name}"))
+                    candidates.append(self._join(experts_parent, name))
+                for path in candidates:
+                    found = self._state.get(path)
+                    if found is not None:
+                        return found
+                raise KeyError(candidates[0])
 
-                if packed_gate_up in self._state and packed_down in self._state:
-                    packed_gate_up_w = self._state[packed_gate_up]
-                    if packed_gate_up_w.ndim == 3:
-                        packed_gate_up_w = packed_gate_up_w[expert_idx]
-                    gate, up = F.linear(current_state, packed_gate_up_w, None).chunk(2, dim=-1)
-                    down_w = self._state[packed_down]
-                    if down_w.ndim == 3:
-                        down_w = down_w[expert_idx]
-                else:
-                    gate_w = self._state[self._join(experts_base, f"{expert_idx}.{gate_name}")]
-                    up_w = self._state[self._join(experts_base, f"{expert_idx}.{up_name}")]
-                    down_w = self._state[self._join(experts_base, f"{expert_idx}.{down_name}")]
-                    gate = F.linear(current_state, gate_w, None)
-                    up = F.linear(current_state, up_w, None)
-
-                if activation in {"gelu_new", "gelu_pytorch_tanh"}:
-                    current_hidden = (
-                        0.5
-                        * gate
-                        * (
-                            1.0
-                            + torch.tanh(
-                                0.7978845608028654 * (gate + 0.044715 * gate * gate * gate)
-                            )
-                        )
-                        * up
-                    )
-                elif activation == "gelu":
-                    current_hidden = F.gelu(gate) * up
-                elif activation == "relu":
-                    current_hidden = F.relu(gate) * up
-                elif activation == "silu":
-                    current_hidden = F.silu(gate) * up
-                else:
-                    raise ValueError(f"Unsupported moe_experts_ffn activation kind: {activation}")
-
-                current_hidden = F.linear(current_hidden, down_w, None)
-                current_hidden = current_hidden * topk_scores[token_idx, topk_pos].unsqueeze(-1).to(
-                    current_hidden.dtype
+            if x.numel() == 0:
+                packed_down_key = (
+                    packed_down
+                    if packed_down in self._state
+                    else (packed_down_parent if packed_down_parent in self._state else None)
                 )
-                final_hidden.index_add_(0, token_idx, current_hidden.to(final_hidden.dtype))
+                if packed_down_key is not None:
+                    down_w_shape = self._state[packed_down_key].shape
+                    out_dim = int(down_w_shape[-2])
+                    env[out] = x.new_zeros((0, out_dim))
+                else:
+                    down_w = resolve_expert_weight(down_name)
+                    env[out] = x.new_zeros((0, int(down_w.shape[-2])))
+                return
 
-            out_name = self._require_name(node_spec.get("out"), field="moe_experts_ffn.out")
-            env[out_name] = final_hidden.reshape_as(hidden)
+            packed_gate_up_key = (
+                packed_gate_up
+                if packed_gate_up in self._state
+                else (packed_gate_up_parent if packed_gate_up_parent in self._state else None)
+            )
+            packed_down_key = (
+                packed_down
+                if packed_down in self._state
+                else (packed_down_parent if packed_down_parent in self._state else None)
+            )
+            if packed_gate_up_key is not None and packed_down_key is not None:
+                packed_gate_up_w = self._state[packed_gate_up_key]
+                if packed_gate_up_w.ndim == 3:
+                    packed_gate_up_w = packed_gate_up_w[expert]
+                gate, up = F.linear(x, packed_gate_up_w, None).chunk(2, dim=-1)
+                down_w = self._state[packed_down_key]
+                if down_w.ndim == 3:
+                    down_w = down_w[expert]
+            else:
+                gate_w = resolve_expert_weight(gate_name)
+                up_w = resolve_expert_weight(up_name)
+                down_w = resolve_expert_weight(down_name)
+                gate = F.linear(x, gate_w, None)
+                up = F.linear(x, up_w, None)
+
+            if activation in {"gelu_new", "gelu_pytorch_tanh"}:
+                hidden = (
+                    0.5
+                    * gate
+                    * (
+                        1.0
+                        + torch.tanh(0.7978845608028654 * (gate + 0.044715 * gate * gate * gate))
+                    )
+                    * up
+                )
+            elif activation == "gelu":
+                hidden = F.gelu(gate) * up
+            elif activation == "relu":
+                hidden = F.relu(gate) * up
+            elif activation == "silu":
+                hidden = F.silu(gate) * up
+            else:
+                raise ValueError(f"Unsupported moe_expert_ffn activation kind: {activation}")
+
+            env[out] = F.linear(hidden, down_w, None)
+            return
+
+        if op == "moe_scatter_add":
+            ins = node_spec.get("in")
+            if not isinstance(ins, list) or len(ins) != 4:
+                raise ValueError("moe_scatter_add expects in=[accum,token_idx,updates,scores]")
+            accum = self._read_tensor_input(ins[0], env)
+            token_idx = self._read_tensor_input(ins[1], env)
+            updates = self._read_tensor_input(ins[2], env)
+            scores = self._read_tensor_input(ins[3], env)
+            out = self._require_name(node_spec.get("out"), field="moe_scatter_add.out")
+            if token_idx.numel() == 0:
+                env[out] = accum
+                return
+            accum_flat = accum.reshape(-1, accum.shape[-1])
+            weighted = updates * scores.unsqueeze(-1).to(updates.dtype)
+            accum_flat.index_add_(0, token_idx, weighted.to(accum_flat.dtype))
+            env[out] = accum
             return
 
         if op == "add":
@@ -528,7 +591,8 @@ class SynapseProgramModel(nn.Module):
             inv_freq = 1.0 / (
                 theta ** (torch.arange(0, half, device=q.device, dtype=q.dtype) / float(half))
             )
-            pos = torch.arange(q.shape[-2], device=q.device, dtype=q.dtype)
+            offset = int(self._eval_expr(node_spec.get("offset", 0), env, symbols))
+            pos = torch.arange(offset, offset + q.shape[-2], device=q.device, dtype=q.dtype)
             ang = torch.einsum("t,d->td", pos, inv_freq)
             cos = torch.cos(ang)[None, None, :, :]
             sin = torch.sin(ang)[None, None, :, :]
@@ -536,6 +600,20 @@ class SynapseProgramModel(nn.Module):
             k1, k2 = k[..., :half], k[..., half : 2 * half]
             env[outs[0]] = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
             env[outs[1]] = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+            return
+
+        if op == "kv_seq_len":
+            ref = node_spec.get("in")
+            out_name = self._require_name(node_spec.get("out"), field="kv_seq_len.out")
+            if not isinstance(ref, str):
+                raise ValueError("kv_seq_len.in must be a string")
+            value = env.get(ref)
+            if value is None:
+                env[out_name] = 0
+                return
+            if not isinstance(value, tuple) or len(value) < 1 or not torch.is_tensor(value[0]):
+                raise ValueError("kv_seq_len expects kv tuple (k, v)")
+            env[out_name] = int(value[0].shape[-2])
             return
 
         if op == "repeat_kv":
