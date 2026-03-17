@@ -55,6 +55,19 @@ def test_main_preserves_explicit_webui_subcommand(monkeypatch) -> None:
     assert calls == [(["webui", "--port", "9010"], "brainsurgery")]
 
 
+def test_main_preserves_explicit_synapse_subcommand(monkeypatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    def _fake_app(*, args, prog_name):  # type: ignore[no-untyped-def]
+        calls.append((list(args), prog_name))
+
+    monkeypatch.setattr(brainsurgery, "app", _fake_app)
+
+    brainsurgery.main(["synapse", "emit-gpt2", "spec.yaml", "out.py"])
+
+    assert calls == [(["synapse", "emit-gpt2", "spec.yaml", "out.py"], "brainsurgery")]
+
+
 def test_main_reorders_cli_options_after_config_items(monkeypatch) -> None:
     calls: list[tuple[list[str], str]] = []
 
