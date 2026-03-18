@@ -292,6 +292,11 @@ def run_axon_test(
         attention_mask = inputs.get("attention_mask")
         if attention_mask is not None:
             hf_inputs["attention_mask"] = attention_mask
+        use_mask_for_syn = bool(attention_mask is not None)
+        if use_mask_for_syn and len(prompts) == 1:
+            # Single unpadded prompt does not need an explicit mask on the Synapse side.
+            # Keeping it unset avoids extra per-step mask materialization in KV decode.
+            use_mask_for_syn = bool((attention_mask == 0).any())
 
         def _run_hf_generate(model: Any = hf) -> torch.Tensor:
             return model.generate(
@@ -327,7 +332,7 @@ def run_axon_test(
                 "eos_token_id": tokenizer_obj.eos_token_id,
                 "max_len": max_len,
             }
-            if attention_mask is not None:
+            if use_mask_for_syn and attention_mask is not None:
                 if syn_mask_key == "attn_mask":
                     generate_kwargs["attn_mask"] = attention_mask
                 elif syn_mask_key == "attention_mask":
@@ -336,7 +341,7 @@ def run_axon_test(
 
         syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
         syn_inputs: dict[str, Any] = {"input_ids": input_ids}
-        if attention_mask is not None and syn_mask_key is not None:
+        if use_mask_for_syn and attention_mask is not None and syn_mask_key is not None:
             syn_inputs[syn_mask_key] = attention_mask
         with torch.no_grad():
             syn_logits = _extract_logits(syn(**syn_inputs))

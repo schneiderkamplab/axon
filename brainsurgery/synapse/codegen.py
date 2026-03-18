@@ -240,6 +240,8 @@ class _Emitter:
             "                        logits = model_out['logits']",
             "                        if 'past_key_values' in model_out:",
             "                            past_key_values = model_out['past_key_values']",
+            "                        elif 'present_key_values' in model_out:",
+            "                            past_key_values = model_out['present_key_values']",
             "                    else:",
             "                        logits = model_out",
             "                    next_token = torch.argmax(logits[:, -1, :], dim=-1)",

@@ -143,22 +143,32 @@ class SynapseProgramModel(nn.Module):
 
         generated = input_ids
         generated_mask = mask
+        past_key_values = None
         finished = torch.zeros(generated.size(0), dtype=torch.bool, device=generated.device)
         was_training = self.training
         self.eval()
         try:
             with torch.no_grad():
                 while generated.size(1) < max_len and not torch.all(finished):
+                    step_input = generated if past_key_values is None else generated[:, -1:]
                     if generated_mask is None:
-                        model_out = self.forward(generated)
+                        model_out = self.forward(
+                            step_input, past_key_values=past_key_values, use_cache=True
+                        )
                     else:
                         model_out = self.forward(
-                            generated,
+                            step_input,
                             attention_mask=generated_mask,
                             attn_mask=generated_mask,
+                            past_key_values=past_key_values,
+                            use_cache=True,
                         )
                     if isinstance(model_out, dict):
                         logits = model_out["logits"]
+                        if "past_key_values" in model_out:
+                            past_key_values = model_out["past_key_values"]
+                        elif "present_key_values" in model_out:
+                            past_key_values = model_out["present_key_values"]
                     else:
                         logits = model_out
                     next_token = torch.argmax(logits[:, -1, :], dim=-1)

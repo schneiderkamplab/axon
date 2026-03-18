@@ -39,15 +39,28 @@ def interpret(
     i_idx = torch.arange(q_len, device=q.device).unsqueeze(1)
     j_idx = torch.arange(k_len, device=q.device).unsqueeze(0)
 
-    if window_expr is None:
-        keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
+    if q_len == 1:
+        if window_expr is None:
+            keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
+            if padding_mask is None:
+                env[out_name] = None
+                return
+        else:
+            win = int(model._eval_expr(window_expr, env, symbols))
+            if win >= k_len and padding_mask is None:
+                env[out_name] = None
+                return
+            keep = j_idx >= (k_len - win)
     else:
-        keep = j_idx <= i_idx
-        win = int(model._eval_expr(window_expr, env, symbols))
-        if win >= k_len and q_len == k_len and padding_mask is None:
-            env[out_name] = None
-            return
-        keep = keep & (j_idx >= (i_idx - win + 1))
+        if window_expr is None:
+            keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
+        else:
+            keep = j_idx <= i_idx
+            win = int(model._eval_expr(window_expr, env, symbols))
+            if win >= k_len and q_len == k_len and padding_mask is None:
+                env[out_name] = None
+                return
+            keep = keep & (j_idx >= (i_idx - win + 1))
 
     if padding_mask is not None:
         if padding_mask.ndim != 2:
@@ -109,7 +122,6 @@ def compile(
         return lines
     lines.append(f"{indent}{q_len} = {q}.shape[-2]")
     lines.append(f"{indent}{k_len} = {k}.shape[-2]")
-    lines.append(f"{indent}{i_idx} = torch.arange({q_len}, device={q}.device).unsqueeze(1)")
     lines.append(f"{indent}{j_idx} = torch.arange({k_len}, device={q}.device).unsqueeze(0)")
     if window_expr is None:
         lines.append(
@@ -118,19 +130,13 @@ def compile(
     else:
         win = emitter._fresh("window")
         window_code = emitter._expr_code(window_expr, env)
-        lines.append(f"{indent}{keep} = ({j_idx} <= {i_idx})")
         lines.append(f"{indent}{win} = int({window_code})")
-        if padding_expr is None:
-            lines.append(f"{indent}if {win} >= {k_len} and {q_len} == {k_len}:")
-            lines.append(f"{indent}    {out_var} = None")
-            lines.append(f"{indent}else:")
-            lines.append(f"{indent}    {keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
-            lines.append(f"{indent}    {mask_val} = torch.finfo({q}.dtype).min")
-            lines.append(
-                f"{indent}    {out_var} = torch.where({keep}.view(1, 1, {q_len}, {k_len}), torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
-            )
-            return lines
-        lines.append(f"{indent}{keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
+        lines.append(f"{indent}if {q_len} == 1:")
+        lines.append(f"{indent}    {keep} = ({j_idx} >= ({k_len} - {win}))")
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {i_idx} = torch.arange({q_len}, device={q}.device).unsqueeze(1)")
+        lines.append(f"{indent}    {keep} = ({j_idx} <= {i_idx})")
+        lines.append(f"{indent}    {keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
 
     if padding_expr is not None:
         pad_keep = emitter._fresh("pad_keep")

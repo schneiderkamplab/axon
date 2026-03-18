@@ -25,6 +25,7 @@ def interpret(
     seq_len = x.shape[1]
     mask_ref = node_spec.get("attention_mask")
     mask_tensor = env.get(mask_ref) if isinstance(mask_ref, str) else None
+    past = env.get("past_key_values")
     out = model._require_name(node_spec.get("out"), field="arange_positions.out")
     if mask_tensor is not None:
         if not torch.is_tensor(mask_tensor):
@@ -43,7 +44,10 @@ def interpret(
         env[out] = full_pos[:, -seq_len:]
         return
 
-    env[out] = torch.arange(seq_len, device=x.device, dtype=torch.long).unsqueeze(0)
+    offset = 0 if past is None else int(past[0][0].shape[-2])
+    env[out] = torch.arange(offset, offset + seq_len, device=x.device, dtype=torch.long).unsqueeze(
+        0
+    )
     return
 
 
@@ -70,10 +74,12 @@ def compile(
     src = read(str(node_spec.get("in")))
     mask_name = node_spec.get("attention_mask")
     mask = env.get(mask_name) if isinstance(mask_name, str) and mask_name in env else None
+    past_var = env.get("past_key_values")
     out_name = str(node_spec.get("out"))
     out_var = assign_out_var(out_name)
     if isinstance(mask, str):
         full_pos = emitter._fresh("full_pos")
+        offset = emitter._fresh("pos_offset")
         lines.append(f"{indent}if {mask} is not None:")
         lines.append(f"{indent}    if {mask}.ndim != 2:")
         lines.append(
@@ -91,12 +97,19 @@ def compile(
         lines.append(f"{indent}    {full_pos} = {full_pos}.masked_fill({mask} == 0, 0)")
         lines.append(f"{indent}    {out_var} = {full_pos}[:, -{src}.shape[1]:]")
         lines.append(f"{indent}else:")
-        lines.append(
-            f"{indent}    {out_var} = torch.arange({src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
-        )
+        if isinstance(past_var, str):
+            lines.append(
+                f"{indent}    {offset} = 0 if {past_var} is None else int({past_var}[0][0].shape[-2])"
+            )
+            lines.append(
+                f"{indent}    {out_var} = torch.arange({offset}, {offset} + {src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
+            )
+        else:
+            lines.append(
+                f"{indent}    {out_var} = torch.arange({src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
+            )
         return lines
 
-    past_var = env.get("past_key_values")
     if isinstance(past_var, str):
         offset = emitter._fresh("pos_offset")
         lines.append(
