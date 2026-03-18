@@ -60,15 +60,19 @@ def _extract_logits(output: Any) -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
-    ("yaml_name", "axon_name"),
+    ("yaml_name", "axon_name", "expected_symbols"),
     [
-        ("gpt2_synapse.yaml", "gpt2.axon"),
-        ("gemma3_270m_synapse.yaml", "gemma3_270m.axon"),
-        ("olmoe_1b_7b_0924_synapse.yaml", "olmoe_1b_7b_0924.axon"),
+        (
+            "gpt2_synapse.yaml",
+            "gpt2.axon",
+            {"D": 768, "L": 12, "H": 12, "V": None, "EPS": 1e-05, "B": None, "T": None},
+        ),
+        ("gemma3_270m_synapse.yaml", "gemma3_270m.axon", None),
+        ("olmoe_1b_7b_0924_synapse.yaml", "olmoe_1b_7b_0924.axon", None),
     ],
 )
 def test_axon_files_roundtrip_to_original_synapse_spec(
-    repo_root: Path, yaml_name: str, axon_name: str
+    repo_root: Path, yaml_name: str, axon_name: str, expected_symbols: dict[str, object] | None
 ) -> None:
     expected = _load_yaml_mapping(repo_root / "examples" / yaml_name)
     lowered = _load_axon_spec(repo_root / "examples" / axon_name)
@@ -77,7 +81,7 @@ def test_axon_files_roundtrip_to_original_synapse_spec(
         expected.get("model", {}).get("inputs", {}).keys()
     )
     assert lowered.get("model", {}).get("outputs") == expected.get("model", {}).get("outputs")
-    assert lowered.get("model", {}).get("symbols") is None
+    assert lowered.get("model", {}).get("symbols") == expected_symbols
     assert set(lowered.get("model", {}).get("blocks", {}).keys()) == set(
         expected.get("model", {}).get("blocks", {}).keys()
     )

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 class AxonParam:
     name: str
     optional: bool = False
+    type_expr: str | None = None
+    shape: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class AxonModule:
     params: tuple[AxonParam, ...]
     returns: tuple[str, ...]
     statements: tuple[AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat, ...]
+    return_type_expr: str | None = None
+    return_shape: tuple[str, ...] | None = None
 
 
 __all__ = [

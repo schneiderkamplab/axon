@@ -79,6 +79,125 @@ module tiny(x) -> (y) do
     assert repeat_node["range"] == "(4) - (1)"
 
 
+def test_parse_top_level_haskell_constants_across_modules() -> None:
+    source = """
+D = 768
+
+id_block :: Tensor -> Tensor
+id_block x = do
+  return x
+
+eps = 1e-05
+
+main :: Tensor -> Tensor
+main x = do
+  y <- layernorm x dim=D eps=eps
+  return y
+"""
+    modules = parse_axon_program(source)
+    assert [m.name for m in modules] == ["id_block", "main"]
+    spec = lower_axon_program_to_synapse_spec(modules)
+    symbols = spec["model"].get("symbols")
+    assert symbols == {"D": 768, "eps": 1e-05}
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "layernorm"
+    assert node_specs[0]["dim"] == "D"
+    assert node_specs[0]["eps"] == "eps"
+
+
+def test_type_shape_annotations_expose_symbols_and_infer_layernorm_dim() -> None:
+    source = """
+gpt2_block :: Tensor[B,T,D] -> Tensor[B,T,D]
+gpt2_block x = do
+  y <- layernorm@ln_1 x eps=1e-05
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    symbols = spec["model"].get("symbols")
+    assert symbols == {"B": None, "T": None, "D": None}
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "layernorm"
+    assert node_specs[0]["in"] == "x"
+    assert node_specs[0]["dim"] == "D"
+
+
+def test_type_shape_annotations_infer_rmsnorm_dim() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- rmsnorm@n x eps=1e-06
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "rmsnorm"
+    assert node_specs[0]["in"] == "x"
+    assert node_specs[0]["dim"] == "D"
+
+
+def test_infer_split_last_sizes_from_known_last_dim() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  qkv <- linear x out_features=3*D
+  q, k, v <- split_last qkv
+  return q
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[1]["op"] == "split_last"
+    assert node_specs[1]["sizes"] == ["D", "D", "D"]
+
+
+def test_infer_linear_out_features_from_return_shape() -> None:
+    source = """
+gpt2 :: TokenIds[B,T] -> Tensor[B,T,V]
+gpt2 input_ids = do
+  h <- embedding@wte input_ids num_embeddings=V embedding_dim=D
+  logits <- linear h tie_weight=wte.weight
+  return logits
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[1]["op"] == "linear"
+    assert node_specs[1]["in"] == "h"
+    assert node_specs[1]["out"] == "logits"
+    assert node_specs[1]["out_features"] == "V"
+
+
+def test_infer_embedding_dim_from_typed_output_shape() -> None:
+    source = """
+emb :: TokenIds[B,T] -> Tensor[B,T,D]
+emb ids = do
+  x <- embedding ids num_embeddings=V
+  return x
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "embedding"
+    assert node_specs[0]["embedding_dim"] == "D"
+
+
+def test_infer_repeat_kv_heads_and_kv_heads_from_typed_shapes() -> None:
+    source = """
+rk :: Tensor[B,Kh,T,Hd] -> Tensor[B,H,T,Hd]
+rk k = do
+  k_ctx <- repeat_kv k
+  return k_ctx
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "repeat_kv"
+    assert node_specs[0]["kv_heads"] == "Kh"
+    assert node_specs[0]["heads"] == "H"
+
+
 def test_parse_axon_ignores_haskell_style_comments() -> None:
     source = """
 -- leading comment
@@ -147,7 +266,7 @@ module tiny(x) -> (y) do
 def test_lower_return_pipeline_expression_to_named_output() -> None:
     source = """
 module tiny(x, wte) -> (logits) do
-  return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear(out_dim=50257, tie_weight=wte.weight)
+  return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear(out_features=50257, tie_weight=wte.weight)
 """
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
@@ -164,7 +283,7 @@ module tiny(x, wte) -> (logits) do
         "op": "linear",
         "in": "pipe_1",
         "out": "logits",
-        "out_dim": 50257,
+        "out_features": 50257,
         "tie_weight": "wte.weight",
     }
     assert spec["model"]["outputs"] == {"logits": "logits"}

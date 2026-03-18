@@ -14,6 +14,8 @@ _REPEAT_RE = re.compile(
 _FOR_AT_RANGE_RE = re.compile(
     r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*\[(.+?)\.\.(.+?)\]\s+do\s*$"
 )
+_TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+_TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
 
 
 def _strip_haskell_comment(line: str) -> str:
@@ -101,9 +103,102 @@ def _parse_params(raw: str) -> tuple[AxonParam, ...]:
     return tuple(out)
 
 
+def _shape_dims_from_type(type_expr: str) -> tuple[str, ...] | None:
+    match = _TYPE_SHAPE_RE.match(type_expr.strip())
+    if match is None:
+        return None
+    dims = tuple(
+        part.strip() for part in _split_top_level_csv(match.group(1).strip()) if part.strip()
+    )
+    if not dims:
+        return None
+    return dims
+
+
+def _parse_const_scalar(token: str) -> object:
+    value = token.strip()
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    if value.lower() == "null":
+        return None
+    if value and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")):
+        return value[1:-1]
+    if re.fullmatch(r"-?[0-9]+", value):
+        return int(value)
+    if re.fullmatch(r"-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?", value):
+        return float(value)
+    return value
+
+
+def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str, object]]:
+    body: list[str] = []
+    constants: dict[str, object] = {}
+    for line in lines:
+        if len(line) != len(line.lstrip(" ")):
+            body.append(line)
+            continue
+        stripped = line.strip()
+        match = _TOP_CONST_RE.match(stripped)
+        if (
+            match is not None
+            and _HEADER_RE.match(stripped) is None
+            and _SIG_RE.match(stripped) is None
+            and _DEF_RE.match(stripped) is None
+            and stripped != "do"
+        ):
+            constants[match.group(1)] = _parse_const_scalar(match.group(2))
+            continue
+        body.append(line)
+    return body, constants
+
+
+def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> AxonModule:
+    if not symbols:
+        return module
+    updated = list(module.statements)
+    for idx, stmt in enumerate(updated):
+        if not isinstance(stmt, AxonMeta) or stmt.key != "symbols":
+            continue
+        if not isinstance(stmt.value, dict):
+            raise ValueError("meta symbols must be a JSON object to merge top-level constants")
+        merged = dict(symbols)
+        merged.update({str(k): v for k, v in stmt.value.items()})
+        updated[idx] = AxonMeta(key="symbols", value=merged)
+        return AxonModule(
+            name=module.name,
+            params=module.params,
+            returns=module.returns,
+            statements=tuple(updated),
+            return_type_expr=module.return_type_expr,
+            return_shape=module.return_shape,
+        )
+    updated.append(AxonMeta(key="symbols", value=dict(symbols)))
+    return AxonModule(
+        name=module.name,
+        params=module.params,
+        returns=module.returns,
+        statements=tuple(updated),
+        return_type_expr=module.return_type_expr,
+        return_shape=module.return_shape,
+    )
+
+
 def _parse_haskell_header(
     lines: list[str],
-) -> tuple[str, tuple[AxonParam, ...], tuple[str, ...], int] | None:
+) -> (
+    tuple[
+        str,
+        tuple[AxonParam, ...],
+        tuple[str, ...],
+        int,
+        dict[str, object],
+        str | None,
+        tuple[str, ...] | None,
+    ]
+    | None
+):
     if len(lines) < 2:
         return None
     sig_match = _SIG_RE.match(lines[0])
@@ -121,6 +216,7 @@ def _parse_haskell_header(
     if len(parts) < 1:
         raise ValueError("invalid Axon type signature")
     arg_types = parts[:-1]
+    raw_return_type = parts[-1].strip()
     opt_flags = [arg.strip().startswith("?") for arg in arg_types]
 
     arg_names = [p for p in def_match.group(2).strip().split() if p]
@@ -128,16 +224,34 @@ def _parse_haskell_header(
         raise ValueError(
             f"signature arg count ({len(opt_flags)}) does not match definition args ({len(arg_names)})"
         )
-    params = tuple(
-        AxonParam(name=arg_name.strip(), optional=opt_flags[idx])
-        for idx, arg_name in enumerate(arg_names)
-    )
+    annotation_symbols: dict[str, object] = {}
+    params_out: list[AxonParam] = []
+    for idx, arg_name in enumerate(arg_names):
+        raw_type = arg_types[idx].strip()
+        clean_type = raw_type[1:].strip() if raw_type.startswith("?") else raw_type
+        shape = _shape_dims_from_type(clean_type)
+        if shape is not None:
+            for dim in shape:
+                annotation_symbols.setdefault(dim, None)
+        params_out.append(
+            AxonParam(
+                name=arg_name.strip(),
+                optional=opt_flags[idx],
+                type_expr=clean_type,
+                shape=shape,
+            )
+        )
+    ret_shape = _shape_dims_from_type(raw_return_type)
+    if ret_shape is not None:
+        for dim in ret_shape:
+            annotation_symbols.setdefault(dim, None)
+    params = tuple(params_out)
     # Haskell-style signatures carry output types, not names. Return names will be inferred from `return`.
-    return name_sig, params, (), 2
+    return name_sig, params, (), 2, annotation_symbols, raw_return_type, ret_shape
 
 
 def parse_axon_module(source: str) -> AxonModule:
-    lines = _normalized_source_lines(source)
+    lines, top_constants = _extract_top_level_constants(_normalized_source_lines(source))
     if not lines:
         raise ValueError("empty Axon source")
 
@@ -147,6 +261,8 @@ def parse_axon_module(source: str) -> AxonModule:
         params = _parse_params(header_match.group(2))
         returns = tuple(part.strip() for part in _split_top_level_csv(header_match.group(3)))
         body_start = 1
+        return_type_expr: str | None = None
+        return_shape: tuple[str, ...] | None = None
     else:
         parsed = _parse_haskell_header(lines)
         if parsed is None:
@@ -154,19 +270,43 @@ def parse_axon_module(source: str) -> AxonModule:
                 "expected module header or haskell-style pair: "
                 "'module <name>(...) -> (...) do' OR '<name> :: ...' + '<name> ... = do'"
             )
-        module_name, params, returns, body_start = parsed
+        (
+            module_name,
+            params,
+            returns,
+            body_start,
+            annotation_symbols,
+            return_type_expr,
+            return_shape,
+        ) = parsed
+    if header_match is not None:
+        annotation_symbols = {}
 
     entries = _line_entries(lines[body_start:])
     if not entries:
-        return AxonModule(name=module_name, params=params, returns=returns, statements=())
+        return AxonModule(
+            name=module_name,
+            params=params,
+            returns=returns,
+            statements=(),
+            return_type_expr=return_type_expr,
+            return_shape=return_shape,
+        )
     base_indent = min(indent for indent, _ in entries)
     statements, index = _parse_statements(entries, 0, base_indent)
     if index != len(entries):
         raise ValueError("unexpected trailing lines in module body")
 
-    return AxonModule(
-        name=module_name, params=params, returns=returns, statements=tuple(statements)
+    module = AxonModule(
+        name=module_name,
+        params=params,
+        returns=returns,
+        statements=tuple(statements),
+        return_type_expr=return_type_expr,
+        return_shape=return_shape,
     )
+    module = _inject_symbols_meta(module, annotation_symbols)
+    return _inject_symbols_meta(module, top_constants)
 
 
 def _parse_simple_line(line: str) -> AxonBind | AxonReturn | AxonRawNode | AxonMeta:
@@ -267,7 +407,7 @@ def _parse_statements(
 
 
 def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
-    raw_lines = _normalized_source_lines(source)
+    raw_lines, top_constants = _extract_top_level_constants(_normalized_source_lines(source))
     module_starts: list[int] = []
     for idx, line in enumerate(raw_lines):
         if len(line) != len(line.lstrip(" ")):
@@ -285,6 +425,8 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
         if not chunk:
             continue
         modules.append(parse_axon_module(chunk))
+    if modules:
+        modules[-1] = _inject_symbols_meta(modules[-1], top_constants)
     return tuple(modules)
 
 

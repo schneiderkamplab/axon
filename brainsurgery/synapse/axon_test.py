@@ -4,6 +4,7 @@ import gc
 import importlib.util
 import json
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -181,12 +182,25 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     return out, dt
 
 
+def _normalize_texts(text: str | Sequence[str]) -> list[str]:
+    if isinstance(text, str):
+        return [text]
+    out: list[str] = []
+    for item in text:
+        if not isinstance(item, str):
+            raise ValueError("All prompts passed via --text must be strings")
+        out.append(item)
+    if not out:
+        return ["The future of AI is"]
+    return out
+
+
 def run_axon_test(
     *,
     axon_file: Path,
     weights: Path,
     device: str = "cpu",
-    text: str = "The future of AI is",
+    text: str | Sequence[str] = "The future of AI is",
     max_len: int = 32,
     hf_model_dir: Path | None = None,
     tokenizer: str | None = None,
@@ -216,6 +230,7 @@ def run_axon_test(
         ):
             tokenizer_source = str(candidate_old)
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
+    prompts = _normalize_texts(text)
 
     with TemporaryDirectory(prefix="axon_benchmark_") as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -250,12 +265,28 @@ def run_axon_test(
             hf.generation_config.top_p = None
             hf.generation_config.top_k = None
 
-        inputs = tokenizer_obj(text, return_tensors="pt").to(resolved_device)
+        if len(prompts) > 1:
+            tokenizer_obj.padding_side = "left"
+            if tokenizer_obj.pad_token_id is None:
+                if tokenizer_obj.eos_token_id is None:
+                    raise ValueError(
+                        "Tokenizer has no pad token and no eos token; cannot batch prompts with padding."
+                    )
+                tokenizer_obj.pad_token = tokenizer_obj.eos_token
+        inputs = tokenizer_obj(
+            prompts,
+            return_tensors="pt",
+            padding=(len(prompts) > 1),
+        ).to(resolved_device)
         input_ids = inputs["input_ids"]
+        hf_inputs: dict[str, Any] = {"input_ids": input_ids}
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None and len(prompts) == 1:
+            hf_inputs["attention_mask"] = attention_mask
 
         def _run_hf_generate(model: Any = hf) -> torch.Tensor:
             return model.generate(
-                **inputs,
+                **hf_inputs,
                 max_new_tokens=max(1, max_len - int(input_ids.shape[1])),
                 eos_token_id=tokenizer_obj.eos_token_id,
                 pad_token_id=tokenizer_obj.eos_token_id,
@@ -263,7 +294,7 @@ def run_axon_test(
 
         hf_gen, hf_time = _time_generate("HF", _run_hf_generate)
         with torch.no_grad():
-            hf_logits = hf(input_ids=input_ids, use_cache=False).logits
+            hf_logits = hf(**hf_inputs, use_cache=False).logits
 
         del hf
         _cleanup(resolved_device)
@@ -309,7 +340,7 @@ def run_axon_test(
         print(f"HF model dir:   {resolved_hf_model_dir}")
         print(f"Tokenizer:      {tokenizer_source}")
         print(f"Device:         {resolved_device}")
-        print(f"Prompt:         {text!r}")
+        print(f"Prompts:        {len(prompts)}")
         print()
         print(
             f"HF:             {hf_time:.4f}s total, {gen_hf / max(hf_time, 1e-9):.2f} tok/s, generated={gen_hf}"
@@ -319,12 +350,13 @@ def run_axon_test(
         )
         print(f"Speed ratio (Axon/HF): {syn_time / max(hf_time, 1e-9):.3f}x")
         print()
-        print("HF completion:")
-        print(tokenizer_obj.decode(hf_gen[0].tolist(), skip_special_tokens=True))
-        print()
-        print("Axon-derived completion:")
-        print(tokenizer_obj.decode(syn_gen[0].tolist(), skip_special_tokens=True))
-        print()
+        for idx, prompt in enumerate(prompts):
+            print(f"Prompt[{idx}]: {prompt!r}")
+            print("HF completion:")
+            print(tokenizer_obj.decode(hf_gen[idx].tolist(), skip_special_tokens=True))
+            print("Axon-derived completion:")
+            print(tokenizer_obj.decode(syn_gen[idx].tolist(), skip_special_tokens=True))
+            print()
         print(
             "Logits diff | mean/max/last_max/top1_eq:", mean_diff, max_diff, last_max_diff, top1_eq
         )
@@ -337,6 +369,7 @@ def run_axon_test(
             "max_diff": max_diff,
             "last_max_diff": last_max_diff,
             "top1_eq": top1_eq,
+            "prompts": prompts,
             "generated_hf": hf_gen,
             "generated_axon": syn_gen,
         }

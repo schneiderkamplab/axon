@@ -203,10 +203,10 @@ def axon_test(
         "--device",
         help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
     ),
-    text: str = typer.Option(
-        "The future of AI is",
+    text: list[str] = typer.Option(
+        ["The future of AI is"],
         "--text",
-        help="Prompt text to complete.",
+        help="Prompt text to complete. Repeat --text for batched prompts.",
     ),
     max_len: int = typer.Option(
         32,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .types import AxonBind, AxonMeta, AxonModule, AxonRawNode, AxonRepeat, AxonReturn
@@ -187,6 +187,8 @@ def _to_synapse_op(
 class _LowerCtx:
     counter: int = 0
     block_signatures: dict[str, tuple[list[str], list[str]]] | None = None
+    tensor_last_dim: dict[str, Any] = field(default_factory=dict)
+    tensor_heads: dict[str, Any] = field(default_factory=dict)
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
@@ -205,10 +207,168 @@ def _with_when(nodes: list[dict[str, Any]], when: str | None) -> list[dict[str, 
     return out
 
 
+def _op_name_from_callee(callee: str) -> str:
+    if "@" in callee:
+        return callee.split("@", 1)[0]
+    if "::" in callee:
+        return callee.split("::", 1)[1]
+    return callee
+
+
+def _maybe_int_list(value: Any) -> list[int] | None:
+    if isinstance(value, list):
+        try:
+            return [int(v) for v in value]
+        except Exception:
+            return None
+    if isinstance(value, str) and value.strip().startswith("[") and value.strip().endswith("]"):
+        try:
+            parsed = ast.literal_eval(value)
+        except Exception:
+            return None
+        if isinstance(parsed, list):
+            try:
+                return [int(v) for v in parsed]
+            except Exception:
+                return None
+    return None
+
+
+def _infer_split_sizes_from_last_dim(last_dim: Any, parts: int) -> list[Any] | None:
+    if parts <= 0:
+        return None
+    if isinstance(last_dim, int):
+        if last_dim % parts != 0:
+            return None
+        return [last_dim // parts for _ in range(parts)]
+    if not isinstance(last_dim, str):
+        return None
+    token = last_dim.strip().replace(" ", "")
+    if not token:
+        return None
+    if re.fullmatch(r"-?[0-9]+", token):
+        value = int(token)
+        if value % parts != 0:
+            return None
+        return [value // parts for _ in range(parts)]
+    m = re.fullmatch(r"([0-9]+)\*(.+)", token)
+    if m is None:
+        m = re.fullmatch(r"(.+)\*([0-9]+)", token)
+        if m is None:
+            return None
+        term = m.group(1)
+        factor = int(m.group(2))
+    else:
+        factor = int(m.group(1))
+        term = m.group(2)
+    if factor % parts != 0:
+        return None
+    each = factor // parts
+    piece: Any = term if each == 1 else f"{each}*{term}"
+    return [piece for _ in range(parts)]
+
+
+def _record_last_dim_for_call(
+    *, callee: str, args: list[str], kwargs: dict[str, Any], out: str | list[str], ctx: _LowerCtx
+) -> None:
+    op_name = _op_name_from_callee(callee)
+    first_in = args[0].strip() if args else None
+    first_dim = (
+        ctx.tensor_last_dim.get(first_in)
+        if isinstance(first_in, str) and _is_name_token(first_in)
+        else None
+    )
+
+    if isinstance(out, list):
+        if op_name == "split_last":
+            sizes = _maybe_int_list(kwargs.get("sizes"))
+            if sizes is not None and len(sizes) == len(out):
+                for name, dim in zip(out, sizes, strict=True):
+                    ctx.tensor_last_dim[name] = dim
+            return
+        if op_name == "reshape_heads_triplet":
+            heads = kwargs.get("heads")
+            head_dim = kwargs.get("head_dim")
+            if head_dim is not None:
+                for name in out:
+                    ctx.tensor_last_dim[name] = head_dim
+            if heads is not None:
+                for name in out:
+                    ctx.tensor_heads[name] = heads
+            return
+        return
+
+    last_dim: Any | None = None
+    if op_name in {"layernorm", "rmsnorm", "activation", "add", "mul", "merge_heads"}:
+        last_dim = first_dim
+    elif op_name == "embedding":
+        last_dim = kwargs.get("embedding_dim")
+    elif op_name == "linear":
+        last_dim = kwargs.get("out_features", kwargs.get("out_dim", first_dim))
+
+    if last_dim is not None:
+        ctx.tensor_last_dim[out] = last_dim
+    if op_name == "reshape_heads":
+        heads = kwargs.get("heads")
+        if heads is not None:
+            ctx.tensor_heads[out] = heads
+    if op_name == "repeat_kv":
+        heads = kwargs.get("heads")
+        if heads is not None:
+            ctx.tensor_heads[out] = heads
+
+
 def _lower_simple_call(
     expr: str, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
+    if _op_name_from_callee(callee) in {"layernorm", "rmsnorm"} and "dim" not in kwargs and args:
+        first_arg = args[0].strip()
+        if _is_name_token(first_arg):
+            inferred = ctx.tensor_last_dim.get(first_arg)
+            if inferred is not None:
+                kwargs["dim"] = inferred
+    if (
+        _op_name_from_callee(callee) == "linear"
+        and "out_features" not in kwargs
+        and "out_dim" not in kwargs
+        and isinstance(out, str)
+    ):
+        inferred = ctx.tensor_last_dim.get(out)
+        if inferred is not None:
+            kwargs["out_features"] = inferred
+    if (
+        _op_name_from_callee(callee) == "embedding"
+        and "embedding_dim" not in kwargs
+        and isinstance(out, str)
+    ):
+        inferred = ctx.tensor_last_dim.get(out)
+        if inferred is not None:
+            kwargs["embedding_dim"] = inferred
+    if _op_name_from_callee(callee) == "repeat_kv" and args:
+        src_name = args[0].strip()
+        if _is_name_token(src_name):
+            if "kv_heads" not in kwargs:
+                inferred_kv_heads = ctx.tensor_heads.get(src_name)
+                if inferred_kv_heads is not None:
+                    kwargs["kv_heads"] = inferred_kv_heads
+            if "heads" not in kwargs and isinstance(out, str):
+                inferred_heads = ctx.tensor_heads.get(out)
+                if inferred_heads is not None:
+                    kwargs["heads"] = inferred_heads
+    if (
+        _op_name_from_callee(callee) == "split_last"
+        and isinstance(out, list)
+        and "sizes" not in kwargs
+        and "parts" not in kwargs
+        and args
+    ):
+        first_arg = args[0].strip()
+        if _is_name_token(first_arg):
+            inferred = ctx.tensor_last_dim.get(first_arg)
+            split_sizes = _infer_split_sizes_from_last_dim(inferred, len(out))
+            if split_sizes is not None:
+                kwargs["sizes"] = split_sizes
     if ctx.block_signatures and callee in ctx.block_signatures:
         input_names, output_names = ctx.block_signatures[callee]
         provided: dict[str, str] = {}
@@ -231,7 +391,9 @@ def _lower_simple_call(
 
         node_name = f"n_{ctx.fresh('use')}"
         node_spec: dict[str, Any] = {"use": callee, "in": in_map, "out": out_map}
-        return _with_when([{node_name: node_spec}], when)
+        nodes = _with_when([{node_name: node_spec}], when)
+        _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
+        return nodes
 
     node_spec = _to_synapse_op(callee, args, kwargs, out)
     if "@" in callee:
@@ -242,9 +404,13 @@ def _lower_simple_call(
         item: dict[str, Any] = {segments[-1]: node_spec}
         for segment in reversed(segments[:-1]):
             item = {segment: {"graph": [item]}}
-        return _with_when([item], when)
+        nodes = _with_when([item], when)
+        _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
+        return nodes
     node_name = f"n_{ctx.fresh('op')}"
-    return _with_when([{node_name: node_spec}], when)
+    nodes = _with_when([{node_name: node_spec}], when)
+    _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
+    return nodes
 
 
 def _lower_alias_or_const(
@@ -261,6 +427,8 @@ def _lower_alias_or_const(
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
     ):
         node = {"op": "alias", "in": token, "out": out}
+        if token in ctx.tensor_last_dim:
+            ctx.tensor_last_dim[out] = ctx.tensor_last_dim[token]
     else:
         node = {"op": "const", "value": scalar, "out": out}
     return _with_when([{node_name: node}], when)
@@ -512,12 +680,40 @@ def _module_return_names(module: AxonModule) -> tuple[str, ...]:
     return ()
 
 
+def _module_return_last_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
+    if not returns or module.return_shape is None or len(module.return_shape) == 0:
+        return {}
+    if len(returns) != 1:
+        return {}
+    return {returns[0]: module.return_shape[-1]}
+
+
+def _module_return_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
+    if not returns or module.return_shape is None or len(module.return_shape) < 2:
+        return {}
+    if len(returns) != 1:
+        return {}
+    return {returns[0]: module.return_shape[1]}
+
+
 def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
     inputs = {param.name: {"optional": param.optional} for param in module.params}
     graph: list[dict[str, Any]] = []
     outputs: dict[str, str] = {}
-    ctx = _LowerCtx(block_signatures={})
     returns = _module_return_names(module)
+    initial_dims = {
+        param.name: param.shape[-1]
+        for param in module.params
+        if param.shape is not None and len(param.shape) > 0
+    }
+    initial_heads = {
+        param.name: param.shape[1]
+        for param in module.params
+        if param.shape is not None and len(param.shape) >= 2
+    }
+    initial_dims.update(_module_return_last_dims(module, returns))
+    initial_heads.update(_module_return_heads(module, returns))
+    ctx = _LowerCtx(block_signatures={}, tensor_last_dim=initial_dims, tensor_heads=initial_heads)
 
     _lower_statements(
         statements=module.statements,
@@ -638,12 +834,28 @@ def lower_axon_program_to_synapse_spec(
     main_inputs = {param.name: {"optional": param.optional} for param in main.params}
     main_graph: list[dict[str, Any]] = []
     main_outputs: dict[str, str] = {}
+    main_initial_dims = {
+        param.name: param.shape[-1]
+        for param in main.params
+        if param.shape is not None and len(param.shape) > 0
+    }
+    main_initial_heads = {
+        param.name: param.shape[1]
+        for param in main.params
+        if param.shape is not None and len(param.shape) >= 2
+    }
+    main_initial_dims.update(_module_return_last_dims(main, main_returns))
+    main_initial_heads.update(_module_return_heads(main, main_returns))
     _lower_statements(
         statements=main.statements,
         graph=main_graph,
         outputs=main_outputs,
         returns=main_returns,
-        ctx=_LowerCtx(block_signatures=signatures),
+        ctx=_LowerCtx(
+            block_signatures=signatures,
+            tensor_last_dim=main_initial_dims,
+            tensor_heads=main_initial_heads,
+        ),
     )
     if not main_outputs:
         for name in main_returns:
@@ -662,12 +874,28 @@ def lower_axon_program_to_synapse_spec(
         block_returns = _module_return_names(module)
         block_graph: list[dict[str, Any]] = []
         block_outputs: dict[str, str] = {}
+        block_initial_dims = {
+            param.name: param.shape[-1]
+            for param in module.params
+            if param.shape is not None and len(param.shape) > 0
+        }
+        block_initial_heads = {
+            param.name: param.shape[1]
+            for param in module.params
+            if param.shape is not None and len(param.shape) >= 2
+        }
+        block_initial_dims.update(_module_return_last_dims(module, block_returns))
+        block_initial_heads.update(_module_return_heads(module, block_returns))
         _lower_statements(
             statements=module.statements,
             graph=block_graph,
             outputs=block_outputs,
             returns=block_returns,
-            ctx=_LowerCtx(block_signatures=signatures),
+            ctx=_LowerCtx(
+                block_signatures=signatures,
+                tensor_last_dim=block_initial_dims,
+                tensor_heads=block_initial_heads,
+            ),
         )
         if not block_outputs:
             for name in block_returns:

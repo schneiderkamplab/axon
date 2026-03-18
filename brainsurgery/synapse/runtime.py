@@ -70,7 +70,7 @@ class SynapseProgramModel(nn.Module):
         spec = self.spec
         model = spec.get("model", {})
         symbols_raw = model.get("symbols", {})
-        symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, int)}
+        symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool))}
         blocks = model.get("blocks", {})
         input_specs = model.get("inputs", {})
         if not isinstance(input_specs, dict):
@@ -156,7 +156,7 @@ class SynapseProgramModel(nn.Module):
         env: dict[str, Any],
         *,
         scope: str,
-        symbols: dict[str, int],
+        symbols: dict[str, int | float | bool],
         blocks: dict[str, Any],
     ) -> None:
         for item in graph:
@@ -219,7 +219,7 @@ class SynapseProgramModel(nn.Module):
         env: dict[str, Any],
         *,
         scope: str,
-        symbols: dict[str, int],
+        symbols: dict[str, int | float | bool],
         blocks: dict[str, Any],
     ) -> None:
         block_name = node_spec.get("use")
@@ -271,7 +271,7 @@ class SynapseProgramModel(nn.Module):
         *,
         node_path: str,
         scope: str,
-        symbols: dict[str, int],
+        symbols: dict[str, int | float | bool],
     ) -> None:
         op_module = get_op_module(op)
         if op_module is None:
@@ -318,13 +318,17 @@ class SynapseProgramModel(nn.Module):
             raise ValueError(f"Input reference {ref!r} does not resolve to tensor")
         return value
 
-    def _check_when(self, when_expr: Any, env: dict[str, Any], symbols: dict[str, int]) -> bool:
+    def _check_when(
+        self, when_expr: Any, env: dict[str, Any], symbols: dict[str, int | float | bool]
+    ) -> bool:
         if when_expr is None:
             return True
         value = self._eval_expr(when_expr, env, symbols)
         return bool(value)
 
-    def _eval_expr(self, expr: Any, env: dict[str, Any], symbols: dict[str, int]) -> Any:
+    def _eval_expr(
+        self, expr: Any, env: dict[str, Any], symbols: dict[str, int | float | bool]
+    ) -> Any:
         if expr is None:
             return None
         if isinstance(expr, (int, float, bool)):
@@ -344,7 +348,9 @@ class SynapseProgramModel(nn.Module):
             return self._safe_eval_numeric(token, env, symbols)
         return expr
 
-    def _safe_eval_numeric(self, text: str, env: dict[str, Any], symbols: dict[str, int]) -> Any:
+    def _safe_eval_numeric(
+        self, text: str, env: dict[str, Any], symbols: dict[str, int | float | bool]
+    ) -> Any:
         names: dict[str, Any] = {}
         for key, value in symbols.items():
             names[key] = value

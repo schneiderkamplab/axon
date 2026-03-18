@@ -42,14 +42,16 @@ def emit_model_code_from_synapse_spec(
         raise ValueError("spec.model must be a mapping")
 
     symbols_raw = model.get("symbols", {})
-    symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, int)}
+    symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool))}
 
     emitter = _Emitter(class_name=class_name, spec=spec, symbols=symbols)
     return emitter.render()
 
 
 class _Emitter:
-    def __init__(self, *, class_name: str, spec: dict[str, Any], symbols: dict[str, int]) -> None:
+    def __init__(
+        self, *, class_name: str, spec: dict[str, Any], symbols: dict[str, int | float | bool]
+    ) -> None:
         self.class_name = class_name
         self.spec = spec
         self.model = spec["model"]
@@ -73,7 +75,7 @@ class _Emitter:
                 "    def __init__(self, state_dict: dict[str, torch.Tensor] | None = None) -> None:",
                 "        super().__init__()",
                 "        self._state: dict[str, torch.Tensor] = {}",
-                f"        self._symbols: dict[str, int] = {repr(self.symbols)}",
+                f"        self._symbols: dict[str, int | float | bool] = {repr(self.symbols)}",
                 "        if state_dict is not None:",
                 "            self.load_state_dict_tensors(state_dict)",
                 "",
