@@ -7,7 +7,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from brainsurgery.synapse import emit_model_code_from_synapse_spec
+from brainsurgery.synapse import SynapseProgramModel, emit_model_code_from_synapse_spec
 
 
 def _auto_device() -> torch.device:
@@ -33,6 +33,12 @@ def _build_model_from_spec(
     exec(source, namespace)  # noqa: S102 - test-controlled generated source
     model_cls = namespace[class_name]
     return model_cls.from_state_dict(state_dict)
+
+
+def _build_runtime_model_from_spec(
+    spec_path: Path, state_dict: dict[str, torch.Tensor]
+) -> SynapseProgramModel:
+    return SynapseProgramModel.from_spec(_load_yaml_mapping(spec_path), state_dict=state_dict)
 
 
 def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -> None:
@@ -72,6 +78,7 @@ def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -
     synapse_model = (
         _build_model_from_spec(spec_path, "Gemma3Generated", state_dict).to(device).eval()
     )
+    runtime_model = _build_runtime_model_from_spec(spec_path, state_dict).to(device).eval()
 
     inputs = tokenizer("I eat my own", return_tensors="pt").to(device)
     input_ids = inputs["input_ids"]
@@ -79,14 +86,25 @@ def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -
 
     with torch.no_grad():
         synapse_logits = synapse_model(input_ids)
+        runtime_logits = runtime_model(input_ids)
         hf_logits = hf_model(input_ids=input_ids, use_cache=False).logits
 
     diff = (synapse_logits - hf_logits).abs()
     assert float(diff.mean()) < 1.0e-4
     assert float(diff.max()) < 5.0e-4
     assert torch.equal(synapse_logits[:, -1, :].argmax(-1), hf_logits[:, -1, :].argmax(-1))
+    runtime_diff = (runtime_logits - hf_logits).abs()
+    assert float(runtime_diff.mean()) < 1.0e-4
+    assert float(runtime_diff.max()) < 5.0e-4
+    assert torch.equal(runtime_logits[:, -1, :].argmax(-1), hf_logits[:, -1, :].argmax(-1))
+    syn_rt_diff = (synapse_logits - runtime_logits).abs()
+    assert float(syn_rt_diff.mean()) < 1.0e-6
+    assert float(syn_rt_diff.max()) < 1.0e-5
 
     synapse_generated = synapse_model.generate(
+        input_ids, eos_token_id=tokenizer.eos_token_id, max_len=max_len
+    )
+    runtime_generated = runtime_model.generate(
         input_ids, eos_token_id=tokenizer.eos_token_id, max_len=max_len
     )
     hf_generated = hf_model.generate(
@@ -96,3 +114,5 @@ def test_generated_gemma3_matches_hf(repo_root: Path, gemma3_local_path: Path) -
         pad_token_id=tokenizer.eos_token_id,
     )
     assert torch.equal(synapse_generated, hf_generated)
+    assert torch.equal(runtime_generated, hf_generated)
+    assert torch.equal(runtime_generated, synapse_generated)

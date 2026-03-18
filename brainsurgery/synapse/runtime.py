@@ -8,7 +8,8 @@ from typing import Any
 import torch
 from omegaconf import OmegaConf
 from torch import nn
-from torch.nn import functional as F
+
+from .ops import get_op_module
 
 
 class SynapseProgramModel(nn.Module):
@@ -71,8 +72,19 @@ class SynapseProgramModel(nn.Module):
         symbols_raw = model.get("symbols", {})
         symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, int)}
         blocks = model.get("blocks", {})
+        input_specs = model.get("inputs", {})
+        if not isinstance(input_specs, dict):
+            raise ValueError("model.inputs must be a mapping when present")
 
         env: dict[str, Any] = dict(inputs)
+        for input_name, input_spec in input_specs.items():
+            optional = isinstance(input_spec, dict) and bool(input_spec.get("optional", False))
+            if input_name in env:
+                continue
+            if optional:
+                env[input_name] = None
+            else:
+                raise ValueError(f"Missing required input: {input_name}")
         self._run_graph(model.get("graph", []), env, scope="", symbols=symbols, blocks=blocks)
 
         outputs = model.get("outputs", {})
@@ -120,7 +132,11 @@ class SynapseProgramModel(nn.Module):
         try:
             with torch.no_grad():
                 while generated.size(1) < max_len and not torch.all(finished):
-                    logits = self.forward(generated)
+                    model_out = self.forward(generated)
+                    if isinstance(model_out, dict):
+                        logits = model_out["logits"]
+                    else:
+                        logits = model_out
                     next_token = torch.argmax(logits[:, -1, :], dim=-1)
                     next_token = torch.where(
                         finished,
@@ -150,8 +166,12 @@ class SynapseProgramModel(nn.Module):
             if not isinstance(node_spec, dict):
                 raise ValueError(f"Node spec for {node_name!r} must be mapping")
 
-            if not self._check_when(node_spec.get("when"), env, symbols):
-                continue
+            when_expr = node_spec.get("when")
+            if when_expr is not None:
+                for produced_name in self._node_output_names(node_spec):
+                    env.setdefault(produced_name, None)
+                if not self._check_when(when_expr, env, symbols):
+                    continue
 
             op = node_spec.get("op")
             if op == "repeat":
@@ -210,7 +230,7 @@ class SynapseProgramModel(nn.Module):
         if not isinstance(in_bindings, dict):
             raise ValueError("block use 'in' must be mapping")
         for block_input_name, src_name in in_bindings.items():
-            if isinstance(src_name, str):
+            if isinstance(src_name, str) and src_name in env:
                 block_env[block_input_name] = env[src_name]
             else:
                 block_env[block_input_name] = self._eval_expr(src_name, env, symbols)
@@ -224,7 +244,20 @@ class SynapseProgramModel(nn.Module):
         if not isinstance(out_bindings, dict):
             raise ValueError("block use 'out' must be mapping")
         for block_out_name, dst_name in out_bindings.items():
-            env[dst_name] = block_env[block_out_name]
+            env[dst_name] = block_env.get(block_out_name)
+
+    def _node_output_names(self, node_spec: dict[str, Any]) -> list[str]:
+        if "use" in node_spec:
+            out_bindings = node_spec.get("out")
+            if isinstance(out_bindings, dict):
+                return [str(v) for v in out_bindings.values()]
+            return []
+        out_value = node_spec.get("out")
+        if isinstance(out_value, str):
+            return [out_value]
+        if isinstance(out_value, list):
+            return [str(v) for v in out_value]
+        return []
 
     def _execute_op(
         self,
@@ -236,544 +269,17 @@ class SynapseProgramModel(nn.Module):
         scope: str,
         symbols: dict[str, int],
     ) -> None:
-        if op == "embedding":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            weight_path = self._infer_param_path(
-                node_spec, node_path=node_path, param_name="weight"
-            )
-            weight = self._state[weight_path]
-            out = self._require_name(node_spec.get("out"), field="embedding.out")
-            y = F.embedding(x, weight)
-            if node_spec.get("scale") is not None:
-                scale = float(self._eval_expr(node_spec.get("scale"), env, symbols))
-                y = y * y.new_tensor(scale)
-            env[out] = y
-            return
-
-        if op == "linear":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            linear_weight_path: str | None = node_spec.get("tie_weight")
-            if not isinstance(linear_weight_path, str):
-                linear_weight_path = self._infer_param_path(
-                    node_spec, node_path=node_path, param_name="weight"
-                )
-            weight = self._state[linear_weight_path]
-            bias = None
-            if node_spec.get("bias", True):
-                bias_path = self._infer_param_path(
-                    node_spec, node_path=node_path, param_name="bias"
-                )
-                bias = self._state.get(bias_path)
-            weight_layout = str(node_spec.get("weight_layout", "oi"))
-            out = self._require_name(node_spec.get("out"), field="linear.out")
-            if weight_layout == "oi":
-                env[out] = F.linear(x, weight, bias)
-            elif weight_layout == "io":
-                y = torch.matmul(x, weight)
-                env[out] = y + bias if bias is not None else y
-            else:
-                raise ValueError(f"Unsupported linear weight_layout: {weight_layout}")
-            return
-
-        if op == "layernorm":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            weight = self._state[
-                self._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-            ]
-            bias = self._state[
-                self._infer_param_path(node_spec, node_path=node_path, param_name="bias")
-            ]
-            eps_value = self._eval_expr(node_spec.get("eps", 1e-5), env, symbols)
-            out = self._require_name(node_spec.get("out"), field="layernorm.out")
-            env[out] = F.layer_norm(
-                x, (x.shape[-1],), weight=weight, bias=bias, eps=float(eps_value)
-            )
-            return
-
-        if op == "rmsnorm":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            weight = self._state[
-                self._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-            ]
-            eps_value = float(self._eval_expr(node_spec.get("eps", 1e-6), env, symbols))
-            cast_float = bool(node_spec.get("cast_float", False))
-            unit_offset = bool(node_spec.get("unit_offset", False))
-            x_norm_src = x.float() if cast_float else x
-            w_src = weight.float() if cast_float else weight
-            x_norm = x_norm_src * torch.rsqrt(
-                torch.mean(x_norm_src * x_norm_src, dim=-1, keepdim=True) + eps_value
-            )
-            y = x_norm * ((1.0 + w_src) if unit_offset else w_src)
-            out = self._require_name(node_spec.get("out"), field="rmsnorm.out")
-            env[out] = y.type_as(x) if cast_float else y
-            return
-
-        if op == "activation":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            kind = node_spec.get("kind", "gelu")
-            out = self._require_name(node_spec.get("out"), field="activation.out")
-            if kind == "gelu_new" or kind == "gelu_pytorch_tanh":
-                env[out] = (
-                    0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
-                )
-            elif kind == "gelu":
-                env[out] = F.gelu(x)
-            elif kind == "relu":
-                env[out] = F.relu(x)
-            elif kind == "silu":
-                env[out] = F.silu(x)
-            else:
-                raise ValueError(f"Unsupported activation kind: {kind}")
-            return
-
-        if op == "softmax":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            out = self._require_name(node_spec.get("out"), field="softmax.out")
-            dim = int(self._eval_expr(node_spec.get("dim", -1), env, symbols))
-            dtype_name = node_spec.get("dtype")
-            if dtype_name is None:
-                env[out] = F.softmax(x, dim=dim)
-            else:
-                if not isinstance(dtype_name, str):
-                    raise ValueError("softmax dtype must be a string when provided")
-                dtype_map: dict[str, torch.dtype] = {
-                    "float32": torch.float32,
-                    "float16": torch.float16,
-                    "bfloat16": torch.bfloat16,
-                }
-                if dtype_name not in dtype_map:
-                    raise ValueError(f"Unsupported softmax dtype: {dtype_name}")
-                env[out] = F.softmax(x, dim=dim, dtype=dtype_map[dtype_name])
-            return
-
-        if op == "topk":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            outs = node_spec.get("out")
-            if not isinstance(outs, list) or len(outs) != 2:
-                raise ValueError("topk expects out=[values,indices]")
-            k = int(self._eval_expr(node_spec.get("k"), env, symbols))
-            dim = int(self._eval_expr(node_spec.get("dim", -1), env, symbols))
-            largest = bool(node_spec.get("largest", True))
-            sorted_flag = bool(node_spec.get("sorted", True))
-            values, indices = torch.topk(x, k, dim=dim, largest=largest, sorted=sorted_flag)
-            env[outs[0]] = values
-            env[outs[1]] = indices
-            return
-
-        if op == "zeros_like":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            out = self._require_name(node_spec.get("out"), field="zeros_like.out")
-            env[out] = torch.zeros_like(x)
-            return
-
-        if op == "moe_select_tokens":
-            ins = node_spec.get("in")
-            outs = node_spec.get("out")
-            if (
-                not isinstance(ins, list)
-                or len(ins) != 3
-                or not isinstance(outs, list)
-                or len(outs) != 4
-            ):
-                raise ValueError(
-                    "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
-                    "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
-                )
-            hidden = self._read_tensor_input(ins[0], env)
-            topk_scores = self._read_tensor_input(ins[1], env)
-            topk_indices = self._read_tensor_input(ins[2], env)
-            expert = int(self._eval_expr(node_spec.get("expert"), env, symbols))
-            hidden_flat = hidden.reshape(-1, hidden.shape[-1])
-            topk_scores_flat = topk_scores.reshape(-1, topk_scores.shape[-1])
-            topk_indices_flat = topk_indices.reshape(-1, topk_indices.shape[-1])
-            expert_pos = (topk_indices_flat == expert).nonzero(as_tuple=False)
-            token_idx = expert_pos[:, 0]
-            topk_pos = expert_pos[:, 1]
-            selected_hidden = hidden_flat[token_idx]
-            selected_scores = topk_scores_flat[token_idx, topk_pos].to(selected_hidden.dtype)
-            env[outs[0]] = selected_hidden
-            env[outs[1]] = token_idx
-            env[outs[2]] = topk_pos
-            env[outs[3]] = selected_scores
-            return
-
-        if op == "moe_expert_ffn":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            out = self._require_name(node_spec.get("out"), field="moe_expert_ffn.out")
-            expert = int(self._eval_expr(node_spec.get("expert"), env, symbols))
-            experts_scope = node_spec.get("experts_scope", "experts")
-            if not isinstance(experts_scope, str):
-                raise ValueError("moe_expert_ffn experts_scope must be string")
-            experts_base = self._join(scope, experts_scope)
-            experts_parent = experts_base.rsplit(".", 1)[0] if "." in experts_base else ""
-            gate_name = str(node_spec.get("gate_proj_name", "gate_proj.weight"))
-            up_name = str(node_spec.get("up_proj_name", "up_proj.weight"))
-            down_name = str(node_spec.get("down_proj_name", "down_proj.weight"))
-            activation = str(node_spec.get("activation", "silu"))
-            packed_gate_up = self._join(experts_base, "gate_up_proj")
-            packed_down = self._join(experts_base, "down_proj")
-            packed_gate_up_parent = (
-                self._join(experts_parent, "gate_up_proj") if experts_parent else ""
-            )
-            packed_down_parent = self._join(experts_parent, "down_proj") if experts_parent else ""
-
-            def resolve_expert_weight(name: str) -> torch.Tensor:
-                candidates = [
-                    self._join(experts_base, f"{expert}.{name}"),
-                    self._join(experts_base, name),
-                ]
-                if experts_parent:
-                    candidates.append(self._join(experts_parent, f"{expert}.{name}"))
-                    candidates.append(self._join(experts_parent, name))
-                for path in candidates:
-                    found = self._state.get(path)
-                    if found is not None:
-                        return found
-                raise KeyError(candidates[0])
-
-            if x.numel() == 0:
-                packed_down_key = (
-                    packed_down
-                    if packed_down in self._state
-                    else (packed_down_parent if packed_down_parent in self._state else None)
-                )
-                if packed_down_key is not None:
-                    down_w_shape = self._state[packed_down_key].shape
-                    out_dim = int(down_w_shape[-2])
-                    env[out] = x.new_zeros((0, out_dim))
-                else:
-                    down_w = resolve_expert_weight(down_name)
-                    env[out] = x.new_zeros((0, int(down_w.shape[-2])))
-                return
-
-            packed_gate_up_key = (
-                packed_gate_up
-                if packed_gate_up in self._state
-                else (packed_gate_up_parent if packed_gate_up_parent in self._state else None)
-            )
-            packed_down_key = (
-                packed_down
-                if packed_down in self._state
-                else (packed_down_parent if packed_down_parent in self._state else None)
-            )
-            if packed_gate_up_key is not None and packed_down_key is not None:
-                packed_gate_up_w = self._state[packed_gate_up_key]
-                if packed_gate_up_w.ndim == 3:
-                    packed_gate_up_w = packed_gate_up_w[expert]
-                gate, up = F.linear(x, packed_gate_up_w, None).chunk(2, dim=-1)
-                down_w = self._state[packed_down_key]
-                if down_w.ndim == 3:
-                    down_w = down_w[expert]
-            else:
-                gate_w = resolve_expert_weight(gate_name)
-                up_w = resolve_expert_weight(up_name)
-                down_w = resolve_expert_weight(down_name)
-                gate = F.linear(x, gate_w, None)
-                up = F.linear(x, up_w, None)
-
-            if activation in {"gelu_new", "gelu_pytorch_tanh"}:
-                hidden = (
-                    0.5
-                    * gate
-                    * (
-                        1.0
-                        + torch.tanh(0.7978845608028654 * (gate + 0.044715 * gate * gate * gate))
-                    )
-                    * up
-                )
-            elif activation == "gelu":
-                hidden = F.gelu(gate) * up
-            elif activation == "relu":
-                hidden = F.relu(gate) * up
-            elif activation == "silu":
-                hidden = F.silu(gate) * up
-            else:
-                raise ValueError(f"Unsupported moe_expert_ffn activation kind: {activation}")
-
-            env[out] = F.linear(hidden, down_w, None)
-            return
-
-        if op == "moe_scatter_add":
-            ins = node_spec.get("in")
-            if not isinstance(ins, list) or len(ins) != 4:
-                raise ValueError("moe_scatter_add expects in=[accum,token_idx,updates,scores]")
-            accum = self._read_tensor_input(ins[0], env)
-            token_idx = self._read_tensor_input(ins[1], env)
-            updates = self._read_tensor_input(ins[2], env)
-            scores = self._read_tensor_input(ins[3], env)
-            out = self._require_name(node_spec.get("out"), field="moe_scatter_add.out")
-            if token_idx.numel() == 0:
-                env[out] = accum
-                return
-            accum_flat = accum.reshape(-1, accum.shape[-1])
-            weighted = updates * scores.unsqueeze(-1).to(updates.dtype)
-            accum_flat.index_add_(0, token_idx, weighted.to(accum_flat.dtype))
-            env[out] = accum
-            return
-
-        if op == "add":
-            inputs = node_spec.get("in")
-            if not isinstance(inputs, list) or len(inputs) != 2:
-                raise ValueError("add expects two inputs")
-            out = self._require_name(node_spec.get("out"), field="add.out")
-            env[out] = env[inputs[0]] + env[inputs[1]]
-            return
-
-        if op == "mul":
-            inputs = node_spec.get("in")
-            if not isinstance(inputs, list) or len(inputs) != 2:
-                raise ValueError("mul expects two inputs")
-            out = self._require_name(node_spec.get("out"), field="mul.out")
-            env[out] = env[inputs[0]] * env[inputs[1]]
-            return
-
-        if op == "arange_positions":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            seq_len = x.shape[1]
-            out = self._require_name(node_spec.get("out"), field="arange_positions.out")
-            env[out] = torch.arange(seq_len, device=x.device, dtype=torch.long).unsqueeze(0)
-            return
-
-        if op == "split_last_dim":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            sizes = node_spec.get("sizes")
-            outs = node_spec.get("out")
-            if not isinstance(sizes, list) or not isinstance(outs, list):
-                raise ValueError("split_last_dim requires list sizes and out")
-            split_sizes = [int(self._eval_expr(size, env, symbols)) for size in sizes]
-            tensors = x.split(split_sizes, dim=-1)
-            for name, tensor in zip(outs, tensors, strict=True):
-                env[name] = tensor
-            return
-
-        if op == "reshape_heads_triplet":
-            ins = node_spec.get("in")
-            outs = node_spec.get("out")
-            heads = int(self._eval_expr(node_spec.get("heads"), env, symbols))
-            head_dim = int(self._eval_expr(node_spec.get("head_dim"), env, symbols))
-            if (
-                not isinstance(ins, list)
-                or not isinstance(outs, list)
-                or len(ins) != 3
-                or len(outs) != 3
-            ):
-                raise ValueError("reshape_heads_triplet requires 3 inputs and 3 outputs")
-            for src_name, dst_name in zip(ins, outs, strict=True):
-                src = env[src_name]
-                bsz, seq_len, _ = src.shape
-                reshaped = src.view(bsz, seq_len, heads, head_dim).transpose(1, 2)
-                env[dst_name] = reshaped
-            return
-
-        if op == "reshape_heads":
-            src = self._read_tensor_input(node_spec.get("in"), env)
-            heads = int(self._eval_expr(node_spec.get("heads"), env, symbols))
-            head_dim = int(self._eval_expr(node_spec.get("head_dim"), env, symbols))
-            bsz, seq_len, _ = src.shape
-            out = self._require_name(node_spec.get("out"), field="reshape_heads.out")
-            env[out] = src.view(bsz, seq_len, heads, head_dim).transpose(1, 2)
-            return
-
-        if op == "apply_rope_pair":
-            ins = node_spec.get("in")
-            outs = node_spec.get("out")
-            if (
-                not isinstance(ins, list)
-                or len(ins) != 2
-                or not isinstance(outs, list)
-                or len(outs) != 2
-            ):
-                raise ValueError("apply_rope_pair expects in=[q,k], out=[q_rot,k_rot]")
-            q = env[ins[0]]
-            k = env[ins[1]]
-            theta = float(self._eval_expr(node_spec.get("theta", 10000.0), env, symbols))
-            half = q.shape[-1] // 2
-            inv_freq = 1.0 / (
-                theta ** (torch.arange(0, half, device=q.device, dtype=q.dtype) / float(half))
-            )
-            offset = int(self._eval_expr(node_spec.get("offset", 0), env, symbols))
-            pos = torch.arange(offset, offset + q.shape[-2], device=q.device, dtype=q.dtype)
-            ang = torch.einsum("t,d->td", pos, inv_freq)
-            cos = torch.cos(ang)[None, None, :, :]
-            sin = torch.sin(ang)[None, None, :, :]
-            q1, q2 = q[..., :half], q[..., half : 2 * half]
-            k1, k2 = k[..., :half], k[..., half : 2 * half]
-            env[outs[0]] = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
-            env[outs[1]] = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
-            return
-
-        if op == "kv_seq_len":
-            ref = node_spec.get("in")
-            out_name = self._require_name(node_spec.get("out"), field="kv_seq_len.out")
-            if not isinstance(ref, str):
-                raise ValueError("kv_seq_len.in must be a string")
-            value = env.get(ref)
-            if value is None:
-                env[out_name] = 0
-                return
-            if not isinstance(value, tuple) or len(value) < 1 or not torch.is_tensor(value[0]):
-                raise ValueError("kv_seq_len expects kv tuple (k, v)")
-            env[out_name] = int(value[0].shape[-2])
-            return
-
-        if op == "repeat_kv":
-            src = self._read_tensor_input(node_spec.get("in"), env)
-            repeats = node_spec.get("repeats")
-            if repeats is None:
-                heads = int(self._eval_expr(node_spec.get("heads"), env, symbols))
-                kv_heads = int(self._eval_expr(node_spec.get("kv_heads"), env, symbols))
-                n_rep = heads // kv_heads
-            else:
-                n_rep = int(self._eval_expr(repeats, env, symbols))
-            out = self._require_name(node_spec.get("out"), field="repeat_kv.out")
-            if n_rep == 1:
-                env[out] = src
-            else:
-                bsz, kvh, seq_len, hd = src.shape
-                expanded = src[:, :, None, :, :].expand(bsz, kvh, n_rep, seq_len, hd)
-                env[out] = expanded.reshape(bsz, kvh * n_rep, seq_len, hd)
-            return
-
-        if op == "merge_heads":
-            x = self._read_tensor_input(node_spec.get("in"), env)
-            bsz, heads, seq_len, head_dim = x.shape
-            merged = x.transpose(1, 2).contiguous().view(bsz, seq_len, heads * head_dim)
-            out = self._require_name(node_spec.get("out"), field="merge_heads.out")
-            env[out] = merged
-            return
-
-        if op == "attention":
-            ins = node_spec.get("in")
-            if not isinstance(ins, list) or len(ins) != 3:
-                raise ValueError("attention expects [q, k, v]")
-            q = env[ins[0]]
-            k_tensor = env[ins[1]]
-            v = env[ins[2]]
-            mask = None
-            mask_name = node_spec.get("mask")
-            if isinstance(mask_name, str):
-                mask = env.get(mask_name)
-            scale_expr = node_spec.get("scale")
-            scale_value = (
-                None if scale_expr is None else float(self._eval_expr(scale_expr, env, symbols))
-            )
-            is_causal_flag = (
-                bool(node_spec.get("causal", False)) and q.shape[2] > 1 and mask is None
-            )
-            attn_out = F.scaled_dot_product_attention(
-                q,
-                k_tensor,
-                v,
-                attn_mask=mask,
-                dropout_p=0.0,
-                is_causal=is_causal_flag,
-                scale=scale_value,
-            )
-            out_name = self._require_name(node_spec.get("out"), field="attention.out")
-            env[out_name] = attn_out
-            return
-
-        if op == "causal_mask":
-            q = self._read_tensor_input(node_spec.get("in"), env)
-            key_ref = node_spec.get("key")
-            key_tensor = self._read_tensor_input(key_ref, env) if isinstance(key_ref, str) else q
-            out_name = self._require_name(node_spec.get("out"), field="causal_mask.out")
-            if node_spec.get("window") is None:
-                env[out_name] = None
-                return
-            q_len = q.shape[-2]
-            k_len = key_tensor.shape[-2]
-            i_idx = torch.arange(q_len, device=q.device).unsqueeze(1)
-            j_idx = torch.arange(k_len, device=q.device).unsqueeze(0)
-            keep = j_idx <= i_idx
-            win = int(self._eval_expr(node_spec.get("window"), env, symbols))
-            if win >= k_len and q_len == k_len:
-                env[out_name] = None
-                return
-            keep = keep & (j_idx >= (i_idx - win + 1))
-            mask_value = torch.finfo(q.dtype).min
-            mask = torch.where(
-                keep,
-                torch.zeros((), dtype=q.dtype, device=q.device),
-                torch.full((), mask_value, dtype=q.dtype, device=q.device),
-            )
-            env[out_name] = mask.view(1, 1, q_len, k_len)
-            return
-
-        if op == "index":
-            ins = node_spec.get("in")
-            if not isinstance(ins, list) or len(ins) != 2:
-                raise ValueError("index expects [collection, index]")
-            collection = env[ins[0]]
-            out_name = self._require_name(node_spec.get("out"), field="index.out")
-            if collection is None:
-                env[out_name] = None
-                return
-            idx = (
-                int(self._eval_expr(ins[1], env, symbols))
-                if not isinstance(ins[1], str)
-                else int(env[ins[1]])
-            )
-            env[out_name] = collection[idx]
-            return
-
-        if op == "init_list":
-            out_name = self._require_name(node_spec.get("out"), field="init_list.out")
-            env[out_name] = []
-            return
-
-        if op == "append":
-            ins = node_spec.get("in")
-            if not isinstance(ins, list) or len(ins) != 2:
-                raise ValueError("append expects [list_name, item_name]")
-            base_list = list(env[ins[0]])
-            base_list.append(env[ins[1]])
-            out_name = self._require_name(node_spec.get("out"), field="append.out")
-            env[out_name] = base_list
-            return
-
-        if op == "kv_cache_update":
-            ins = node_spec.get("in")
-            outs = node_spec.get("out")
-            if (
-                not isinstance(ins, list)
-                or len(ins) != 3
-                or not isinstance(outs, list)
-                or len(outs) != 3
-            ):
-                raise ValueError("kv_cache_update expects in=[past,k,v], out=[k_all,v_all,present]")
-            past = env.get(ins[0])
-            k_new = env[ins[1]]
-            v_new = env[ins[2]]
-            if past is None:
-                k_all = k_new
-                v_all = v_new
-            else:
-                k_all = torch.cat([past[0], k_new], dim=-2)
-                v_all = torch.cat([past[1], v_new], dim=-2)
-            present = (k_all, v_all)
-            env[outs[0]] = k_all
-            env[outs[1]] = v_all
-            env[outs[2]] = present
-            return
-
-        if op == "coalesce_triplet":
-            ins = node_spec.get("in")
-            outs = node_spec.get("out")
-            if (
-                not isinstance(ins, list)
-                or len(ins) != 4
-                or not isinstance(outs, list)
-                or len(outs) != 2
-            ):
-                raise ValueError("coalesce_triplet expects in=[k_all,v_all,k,v], out=[k_ctx,v_ctx]")
-            k_ctx = env[ins[0]] if ins[0] in env and env[ins[0]] is not None else env[ins[2]]
-            v_ctx = env[ins[1]] if ins[1] in env and env[ins[1]] is not None else env[ins[3]]
-            env[outs[0]] = k_ctx
-            env[outs[1]] = v_ctx
-            return
-
-        raise NotImplementedError(f"Unsupported op: {op}")
+        op_module = get_op_module(op)
+        if op_module is None:
+            raise NotImplementedError(f"Unsupported op: {op}")
+        op_module.interpret(
+            self,
+            node_spec,
+            env,
+            node_path=node_path,
+            scope=scope,
+            symbols=symbols,
+        )
 
     def _infer_param_path(
         self, node_spec: dict[str, Any], *, node_path: str, param_name: str
@@ -839,7 +345,7 @@ class SynapseProgramModel(nn.Module):
         for key, value in symbols.items():
             names[key] = value
         for key, value in env.items():
-            if isinstance(value, (int, float, bool)):
+            if isinstance(value, (int, float, bool)) or value is None:
                 names[key] = value
 
         parsed = ast.parse(text, mode="eval")

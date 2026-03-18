@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from typing import Any
+
+OP_NAME = "moe_select_tokens"
+
+
+def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
+    del emitter, node_spec
+    return False
+
+
+def interpret(
+    model: Any,
+    node_spec: dict[str, Any],
+    env: dict[str, Any],
+    *,
+    node_path: str,
+    scope: str,
+    symbols: dict[str, int],
+) -> None:
+    ins = node_spec.get("in")
+    outs = node_spec.get("out")
+    if not isinstance(ins, list) or len(ins) != 3 or not isinstance(outs, list) or len(outs) != 4:
+        raise ValueError(
+            "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
+            "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
+        )
+    hidden = model._read_tensor_input(ins[0], env)
+    topk_scores = model._read_tensor_input(ins[1], env)
+    topk_indices = model._read_tensor_input(ins[2], env)
+    expert = int(model._eval_expr(node_spec.get("expert"), env, symbols))
+    hidden_flat = hidden.reshape(-1, hidden.shape[-1])
+    topk_scores_flat = topk_scores.reshape(-1, topk_scores.shape[-1])
+    topk_indices_flat = topk_indices.reshape(-1, topk_indices.shape[-1])
+    expert_pos = (topk_indices_flat == expert).nonzero(as_tuple=False)
+    token_idx = expert_pos[:, 0]
+    topk_pos = expert_pos[:, 1]
+    selected_hidden = hidden_flat[token_idx]
+    selected_scores = topk_scores_flat[token_idx, topk_pos].to(selected_hidden.dtype)
+    env[outs[0]] = selected_hidden
+    env[outs[1]] = token_idx
+    env[outs[2]] = topk_pos
+    env[outs[3]] = selected_scores
+    return
+
+
+def compile(
+    emitter: Any,
+    node_spec: dict[str, Any],
+    env: dict[str, str],
+    *,
+    node_path_var: str,
+    scope_var: str,
+    indent: str,
+) -> list[str]:
+    lines: list[str] = []
+
+    def assign_out_var(out_name: str) -> str:
+        return emitter._assign_out_var(env, out_name)
+
+    def infer_param(param_name: str) -> str:
+        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
+
+    def read(name: str) -> str:
+        return emitter._read_env_var(env, name)
+
+    ins = node_spec.get("in")
+    outs = node_spec.get("out")
+    if not isinstance(ins, list) or len(ins) != 3 or not isinstance(outs, list) or len(outs) != 4:
+        raise ValueError(
+            "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
+            "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
+        )
+    hidden = read(str(ins[0]))
+    topk_scores = read(str(ins[1]))
+    topk_indices = read(str(ins[2]))
+    selected_hidden = assign_out_var(str(outs[0]))
+    token_idx = assign_out_var(str(outs[1]))
+    topk_pos = assign_out_var(str(outs[2]))
+    selected_scores = assign_out_var(str(outs[3]))
+    expert = emitter._expr_code(node_spec.get("expert"), env)
+    hidden_flat = emitter._fresh("hidden_flat")
+    topk_scores_flat = emitter._fresh("topk_scores_flat")
+    topk_indices_flat = emitter._fresh("topk_indices_flat")
+    expert_pos = emitter._fresh("expert_pos")
+    lines.append(f"{indent}{hidden_flat} = {hidden}.reshape(-1, {hidden}.shape[-1])")
+    lines.append(f"{indent}{topk_scores_flat} = {topk_scores}.reshape(-1, {topk_scores}.shape[-1])")
+    lines.append(
+        f"{indent}{topk_indices_flat} = {topk_indices}.reshape(-1, {topk_indices}.shape[-1])"
+    )
+    lines.append(
+        f"{indent}{expert_pos} = ({topk_indices_flat} == int({expert})).nonzero(as_tuple=False)"
+    )
+    lines.append(f"{indent}{token_idx} = {expert_pos}[:, 0]")
+    lines.append(f"{indent}{topk_pos} = {expert_pos}[:, 1]")
+    lines.append(f"{indent}{selected_hidden} = {hidden_flat}[{token_idx}]")
+    lines.append(
+        f"{indent}{selected_scores} = {topk_scores_flat}[{token_idx}, {topk_pos}].to({selected_hidden}.dtype)"
+    )
+    return lines
+
+
+__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]

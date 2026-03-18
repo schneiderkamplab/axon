@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from typing import Any
+
+OP_NAME = "repeat_kv"
+
+
+def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
+    del emitter, node_spec
+    return False
+
+
+def interpret(
+    model: Any,
+    node_spec: dict[str, Any],
+    env: dict[str, Any],
+    *,
+    node_path: str,
+    scope: str,
+    symbols: dict[str, int],
+) -> None:
+    src = model._read_tensor_input(node_spec.get("in"), env)
+    repeats = node_spec.get("repeats")
+    if repeats is None:
+        heads = int(model._eval_expr(node_spec.get("heads"), env, symbols))
+        kv_heads = int(model._eval_expr(node_spec.get("kv_heads"), env, symbols))
+        n_rep = heads // kv_heads
+    else:
+        n_rep = int(model._eval_expr(repeats, env, symbols))
+    out = model._require_name(node_spec.get("out"), field="repeat_kv.out")
+    if n_rep == 1:
+        env[out] = src
+    else:
+        bsz, kvh, seq_len, hd = src.shape
+        expanded = src[:, :, None, :, :].expand(bsz, kvh, n_rep, seq_len, hd)
+        env[out] = expanded.reshape(bsz, kvh * n_rep, seq_len, hd)
+    return
+
+
+def compile(
+    emitter: Any,
+    node_spec: dict[str, Any],
+    env: dict[str, str],
+    *,
+    node_path_var: str,
+    scope_var: str,
+    indent: str,
+) -> list[str]:
+    lines: list[str] = []
+
+    def assign_out_var(out_name: str) -> str:
+        return emitter._assign_out_var(env, out_name)
+
+    def infer_param(param_name: str) -> str:
+        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
+
+    def read(name: str) -> str:
+        return emitter._read_env_var(env, name)
+
+    src = read(str(node_spec.get("in")))
+    out_name = str(node_spec.get("out"))
+    out_var = assign_out_var(out_name)
+    repeats = node_spec.get("repeats")
+    if repeats is None:
+        heads = emitter._expr_code(node_spec.get("heads"), env)
+        kv_heads = emitter._expr_code(node_spec.get("kv_heads"), env)
+        repeats_code = f"(int({heads}) // int({kv_heads}))"
+    else:
+        repeats_code = emitter._expr_code(repeats, env)
+    n_rep = emitter._fresh("n_rep")
+    lines.append(f"{indent}{n_rep} = int({repeats_code})")
+    lines.append(f"{indent}if {n_rep} == 1:")
+    lines.append(f"{indent}    {out_var} = {src}")
+    lines.append(f"{indent}else:")
+    lines.append(
+        f"{indent}    {out_var} = {src}[:, :, None, :, :].expand({src}.shape[0], {src}.shape[1], {n_rep}, {src}.shape[2], {src}.shape[3]).reshape({src}.shape[0], {src}.shape[1] * {n_rep}, {src}.shape[2], {src}.shape[3])"
+    )
+    return lines
+
+
+__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]

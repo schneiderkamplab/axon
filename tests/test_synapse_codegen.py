@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 import torch
 import typer
+from omegaconf import OmegaConf
 
-from brainsurgery.cli.synapse import emit_generic
+from brainsurgery.cli.synapse import axon_to_synapse, emit_generic, synapse_to_axon
 from brainsurgery.synapse import emit_model_code_from_synapse_spec
 
 
@@ -94,6 +95,58 @@ def test_emit_model_code_from_synapse_spec_generic() -> None:
     source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="GenericSynapse")
     assert "class GenericSynapse(nn.Module):" in source
     assert "def generate(self, input_ids: torch.Tensor" in source
+
+
+def test_cli_synapse_to_axon_and_back_roundtrip(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    axon_path = tmp_path / "spec.axon"
+    lowered_path = tmp_path / "lowered.yaml"
+    spec_path.write_text(_spec_yaml(), encoding="utf-8")
+
+    synapse_to_axon(
+        spec_path=spec_path,
+        output_path=axon_path,
+        module_name="tiny",
+        force=False,
+    )
+    assert axon_path.exists()
+    axon_text = axon_path.read_text(encoding="utf-8")
+    assert axon_text.startswith("module tiny(")
+    assert "meta __inputs" not in axon_text
+    assert "meta __outputs" not in axon_text
+
+    axon_to_synapse(axon_path=axon_path, output_path=lowered_path, force=False)
+    assert lowered_path.exists()
+    lowered = OmegaConf.to_container(OmegaConf.load(lowered_path), resolve=True)
+    assert isinstance(lowered, dict)
+    assert lowered.get("synapse") == 1
+    assert lowered.get("model", {}).get("symbols") is None
+
+
+def test_cli_synapse_to_axon_requires_force_for_existing_output(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    axon_path = tmp_path / "spec.axon"
+    spec_path.write_text(_spec_yaml(), encoding="utf-8")
+    axon_path.write_text("# existing\n", encoding="utf-8")
+
+    with pytest.raises(typer.BadParameter) as exc_info:
+        synapse_to_axon(
+            spec_path=spec_path,
+            output_path=axon_path,
+            module_name="tiny",
+            force=False,
+        )
+    assert "overwrite" in str(exc_info.value)
+
+
+def test_cli_axon_to_synapse_requires_yaml_output(tmp_path: Path) -> None:
+    axon_path = tmp_path / "spec.axon"
+    bad_output = tmp_path / "lowered.txt"
+    axon_path.write_text("module tiny(x) -> (y) do\n  y <- x\n  return y\n", encoding="utf-8")
+
+    with pytest.raises(typer.BadParameter) as exc_info:
+        axon_to_synapse(axon_path=axon_path, output_path=bad_output, force=False)
+    assert ".yaml" in str(exc_info.value)
 
 
 def test_optional_input_defaults_to_none_in_emitted_code() -> None:
