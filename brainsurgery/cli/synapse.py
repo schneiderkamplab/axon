@@ -180,4 +180,89 @@ def synapse_to_axon(
     typer.echo(f"Wrote Axon source to {output_path}")
 
 
-__all__ = ["app", "emit_generic", "axon_to_synapse", "synapse_to_axon"]
+@app.command("axon-test")
+def axon_test(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    weights: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Path to a .safetensors file or a model directory containing safetensors.",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    text: str = typer.Option(
+        "The future of AI is",
+        "--text",
+        help="Prompt text to complete.",
+    ),
+    max_len: int = typer.Option(
+        32,
+        "--max-len",
+        help="Total sequence length target for generation.",
+    ),
+    hf_model_dir: Path | None = typer.Option(
+        None,
+        "--hf-model-dir",
+        help="HF model directory for AutoModel (defaults to weights directory).",
+    ),
+    tokenizer: str | None = typer.Option(
+        None,
+        "--tokenizer",
+        help="Tokenizer source override (local path or HF repo id).",
+    ),
+    class_name: str = typer.Option(
+        "AxonGeneratedModel",
+        "--class-name",
+        help="Generated PyTorch class name.",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to last module in file).",
+    ),
+    dtype: str = typer.Option(
+        "float32",
+        "--dtype",
+        help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
+    ),
+    strip_model_prefix: bool = typer.Option(
+        False,
+        "--strip-model-prefix",
+        help="Strip leading 'model.' from safetensors keys.",
+    ),
+) -> None:
+    """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_test")
+    try:
+        run_fn(
+            axon_file=axon_path,
+            weights=weights,
+            device=device,
+            text=text,
+            max_len=max_len,
+            hf_model_dir=hf_model_dir,
+            tokenizer=tokenizer,
+            class_name=class_name,
+            main_module=main_module,
+            dtype=dtype,
+            strip_model_prefix=strip_model_prefix,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+__all__ = ["app", "emit_generic", "axon_to_synapse", "synapse_to_axon", "axon_test"]

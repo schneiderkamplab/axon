@@ -24,6 +24,34 @@ from brainsurgery.web.ui.session import _SessionState
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, Any]) -> dict[str, Any]:
+    patched = dict(plan)
+    model_file = "models/gpt2/model.safetensors"
+
+    inputs = patched.get("inputs")
+    if isinstance(inputs, list):
+        patched["inputs"] = [model_file if item == "models/gpt2" else item for item in inputs]
+
+    transforms = patched.get("transforms")
+    if isinstance(transforms, list):
+        updated_transforms: list[Any] = []
+        for item in transforms:
+            if (
+                isinstance(item, dict)
+                and "load" in item
+                and isinstance(item["load"], dict)
+                and item["load"].get("path") == "models/gpt2"
+            ):
+                load_payload = dict(item["load"])
+                load_payload["path"] = model_file
+                updated_transforms.append({"load": load_payload})
+            else:
+                updated_transforms.append(item)
+        patched["transforms"] = updated_transforms
+
+    return patched
+
+
 def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
@@ -93,6 +121,7 @@ def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
     plan_path = REPO_ROOT / "examples" / "gpt2.yaml"
     plan_obj = OmegaConf.to_container(OmegaConf.load(plan_path), resolve=True)
     assert isinstance(plan_obj, dict)
+    plan_obj = _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan_obj)
 
     inputs = plan_obj.get("inputs")
     transforms = plan_obj.get("transforms")

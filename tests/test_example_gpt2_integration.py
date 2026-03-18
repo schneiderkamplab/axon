@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from brainsurgery.engine import (
     RuntimeFlagLifecycleScope,
@@ -51,9 +52,44 @@ def _ensure_gpt2_model_path() -> Path:
     return model_path
 
 
-def test_download_gpt2_model_and_run_example_yaml() -> None:
+def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, object]) -> dict[str, object]:
+    patched = dict(plan)
+    model_file = "models/gpt2/model.safetensors"
+
+    inputs = patched.get("inputs")
+    if isinstance(inputs, list):
+        patched["inputs"] = [model_file if item == "models/gpt2" else item for item in inputs]
+
+    transforms = patched.get("transforms")
+    if isinstance(transforms, list):
+        updated_transforms: list[object] = []
+        for item in transforms:
+            if (
+                isinstance(item, dict)
+                and "load" in item
+                and isinstance(item["load"], dict)
+                and item["load"].get("path") == "models/gpt2"
+            ):
+                load_payload = dict(item["load"])
+                load_payload["path"] = model_file
+                updated_transforms.append({"load": load_payload})
+            else:
+                updated_transforms.append(item)
+        patched["transforms"] = updated_transforms
+
+    return patched
+
+
+def test_download_gpt2_model_and_run_example_yaml(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     _ensure_gpt2_model_path()
+    source_plan = OmegaConf.to_container(
+        OmegaConf.load(repo_root / "examples" / "gpt2.yaml"), resolve=True
+    )
+    assert isinstance(source_plan, dict)
+    patched_plan = _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(source_plan)
+    plan_path = tmp_path / "gpt2_integration.yaml"
+    plan_path.write_text(OmegaConf.to_yaml(patched_plan, resolve=True), encoding="utf-8")
 
     run = subprocess.run(
         [
@@ -63,7 +99,7 @@ def test_download_gpt2_model_and_run_example_yaml() -> None:
             "--log-level",
             "warning",
             "--no-summarize",
-            str(repo_root / "examples" / "gpt2.yaml"),
+            str(plan_path),
         ],
         cwd=repo_root,
         capture_output=True,

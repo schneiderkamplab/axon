@@ -271,8 +271,12 @@ def _lower_expr(
     bind_parts = _split_top_level(expr, ">>=")
     if len(bind_parts) > 1:
         bind_graph: list[dict[str, Any]] = []
-        bind_ref = ctx.fresh("bind")
-        bind_graph.extend(_lower_expr(bind_parts[0], bind_ref, ctx, when=when))
+        first_bind = bind_parts[0].strip()
+        if _is_name_token(first_bind):
+            bind_ref = first_bind
+        else:
+            bind_ref = ctx.fresh("bind")
+            bind_graph.extend(_lower_expr(first_bind, bind_ref, ctx, when=when))
         for idx, part in enumerate(bind_parts[1:], start=1):
             match = _LAMBDA_RE.match(part.strip())
             if match is None:
