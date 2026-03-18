@@ -65,7 +65,16 @@ def _extract_logits(output: Any) -> torch.Tensor:
         (
             "gpt2_synapse.yaml",
             "gpt2.axon",
-            {"D": 768, "L": 12, "H": 12, "V": None, "EPS": 1e-05, "B": None, "T": None},
+            {
+                "T": 1024,
+                "D": 768,
+                "L": 12,
+                "H": 12,
+                "V": None,
+                "EPS": 1e-05,
+                "B": None,
+                "S": None,
+            },
         ),
         ("gemma3_270m_synapse.yaml", "gemma3_270m.axon", None),
         ("olmoe_1b_7b_0924_synapse.yaml", "olmoe_1b_7b_0924.axon", None),

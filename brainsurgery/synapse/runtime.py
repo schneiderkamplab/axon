@@ -117,22 +117,38 @@ class SynapseProgramModel(nn.Module):
             raise ValueError(f"{field} must be a non-empty string")
         return value
 
-    def generate(self, input_ids: torch.Tensor, *, eos_token_id: int, max_len: int) -> torch.Tensor:
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        eos_token_id: int,
+        max_len: int,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be rank-2 [batch, seq]")
         if max_len <= 0:
             raise ValueError("max_len must be > 0")
+        if attention_mask is not None:
+            if attention_mask.ndim != 2:
+                raise ValueError("attention_mask must be rank-2 [batch, seq]")
+            if attention_mask.shape != input_ids.shape:
+                raise ValueError("attention_mask must have same shape as input_ids")
         if input_ids.size(1) >= max_len:
             return input_ids[:, :max_len]
 
         generated = input_ids
+        generated_mask = attention_mask
         finished = torch.zeros(generated.size(0), dtype=torch.bool, device=generated.device)
         was_training = self.training
         self.eval()
         try:
             with torch.no_grad():
                 while generated.size(1) < max_len and not torch.all(finished):
-                    model_out = self.forward(generated)
+                    if generated_mask is None:
+                        model_out = self.forward(generated)
+                    else:
+                        model_out = self.forward(generated, attention_mask=generated_mask)
                     if isinstance(model_out, dict):
                         logits = model_out["logits"]
                     else:
@@ -145,6 +161,13 @@ class SynapseProgramModel(nn.Module):
                     )
                     generated = torch.cat([generated, next_token.unsqueeze(1)], dim=1)
                     finished = torch.logical_or(finished, next_token == eos_token_id)
+                    if generated_mask is not None:
+                        next_mask = torch.ones(
+                            (generated_mask.shape[0], 1),
+                            dtype=generated_mask.dtype,
+                            device=generated_mask.device,
+                        )
+                        generated_mask = torch.cat([generated_mask, next_mask], dim=1)
         finally:
             if was_training:
                 self.train()

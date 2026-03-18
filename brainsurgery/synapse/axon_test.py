@@ -281,7 +281,7 @@ def run_axon_test(
         input_ids = inputs["input_ids"]
         hf_inputs: dict[str, Any] = {"input_ids": input_ids}
         attention_mask = inputs.get("attention_mask")
-        if attention_mask is not None and len(prompts) == 1:
+        if attention_mask is not None:
             hf_inputs["attention_mask"] = attention_mask
 
         def _run_hf_generate(model: Any = hf) -> torch.Tensor:
@@ -293,8 +293,14 @@ def run_axon_test(
             )
 
         hf_gen, hf_time = _time_generate("HF", _run_hf_generate)
+        hf_forward_inputs = dict(hf_inputs)
+        if attention_mask is not None:
+            # Align forward-logit comparison with decoder generation semantics under padding.
+            pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
+            pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)
+            hf_forward_inputs["position_ids"] = pos_ids
         with torch.no_grad():
-            hf_logits = hf(**hf_inputs, use_cache=False).logits
+            hf_logits = hf(**hf_forward_inputs, use_cache=False).logits
 
         del hf
         _cleanup(resolved_device)
@@ -309,12 +315,18 @@ def run_axon_test(
 
         def _run_syn_generate(model: Any = syn) -> torch.Tensor:
             return model.generate(
-                input_ids, eos_token_id=tokenizer_obj.eos_token_id, max_len=max_len
+                input_ids,
+                eos_token_id=tokenizer_obj.eos_token_id,
+                max_len=max_len,
+                attention_mask=attention_mask,
             )
 
         syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
+        syn_inputs: dict[str, Any] = {"input_ids": input_ids}
+        if attention_mask is not None:
+            syn_inputs["attention_mask"] = attention_mask
         with torch.no_grad():
-            syn_logits = _extract_logits(syn(input_ids))
+            syn_logits = _extract_logits(syn(**syn_inputs))
 
         gen_hf = int(hf_gen.shape[1] - input_ids.shape[1])
         gen_syn = int(syn_gen.shape[1] - input_ids.shape[1])
@@ -326,6 +338,34 @@ def run_axon_test(
         max_diff = float(diff.max())
         last_max_diff = float(diff[:, -1, :].max())
         top1_eq = bool((syn_logits[:, -1, :].argmax(-1) == hf_logits[:, -1, :].argmax(-1)).all())
+
+        masked_mean_diff: float | None = None
+        masked_max_diff: float | None = None
+        masked_last_max_diff: float | None = None
+        masked_top1_eq: bool | None = None
+        if attention_mask is not None:
+            mask_bool = attention_mask.to(torch.bool)
+            valid = mask_bool.unsqueeze(-1).expand_as(diff)
+            valid_count = int(valid.sum().item())
+            if valid_count > 0:
+                valid_diff = diff[valid]
+                masked_mean_diff = float(valid_diff.mean())
+                masked_max_diff = float(valid_diff.max())
+            else:
+                masked_mean_diff = 0.0
+                masked_max_diff = 0.0
+
+            attn_bool = attention_mask.to(torch.bool)
+            rev_last = torch.argmax(attn_bool.flip(dims=[1]).to(torch.long), dim=1)
+            lengths = (attn_bool.shape[1] - 1) - rev_last
+            any_valid = attn_bool.any(dim=1)
+            lengths = torch.where(lengths >= 0, lengths, torch.zeros_like(lengths))
+            lengths = torch.where(any_valid, lengths, torch.zeros_like(lengths))
+            b_idx = torch.arange(attention_mask.shape[0], device=attention_mask.device)
+            syn_last = syn_logits[b_idx, lengths]
+            hf_last = hf_logits[b_idx, lengths]
+            masked_last_max_diff = float((syn_last.float() - hf_last.float()).abs().max())
+            masked_top1_eq = bool((syn_last.argmax(-1) == hf_last.argmax(-1)).all())
 
         if len(safetensors_files) == 1:
             safetensors_desc = str(safetensors_files[0])
@@ -358,8 +398,20 @@ def run_axon_test(
             print(tokenizer_obj.decode(syn_gen[idx].tolist(), skip_special_tokens=True))
             print()
         print(
-            "Logits diff | mean/max/last_max/top1_eq:", mean_diff, max_diff, last_max_diff, top1_eq
+            "Logits diff (raw) | mean/max/last_max/top1_eq:",
+            mean_diff,
+            max_diff,
+            last_max_diff,
+            top1_eq,
         )
+        if attention_mask is not None:
+            print(
+                "Logits diff (masked) | mean/max/last_max/top1_eq:",
+                masked_mean_diff,
+                masked_max_diff,
+                masked_last_max_diff,
+                masked_top1_eq,
+            )
 
         result = {
             "hf_time": hf_time,
@@ -369,6 +421,10 @@ def run_axon_test(
             "max_diff": max_diff,
             "last_max_diff": last_max_diff,
             "top1_eq": top1_eq,
+            "masked_mean_diff": masked_mean_diff,
+            "masked_max_diff": masked_max_diff,
+            "masked_last_max_diff": masked_last_max_diff,
+            "masked_top1_eq": masked_top1_eq,
             "prompts": prompts,
             "generated_hf": hf_gen,
             "generated_axon": syn_gen,

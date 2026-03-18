@@ -24,27 +24,47 @@ def interpret(
     q = model._read_tensor_input(node_spec.get("in"), env)
     key_ref = node_spec.get("key")
     key_tensor = model._read_tensor_input(key_ref, env) if isinstance(key_ref, str) else q
+    padding_ref = node_spec.get("padding_mask")
+    padding_mask = env.get(padding_ref) if isinstance(padding_ref, str) else None
+    if padding_mask is not None and not torch.is_tensor(padding_mask):
+        raise ValueError("causal_mask.padding_mask must resolve to tensor or null")
     out_name = model._require_name(node_spec.get("out"), field="causal_mask.out")
-    if node_spec.get("window") is None:
+    window_expr = node_spec.get("window")
+    if window_expr is None and padding_mask is None:
         env[out_name] = None
         return
+
     q_len = q.shape[-2]
     k_len = key_tensor.shape[-2]
     i_idx = torch.arange(q_len, device=q.device).unsqueeze(1)
     j_idx = torch.arange(k_len, device=q.device).unsqueeze(0)
-    keep = j_idx <= i_idx
-    win = int(model._eval_expr(node_spec.get("window"), env, symbols))
-    if win >= k_len and q_len == k_len:
-        env[out_name] = None
-        return
-    keep = keep & (j_idx >= (i_idx - win + 1))
+
+    if window_expr is None:
+        keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
+    else:
+        keep = j_idx <= i_idx
+        win = int(model._eval_expr(window_expr, env, symbols))
+        if win >= k_len and q_len == k_len and padding_mask is None:
+            env[out_name] = None
+            return
+        keep = keep & (j_idx >= (i_idx - win + 1))
+
+    if padding_mask is not None:
+        if padding_mask.ndim != 2:
+            raise ValueError("causal_mask.padding_mask must be rank-2 [batch, seq]")
+        if int(padding_mask.shape[-1]) != k_len:
+            raise ValueError("causal_mask.padding_mask width must match key sequence length")
+        pad_keep = padding_mask.to(torch.bool).unsqueeze(1).unsqueeze(1)
+        keep = keep.unsqueeze(0).unsqueeze(0) & pad_keep
+    else:
+        keep = keep.view(1, 1, q_len, k_len)
+
     mask_value = torch.finfo(q.dtype).min
-    mask = torch.where(
+    env[out_name] = torch.where(
         keep,
         torch.zeros((), dtype=q.dtype, device=q.device),
         torch.full((), mask_value, dtype=q.dtype, device=q.device),
     )
-    env[out_name] = mask.view(1, 1, q_len, k_len)
     return
 
 
@@ -80,24 +100,61 @@ def compile(
     keep = emitter._fresh("keep")
     mask_val = emitter._fresh("mask_val")
     window_expr = node_spec.get("window")
-    if window_expr is None:
+    padding_name = node_spec.get("padding_mask")
+    padding_expr = (
+        env.get(padding_name) if isinstance(padding_name, str) and padding_name in env else None
+    )
+    if window_expr is None and padding_expr is None:
         lines.append(f"{indent}{out_var} = None")
         return lines
     lines.append(f"{indent}{q_len} = {q}.shape[-2]")
     lines.append(f"{indent}{k_len} = {k}.shape[-2]")
     lines.append(f"{indent}{i_idx} = torch.arange({q_len}, device={q}.device).unsqueeze(1)")
     lines.append(f"{indent}{j_idx} = torch.arange({k_len}, device={q}.device).unsqueeze(0)")
-    lines.append(f"{indent}{keep} = ({j_idx} <= {i_idx})")
-    win = emitter._fresh("window")
-    window_code = emitter._expr_code(window_expr, env)
-    lines.append(f"{indent}{win} = int({window_code})")
-    lines.append(f"{indent}if {win} >= {k_len} and {q_len} == {k_len}:")
-    lines.append(f"{indent}    {out_var} = None")
-    lines.append(f"{indent}else:")
-    lines.append(f"{indent}    {keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
-    lines.append(f"{indent}    {mask_val} = torch.finfo({q}.dtype).min")
+    if window_expr is None:
+        lines.append(
+            f"{indent}{keep} = torch.ones(({q_len}, {k_len}), dtype=torch.bool, device={q}.device)"
+        )
+    else:
+        win = emitter._fresh("window")
+        window_code = emitter._expr_code(window_expr, env)
+        lines.append(f"{indent}{keep} = ({j_idx} <= {i_idx})")
+        lines.append(f"{indent}{win} = int({window_code})")
+        if padding_expr is None:
+            lines.append(f"{indent}if {win} >= {k_len} and {q_len} == {k_len}:")
+            lines.append(f"{indent}    {out_var} = None")
+            lines.append(f"{indent}else:")
+            lines.append(f"{indent}    {keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
+            lines.append(f"{indent}    {mask_val} = torch.finfo({q}.dtype).min")
+            lines.append(
+                f"{indent}    {out_var} = torch.where({keep}.view(1, 1, {q_len}, {k_len}), torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
+            )
+            return lines
+        lines.append(f"{indent}{keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
+
+    if padding_expr is not None:
+        pad_keep = emitter._fresh("pad_keep")
+        lines.append(f"{indent}if {padding_expr} is not None:")
+        lines.append(f"{indent}    if {padding_expr}.ndim != 2:")
+        lines.append(
+            f"{indent}        raise ValueError('causal_mask.padding_mask must be rank-2 [batch, seq]')"
+        )
+        lines.append(f"{indent}    if int({padding_expr}.shape[-1]) != {k_len}:")
+        lines.append(
+            f"{indent}        raise ValueError('causal_mask.padding_mask width must match key sequence length')"
+        )
+        lines.append(
+            f"{indent}    {pad_keep} = {padding_expr}.to(torch.bool).unsqueeze(1).unsqueeze(1)"
+        )
+        lines.append(f"{indent}    {keep} = {keep}.unsqueeze(0).unsqueeze(0) & {pad_keep}")
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {keep} = {keep}.view(1, 1, {q_len}, {k_len})")
+    else:
+        lines.append(f"{indent}{keep} = {keep}.view(1, 1, {q_len}, {k_len})")
+
+    lines.append(f"{indent}{mask_val} = torch.finfo({q}.dtype).min")
     lines.append(
-        f"{indent}    {out_var} = torch.where({keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device)).view(1, 1, {q_len}, {k_len})"
+        f"{indent}{out_var} = torch.where({keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
     )
     return lines
 
