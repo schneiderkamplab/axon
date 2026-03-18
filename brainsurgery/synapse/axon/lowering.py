@@ -259,6 +259,32 @@ def _is_name_token(expr: str) -> bool:
     return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token) is not None
 
 
+def _known_output_arity(callee: str, ctx: _LowerCtx) -> int | None:
+    if ctx.block_signatures and callee in ctx.block_signatures:
+        _, output_names = ctx.block_signatures[callee]
+        return len(output_names)
+
+    known: dict[str, int] = {
+        "reshape_heads_triplet": 3,
+        "topk": 2,
+        "apply_rope_pair": 2,
+        "cache::update": 3,
+        "cache::coalesce": 2,
+        "moe_select_tokens": 4,
+    }
+    return known.get(callee)
+
+
+def _pipeline_temp_out(stage: str, ctx: _LowerCtx) -> str | list[str]:
+    if not _CALL_RE.match(stage):
+        return ctx.fresh("pipe")
+    callee, _, _ = _parse_call(stage)
+    arity = _known_output_arity(callee, ctx)
+    if arity is None or arity <= 1:
+        return ctx.fresh("pipe")
+    return [ctx.fresh("pipe") for _ in range(arity)]
+
+
 def _lower_expr(
     expr: str,
     out: str | list[str],
@@ -283,10 +309,12 @@ def _lower_expr(
                 raise ValueError(f"expected lambda after >>=, got: {part!r}")
             var_name = match.group(1)
             body = _substitute_var(match.group(2), var_name, bind_ref)
-            next_out: str | list[str] = out if idx == len(bind_parts) - 1 else ctx.fresh("bind")
-            bind_graph.extend(_lower_expr(body, next_out, ctx, when=when))
-            if isinstance(next_out, str):
-                bind_ref = next_out
+            bind_next_out: str | list[str] = (
+                out if idx == len(bind_parts) - 1 else ctx.fresh("bind")
+            )
+            bind_graph.extend(_lower_expr(body, bind_next_out, ctx, when=when))
+            if isinstance(bind_next_out, str):
+                bind_ref = bind_next_out
         return bind_graph
 
     ternary = _split_ternary(expr)
@@ -326,7 +354,7 @@ def _lower_expr(
 
         first = stages[0]
         if _CALL_RE.match(first):
-            first_out = ctx.fresh("pipe")
+            first_out: str | list[str] = out if len(stages) == 1 else _pipeline_temp_out(first, ctx)
             pipe_graph.extend(_lower_simple_call(first, first_out, ctx, when=when))
             pipe_ref = first_out
         else:
@@ -339,11 +367,13 @@ def _lower_expr(
             else:
                 callee = stage
                 args, kwargs = [], {}
-            next_out = out if idx == len(stages) - 1 else ctx.fresh("pipe")
-            call_expr = _render_call(callee, [pipe_ref, *args], kwargs)
+            next_out: str | list[str] = (
+                out if idx == len(stages) - 1 else _pipeline_temp_out(stage, ctx)
+            )
+            piped_args = [pipe_ref] if isinstance(pipe_ref, str) else list(pipe_ref)
+            call_expr = _render_call(callee, [*piped_args, *args], kwargs)
             pipe_graph.extend(_lower_simple_call(call_expr, next_out, ctx, when=when))
-            if isinstance(next_out, str):
-                pipe_ref = next_out
+            pipe_ref = next_out
         return pipe_graph
 
     plus = _split_binary(expr, "+")

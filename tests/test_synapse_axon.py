@@ -159,6 +159,34 @@ module tiny(x) -> (y) do
     }
 
 
+def test_lower_pipeline_multi_output_stage_into_next_call_args() -> None:
+    source = """
+module tiny(q, k, v, bias) -> (ctx_heads) do
+  ctx_heads <- reshape_heads_triplet(q, k, v, heads=12, head_dim=64) |>
+    attention(backend=sdpa, causal=true, causal_mask_buffer=bias)
+  return ctx_heads
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert len(node_specs) == 2
+    assert node_specs[0] == {
+        "op": "reshape_heads_triplet",
+        "in": ["q", "k", "v"],
+        "out": ["pipe_1", "pipe_2", "pipe_3"],
+        "heads": 12,
+        "head_dim": 64,
+    }
+    assert node_specs[1] == {
+        "op": "attention",
+        "in": ["pipe_1", "pipe_2", "pipe_3"],
+        "out": "ctx_heads",
+        "backend": "sdpa",
+        "causal": True,
+        "causal_mask_buffer": "bias",
+    }
+
+
 def test_lower_ternary_to_when_guards() -> None:
     source = """
 module tiny(x, use_cache?) -> (k, v) do
