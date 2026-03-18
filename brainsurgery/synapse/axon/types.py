@@ -37,6 +37,7 @@ class AxonRepeat:
     name: str | None
     var: str
     range_expr: str
+    start_expr: str
     body: tuple["AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat", ...]
 
 

@@ -272,13 +272,18 @@ class _Emitter:
                 if not isinstance(var_name, str):
                     raise ValueError("repeat requires string var")
                 range_code = self._expr_code(node_spec.get("range"), env)
+                start_code = self._expr_code(node_spec.get("start", 0), env)
                 loop_var = self._py_name(var_name)
                 lines.append(f"{inner_indent}for {loop_var} in range(int({range_code})):")
                 saved = env.get(var_name)
-                env[var_name] = loop_var
+                iter_value = self._fresh(self._py_name(var_name))
+                lines.append(
+                    f"{inner_indent}    {iter_value} = int({start_code}) + int({loop_var})"
+                )
+                env[var_name] = iter_value
                 child_scope = self._fresh("scope")
                 lines.append(
-                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, f'{node_name}.{{{loop_var}}}')"
+                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, f'{node_name}.{{{iter_value}}}')"
                 )
                 body = node_spec.get("body")
                 if not isinstance(body, list):

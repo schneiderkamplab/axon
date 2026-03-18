@@ -178,6 +178,9 @@ class SynapseProgramModel(nn.Module):
                 range_value = self._eval_expr(node_spec.get("range"), env, symbols)
                 if not isinstance(range_value, int):
                     raise ValueError(f"repeat range must resolve to int, got {range_value!r}")
+                start_value = self._eval_expr(node_spec.get("start", 0), env, symbols)
+                if not isinstance(start_value, int):
+                    raise ValueError(f"repeat start must resolve to int, got {start_value!r}")
                 var_name = node_spec.get("var")
                 if not isinstance(var_name, str):
                     raise ValueError("repeat requires string 'var'")
@@ -185,8 +188,9 @@ class SynapseProgramModel(nn.Module):
                 if not isinstance(body, list):
                     raise ValueError("repeat requires list 'body'")
                 for i in range(range_value):
-                    env[var_name] = i
-                    repeat_scope = self._join(scope, f"{node_name}.{i}")
+                    iter_value = start_value + i
+                    env[var_name] = iter_value
+                    repeat_scope = self._join(scope, f"{node_name}.{iter_value}")
                     self._run_graph(body, env, scope=repeat_scope, symbols=symbols, blocks=blocks)
                 env.pop(var_name, None)
                 continue

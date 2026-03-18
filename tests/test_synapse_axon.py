@@ -46,6 +46,39 @@ module tiny(x) -> (y) do
     assert len(module.statements) == 2
 
 
+def test_parse_for_at_range_loop_sugar() -> None:
+    source = """
+module tiny(x) -> (y) do
+  for@model.layers i <- [0..3] do
+    y <- add(x, x)
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    model = spec["model"]
+    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
+    assert repeat_node["op"] == "repeat"
+    assert repeat_node["var"] == "i"
+    assert repeat_node["range"] == "3"
+
+
+def test_parse_for_at_range_loop_sugar_with_nonzero_start() -> None:
+    source = """
+module tiny(x) -> (y) do
+  for@model.layers i <- [1..4] do
+    y <- add(x, x)
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    model = spec["model"]
+    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
+    assert repeat_node["op"] == "repeat"
+    assert repeat_node["var"] == "i"
+    assert repeat_node["start"] == "1"
+    assert repeat_node["range"] == "(4) - (1)"
+
+
 def test_parse_axon_ignores_haskell_style_comments() -> None:
     source = """
 -- leading comment

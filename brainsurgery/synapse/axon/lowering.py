@@ -588,6 +588,8 @@ def _lower_statements(
                     "body": body_graph,
                 }
             }
+            if stmt.start_expr != "0":
+                repeat_item[repeat_name.split(".")[-1]]["start"] = stmt.start_expr
             segments = [part for part in repeat_name.split(".") if part]
             for segment in reversed(segments[:-1]):
                 repeat_item = {segment: {"graph": [repeat_item]}}

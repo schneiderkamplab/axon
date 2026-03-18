@@ -11,6 +11,9 @@ _DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*=\s*do\s*$")
 _REPEAT_RE = re.compile(
     r"^repeat(?:\s+([A-Za-z_][A-Za-z0-9_.]*)\s*:)?\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+?)(?:\s+do)?\s*$"
 )
+_FOR_AT_RANGE_RE = re.compile(
+    r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*\[(.+?)\.\.(.+?)\]\s+do\s*$"
+)
 
 
 def _strip_haskell_comment(line: str) -> str:
@@ -213,10 +216,20 @@ def _parse_statements(
             raise ValueError(f"unexpected indentation at line: {line!r}")
 
         repeat_match = _REPEAT_RE.match(line)
-        if repeat_match is not None:
-            repeat_name = repeat_match.group(1).strip() if repeat_match.group(1) else None
-            var = repeat_match.group(2).strip()
-            range_expr = repeat_match.group(3).strip()
+        for_at_match = _FOR_AT_RANGE_RE.match(line)
+        if repeat_match is not None or for_at_match is not None:
+            if repeat_match is not None:
+                repeat_name = repeat_match.group(1).strip() if repeat_match.group(1) else None
+                var = repeat_match.group(2).strip()
+                range_expr = repeat_match.group(3).strip()
+                start_expr = "0"
+            else:
+                assert for_at_match is not None
+                repeat_name = for_at_match.group(1).strip() if for_at_match.group(1) else None
+                var = for_at_match.group(2).strip()
+                start_expr = for_at_match.group(3).strip()
+                end_expr = for_at_match.group(4).strip()
+                range_expr = end_expr if start_expr == "0" else f"({end_expr}) - ({start_expr})"
             if i + 1 >= len(lines):
                 raise ValueError("repeat requires indented body")
             next_indent, _ = lines[i + 1]
@@ -224,7 +237,13 @@ def _parse_statements(
                 raise ValueError("repeat requires indented body")
             body, new_i = _parse_statements(lines, i + 1, next_indent)
             out.append(
-                AxonRepeat(name=repeat_name, var=var, range_expr=range_expr, body=tuple(body))
+                AxonRepeat(
+                    name=repeat_name,
+                    var=var,
+                    range_expr=range_expr,
+                    start_expr=start_expr,
+                    body=tuple(body),
+                )
             )
             i = new_i
             continue
