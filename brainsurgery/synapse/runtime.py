@@ -124,21 +124,25 @@ class SynapseProgramModel(nn.Module):
         eos_token_id: int,
         max_len: int,
         attention_mask: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be rank-2 [batch, seq]")
         if max_len <= 0:
             raise ValueError("max_len must be > 0")
-        if attention_mask is not None:
-            if attention_mask.ndim != 2:
+        if attention_mask is not None and attn_mask is not None:
+            raise ValueError("pass at most one of attention_mask or attn_mask")
+        mask = attention_mask if attention_mask is not None else attn_mask
+        if mask is not None:
+            if mask.ndim != 2:
                 raise ValueError("attention_mask must be rank-2 [batch, seq]")
-            if attention_mask.shape != input_ids.shape:
+            if mask.shape != input_ids.shape:
                 raise ValueError("attention_mask must have same shape as input_ids")
         if input_ids.size(1) >= max_len:
             return input_ids[:, :max_len]
 
         generated = input_ids
-        generated_mask = attention_mask
+        generated_mask = mask
         finished = torch.zeros(generated.size(0), dtype=torch.bool, device=generated.device)
         was_training = self.training
         self.eval()
@@ -148,7 +152,11 @@ class SynapseProgramModel(nn.Module):
                     if generated_mask is None:
                         model_out = self.forward(generated)
                     else:
-                        model_out = self.forward(generated, attention_mask=generated_mask)
+                        model_out = self.forward(
+                            generated,
+                            attention_mask=generated_mask,
+                            attn_mask=generated_mask,
+                        )
                     if isinstance(model_out, dict):
                         logits = model_out["logits"]
                     else:

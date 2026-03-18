@@ -322,14 +322,27 @@ def _lower_simple_call(
     expr: str, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
-    if _op_name_from_callee(callee) in {"layernorm", "rmsnorm"} and "dim" not in kwargs and args:
+    op_name = _op_name_from_callee(callee)
+    if op_name == "embedding" and "embedding_dim" not in kwargs and "dim" in kwargs:
+        kwargs["embedding_dim"] = kwargs.pop("dim")
+    if op_name == "linear" and "transpose" in kwargs:
+        if "weight_layout" in kwargs:
+            raise ValueError("linear call cannot specify both transpose and weight_layout")
+        raw_transpose = kwargs.pop("transpose")
+        if isinstance(raw_transpose, bool):
+            kwargs["weight_layout"] = "io" if raw_transpose else "oi"
+        elif isinstance(raw_transpose, str) and raw_transpose.lower() in {"true", "false"}:
+            kwargs["weight_layout"] = "io" if raw_transpose.lower() == "true" else "oi"
+        else:
+            raise ValueError("linear transpose must be true/false")
+    if op_name in {"layernorm", "rmsnorm"} and "dim" not in kwargs and args:
         first_arg = args[0].strip()
         if _is_name_token(first_arg):
             inferred = ctx.tensor_last_dim.get(first_arg)
             if inferred is not None:
                 kwargs["dim"] = inferred
     if (
-        _op_name_from_callee(callee) == "linear"
+        op_name == "linear"
         and "out_features" not in kwargs
         and "out_dim" not in kwargs
         and isinstance(out, str)
@@ -337,15 +350,11 @@ def _lower_simple_call(
         inferred = ctx.tensor_last_dim.get(out)
         if inferred is not None:
             kwargs["out_features"] = inferred
-    if (
-        _op_name_from_callee(callee) == "embedding"
-        and "embedding_dim" not in kwargs
-        and isinstance(out, str)
-    ):
+    if op_name == "embedding" and "embedding_dim" not in kwargs and isinstance(out, str):
         inferred = ctx.tensor_last_dim.get(out)
         if inferred is not None:
             kwargs["embedding_dim"] = inferred
-    if _op_name_from_callee(callee) == "repeat_kv" and args:
+    if op_name == "repeat_kv" and args:
         src_name = args[0].strip()
         if _is_name_token(src_name):
             if "kv_heads" not in kwargs:
@@ -357,7 +366,7 @@ def _lower_simple_call(
                 if inferred_heads is not None:
                     kwargs["heads"] = inferred_heads
     if (
-        _op_name_from_callee(callee) == "split_last"
+        op_name == "split_last"
         and isinstance(out, list)
         and "sizes" not in kwargs
         and "parts" not in kwargs

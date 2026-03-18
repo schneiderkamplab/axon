@@ -12,7 +12,7 @@ _REPEAT_RE = re.compile(
     r"^repeat(?:\s+([A-Za-z_][A-Za-z0-9_.]*)\s*:)?\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+?)(?:\s+do)?\s*$"
 )
 _FOR_AT_RANGE_RE = re.compile(
-    r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*\[(.+?)\.\.(.+?)\]\s+do\s*$"
+    r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
 )
 _TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 _TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
@@ -367,9 +367,16 @@ def _parse_statements(
                 assert for_at_match is not None
                 repeat_name = for_at_match.group(1).strip() if for_at_match.group(1) else None
                 var = for_at_match.group(2).strip()
-                start_expr = for_at_match.group(3).strip()
-                end_expr = for_at_match.group(4).strip()
-                range_expr = end_expr if start_expr == "0" else f"({end_expr}) - ({start_expr})"
+                start_delim = for_at_match.group(3)
+                start_raw = for_at_match.group(4).strip()
+                end_raw = for_at_match.group(5).strip()
+                end_delim = for_at_match.group(6)
+
+                start_expr = start_raw if start_delim == "[" else f"({start_raw}) + 1"
+                end_exclusive = f"({end_raw}) + 1" if end_delim == "]" else end_raw
+                range_expr = (
+                    end_exclusive if start_expr == "0" else f"({end_exclusive}) - ({start_expr})"
+                )
             if i + 1 >= len(lines):
                 raise ValueError("repeat requires indented body")
             next_indent, _ = lines[i + 1]

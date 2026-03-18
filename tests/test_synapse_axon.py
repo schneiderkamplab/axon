@@ -59,7 +59,7 @@ module tiny(x) -> (y) do
     repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
     assert repeat_node["op"] == "repeat"
     assert repeat_node["var"] == "i"
-    assert repeat_node["range"] == "3"
+    assert repeat_node["range"] == "(3) + 1"
 
 
 def test_parse_for_at_range_loop_sugar_with_nonzero_start() -> None:
@@ -76,7 +76,41 @@ module tiny(x) -> (y) do
     assert repeat_node["op"] == "repeat"
     assert repeat_node["var"] == "i"
     assert repeat_node["start"] == "1"
+    assert repeat_node["range"] == "((4) + 1) - (1)"
+
+
+def test_parse_for_at_range_loop_sugar_half_open_with_paren() -> None:
+    source = """
+module tiny(x) -> (y) do
+  for@model.layers i <- [1..4) do
+    y <- add(x, x)
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    model = spec["model"]
+    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
+    assert repeat_node["op"] == "repeat"
+    assert repeat_node["var"] == "i"
+    assert repeat_node["start"] == "1"
     assert repeat_node["range"] == "(4) - (1)"
+
+
+def test_parse_for_at_range_loop_sugar_left_open_right_closed() -> None:
+    source = """
+module tiny(x) -> (y) do
+  for@model.layers i <- (0..4] do
+    y <- add(x, x)
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    model = spec["model"]
+    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
+    assert repeat_node["op"] == "repeat"
+    assert repeat_node["var"] == "i"
+    assert repeat_node["start"] == "(0) + 1"
+    assert repeat_node["range"] == "((4) + 1) - ((0) + 1)"
 
 
 def test_parse_top_level_haskell_constants_across_modules() -> None:
@@ -181,6 +215,34 @@ emb ids = do
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["op"] == "embedding"
     assert node_specs[0]["embedding_dim"] == "D"
+
+
+def test_embedding_accepts_dim_alias_for_embedding_dim() -> None:
+    source = """
+emb :: TokenIds[B,T] -> Tensor[B,T,D]
+emb ids = do
+  x <- embedding ids dim=D
+  return x
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "embedding"
+    assert node_specs[0]["embedding_dim"] == "D"
+
+
+def test_linear_accepts_transpose_alias_for_io_layout() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- linear x out_features=D transpose=true bias=false
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "linear"
+    assert node_specs[0]["weight_layout"] == "io"
 
 
 def test_infer_repeat_kv_heads_and_kv_heads_from_typed_shapes() -> None:

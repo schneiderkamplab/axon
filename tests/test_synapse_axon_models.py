@@ -71,7 +71,6 @@ def _extract_logits(output: Any) -> torch.Tensor:
                 "L": 12,
                 "H": 12,
                 "V": None,
-                "EPS": 1e-05,
                 "B": None,
                 "S": None,
             },

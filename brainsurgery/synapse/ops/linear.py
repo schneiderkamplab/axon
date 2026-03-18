@@ -8,6 +8,19 @@ from torch.nn import functional as F
 OP_NAME = "linear"
 
 
+def _resolve_weight_layout(node_spec: dict[str, Any]) -> str:
+    has_transpose = "transpose" in node_spec
+    has_layout = "weight_layout" in node_spec
+    if has_transpose and has_layout:
+        raise ValueError("linear node cannot specify both transpose and weight_layout")
+    if has_transpose:
+        transpose = node_spec.get("transpose")
+        if isinstance(transpose, bool):
+            return "io" if transpose else "oi"
+        raise ValueError("linear transpose must be boolean when provided")
+    return str(node_spec.get("weight_layout", "oi"))
+
+
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter
     tie = node_spec.get("tie_weight")
@@ -42,7 +55,7 @@ def interpret(
         bias_path = model._infer_param_path(node_spec, node_path=node_path, param_name="bias")
         bias = model._state.get(bias_path)
 
-    weight_layout = str(node_spec.get("weight_layout", "oi"))
+    weight_layout = _resolve_weight_layout(node_spec)
     out = model._require_name(node_spec.get("out"), field="linear.out")
     if weight_layout == "oi":
         env[out] = F.linear(x, weight, bias)
@@ -82,7 +95,7 @@ def compile(
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     bias_expr = f"self._state.get({infer_param('bias')})" if has_bias else "None"
 
-    weight_layout = str(node_spec.get("weight_layout", "oi"))
+    weight_layout = _resolve_weight_layout(node_spec)
     if weight_layout == "oi":
         lines.append(
             f"{indent}{out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"

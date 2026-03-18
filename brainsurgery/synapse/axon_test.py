@@ -279,6 +279,15 @@ def run_axon_test(
             padding=(len(prompts) > 1),
         ).to(resolved_device)
         input_ids = inputs["input_ids"]
+        model_inputs = lowered_spec.get("model", {}).get("inputs", {})
+        model_input_names = (
+            set(model_inputs.keys()) if isinstance(model_inputs, dict) else {"input_ids"}
+        )
+        syn_mask_key = (
+            "attn_mask"
+            if "attn_mask" in model_input_names
+            else ("attention_mask" if "attention_mask" in model_input_names else None)
+        )
         hf_inputs: dict[str, Any] = {"input_ids": input_ids}
         attention_mask = inputs.get("attention_mask")
         if attention_mask is not None:
@@ -314,17 +323,21 @@ def run_axon_test(
         syn = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
 
         def _run_syn_generate(model: Any = syn) -> torch.Tensor:
-            return model.generate(
-                input_ids,
-                eos_token_id=tokenizer_obj.eos_token_id,
-                max_len=max_len,
-                attention_mask=attention_mask,
-            )
+            generate_kwargs: dict[str, Any] = {
+                "eos_token_id": tokenizer_obj.eos_token_id,
+                "max_len": max_len,
+            }
+            if attention_mask is not None:
+                if syn_mask_key == "attn_mask":
+                    generate_kwargs["attn_mask"] = attention_mask
+                elif syn_mask_key == "attention_mask":
+                    generate_kwargs["attention_mask"] = attention_mask
+            return model.generate(input_ids, **generate_kwargs)
 
         syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
         syn_inputs: dict[str, Any] = {"input_ids": input_ids}
-        if attention_mask is not None:
-            syn_inputs["attention_mask"] = attention_mask
+        if attention_mask is not None and syn_mask_key is not None:
+            syn_inputs[syn_mask_key] = attention_mask
         with torch.no_grad():
             syn_logits = _extract_logits(syn(**syn_inputs))
 
