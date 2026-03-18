@@ -162,8 +162,12 @@ def _parse_statements(
 
         while i + 1 < len(lines):
             nxt_indent, nxt = lines[i + 1]
-            if nxt_indent > indent and (nxt.startswith("|>") or nxt.startswith(">>=")):
-                line = line.rstrip() + " " + nxt
+            current = line.rstrip()
+            nxt_line = nxt.strip()
+            current_continues = current.endswith("|>") or current.endswith(">>=")
+            next_is_continuation = nxt_line.startswith("|>") or nxt_line.startswith(">>=")
+            if nxt_indent > indent and (current_continues or next_is_continuation):
+                line = f"{current} {nxt_line}"
                 i += 1
                 continue
             break

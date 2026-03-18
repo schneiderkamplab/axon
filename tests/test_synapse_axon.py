@@ -63,6 +63,27 @@ module tiny(x, cache?) -> (y) do -- module comment
     assert node_specs[0]["out"] == "y"
 
 
+def test_parse_and_lower_pipeline_with_trailing_operator_continuations() -> None:
+    source = """
+module tiny(x) -> (qkv) do
+  qkv <- x |>
+    layernorm@ln_1(x, dim=768, eps=1e-05) |>
+    linear@attn.c_attn(out_features=2304, weight_layout=io, bias=true)
+  return qkv
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert len(node_specs) == 2
+    assert node_specs[0]["op"] == "layernorm"
+    assert node_specs[0]["out"] == "pipe_1"
+    assert "graph" in node_specs[1]
+    c_attn = node_specs[1]["graph"][0]["c_attn"]
+    assert c_attn["op"] == "linear"
+    assert c_attn["in"] == "pipe_1"
+    assert c_attn["out"] == "qkv"
+
+
 def test_lower_pipeline_axon_to_synapse_spec() -> None:
     source = """
 module tiny(x) -> (y) do
