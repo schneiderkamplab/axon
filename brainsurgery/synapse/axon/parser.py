@@ -6,6 +6,8 @@ import re
 from .types import AxonBind, AxonMeta, AxonModule, AxonParam, AxonRawNode, AxonRepeat, AxonReturn
 
 _HEADER_RE = re.compile(r"^module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*->\s*\((.*?)\)\s*do\s*$")
+_SIG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*::\s*(.+)\s*$")
+_DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*=\s*do\s*$")
 _REPEAT_RE = re.compile(
     r"^repeat(?:\s+([A-Za-z_][A-Za-z0-9_.]*)\s*:)?\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+?)(?:\s+do)?\s*$"
 )
@@ -60,6 +62,30 @@ def _split_top_level_csv(text: str) -> list[str]:
     return parts
 
 
+def _split_top_level(text: str, sep: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    seplen = len(sep)
+    while i < len(text):
+        ch = text[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if depth == 0 and text.startswith(sep, i):
+            parts.append(text[start:i].strip())
+            i += seplen
+            start = i
+            continue
+        i += 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _parse_params(raw: str) -> tuple[AxonParam, ...]:
     if not raw.strip():
         return ()
@@ -72,19 +98,62 @@ def _parse_params(raw: str) -> tuple[AxonParam, ...]:
     return tuple(out)
 
 
+def _parse_haskell_header(
+    lines: list[str],
+) -> tuple[str, tuple[AxonParam, ...], tuple[str, ...], int] | None:
+    if len(lines) < 2:
+        return None
+    sig_match = _SIG_RE.match(lines[0])
+    def_match = _DEF_RE.match(lines[1])
+    if sig_match is None or def_match is None:
+        return None
+
+    name_sig = sig_match.group(1)
+    name_def = def_match.group(1)
+    if name_sig != name_def:
+        raise ValueError(f"signature/definition name mismatch: {name_sig!r} != {name_def!r}")
+
+    sig_expr = sig_match.group(2).strip()
+    parts = _split_top_level(sig_expr, "->")
+    if len(parts) < 1:
+        raise ValueError("invalid Axon type signature")
+    arg_types = parts[:-1]
+    opt_flags = [arg.strip().startswith("?") for arg in arg_types]
+
+    arg_names = [p for p in def_match.group(2).strip().split() if p]
+    if len(arg_names) != len(opt_flags):
+        raise ValueError(
+            f"signature arg count ({len(opt_flags)}) does not match definition args ({len(arg_names)})"
+        )
+    params = tuple(
+        AxonParam(name=arg_name.strip(), optional=opt_flags[idx])
+        for idx, arg_name in enumerate(arg_names)
+    )
+    # Haskell-style signatures carry output types, not names. Return names will be inferred from `return`.
+    return name_sig, params, (), 2
+
+
 def parse_axon_module(source: str) -> AxonModule:
     lines = _normalized_source_lines(source)
     if not lines:
         raise ValueError("empty Axon source")
 
     header_match = _HEADER_RE.match(lines[0])
-    if header_match is None:
-        raise ValueError("expected module header: module <name>(...) -> (...) do")
+    if header_match is not None:
+        module_name = header_match.group(1)
+        params = _parse_params(header_match.group(2))
+        returns = tuple(part.strip() for part in _split_top_level_csv(header_match.group(3)))
+        body_start = 1
+    else:
+        parsed = _parse_haskell_header(lines)
+        if parsed is None:
+            raise ValueError(
+                "expected module header or haskell-style pair: "
+                "'module <name>(...) -> (...) do' OR '<name> :: ...' + '<name> ... = do'"
+            )
+        module_name, params, returns, body_start = parsed
 
-    module_name = header_match.group(1)
-    params = _parse_params(header_match.group(2))
-    returns = tuple(part.strip() for part in _split_top_level_csv(header_match.group(3)))
-    entries = _line_entries(lines[1:])
+    entries = _line_entries(lines[body_start:])
     if not entries:
         return AxonModule(name=module_name, params=params, returns=returns, statements=())
     base_indent = min(indent for indent, _ in entries)
@@ -182,7 +251,10 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
     raw_lines = _normalized_source_lines(source)
     module_starts: list[int] = []
     for idx, line in enumerate(raw_lines):
-        if _HEADER_RE.match(line.strip()) is not None:
+        if len(line) != len(line.lstrip(" ")):
+            continue
+        stripped = line.strip()
+        if _HEADER_RE.match(stripped) is not None or _SIG_RE.match(stripped) is not None:
             module_starts.append(idx)
     if not module_starts:
         return (parse_axon_module(source),)

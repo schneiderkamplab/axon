@@ -6,8 +6,11 @@ from typing import Any
 
 from .types import AxonBind, AxonMeta, AxonModule, AxonRawNode, AxonRepeat, AxonReturn
 
-_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_:.@]*)\((.*)\)$")
+_CALL_PAREN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_:.@]*)\((.*)\)$")
+_CALLEE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:.@]*$")
 _LAMBDA_RE = re.compile(r"^\\([A-Za-z_][A-Za-z0-9_]*)\s*->\s*(.+)$")
+_ZERO_ARG_CALLS = {"init_list"}
+_INVALID_POSITIONAL_TOKENS = {"+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">="}
 
 
 def _split_top_level(text: str, sep: str) -> list[str]:
@@ -56,21 +59,78 @@ def _parse_scalar(token: str) -> Any:
 
 
 def _parse_call(expr: str) -> tuple[str, list[str], dict[str, Any]]:
-    match = _CALL_RE.match(expr.strip())
-    if match is None:
-        raise ValueError(f"expected call expression, got: {expr!r}")
-    callee = match.group(1).strip()
-    raw_args = match.group(2).strip()
+    text = expr.strip()
+    match = _CALL_PAREN_RE.match(text)
+    if match is not None:
+        callee = match.group(1).strip()
+        raw_args = match.group(2).strip()
+        tokens = _split_csv(raw_args) if raw_args else []
+    else:
+        callee_match = re.match(r"^([A-Za-z_][A-Za-z0-9_:.@]*)\b(.*)$", text)
+        if callee_match is None:
+            raise ValueError(f"expected call expression, got: {expr!r}")
+        callee = callee_match.group(1).strip()
+        rest = callee_match.group(2).strip()
+        if not rest and "@" not in callee and "::" not in callee and callee not in _ZERO_ARG_CALLS:
+            raise ValueError(f"expected call expression, got: {expr!r}")
+        if not rest:
+            tokens = []
+        else:
+            key_spans: list[tuple[int, int, str]] = []
+            depth = 0
+            i = 0
+            while i < len(rest):
+                ch = rest[i]
+                if ch in "([":
+                    depth += 1
+                    i += 1
+                    continue
+                if ch in ")]":
+                    depth -= 1
+                    i += 1
+                    continue
+                if depth == 0 and (i == 0 or rest[i - 1].isspace()):
+                    key_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", rest[i:])
+                    if key_match is not None:
+                        key = key_match.group(1)
+                        key_end = i + key_match.end()
+                        key_spans.append((i, key_end, key))
+                        i = key_end
+                        continue
+                i += 1
+
+            tokens = []
+            if not key_spans:
+                tokens.extend(part for part in _split_top_level(rest, " ") if part)
+            else:
+                first_key_start = key_spans[0][0]
+                pos_prefix = rest[:first_key_start].strip()
+                if pos_prefix:
+                    tokens.extend(part for part in _split_top_level(pos_prefix, " ") if part)
+                for idx, (_, key_end, key_name) in enumerate(key_spans):
+                    next_start = key_spans[idx + 1][0] if idx + 1 < len(key_spans) else len(rest)
+                    value_text = rest[key_end:next_start].strip()
+                    tokens.append(f"{key_name}={value_text}")
     args: list[str] = []
     kwargs: dict[str, Any] = {}
-    if raw_args:
-        for token in _split_csv(raw_args):
-            if "=" in token:
-                key, value = token.split("=", 1)
-                kwargs[key.strip()] = _parse_scalar(value)
-            else:
-                args.append(token.strip())
+    for token in tokens:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            kwargs[key.strip()] = _parse_scalar(value)
+        else:
+            stripped = token.strip()
+            if stripped in _INVALID_POSITIONAL_TOKENS:
+                raise ValueError(f"expected call expression, got: {expr!r}")
+            args.append(stripped)
     return callee, args, kwargs
+
+
+def _looks_like_call(expr: str) -> bool:
+    try:
+        _parse_call(expr)
+        return True
+    except ValueError:
+        return False
 
 
 def _render_call(callee: str, args: list[str], kwargs: dict[str, Any]) -> str:
@@ -276,7 +336,7 @@ def _known_output_arity(callee: str, ctx: _LowerCtx) -> int | None:
 
 
 def _pipeline_temp_out(stage: str, ctx: _LowerCtx) -> str | list[str]:
-    if not _CALL_RE.match(stage):
+    if not _looks_like_call(stage):
         return ctx.fresh("pipe")
     callee, _, _ = _parse_call(stage)
     arity = _known_output_arity(callee, ctx)
@@ -324,7 +384,7 @@ def _lower_expr(
             true_items = _tuple_items(true_expr)
             false_items = _tuple_items(false_expr)
             ternary_graph: list[dict[str, Any]] = []
-            if len(true_items) == 1 and _CALL_RE.match(true_items[0]):
+            if len(true_items) == 1 and _looks_like_call(true_items[0]):
                 ternary_graph.extend(_lower_expr(true_items[0], out, ctx, when=cond))
             elif len(true_items) == len(out):
                 for name, item in zip(out, true_items, strict=True):
@@ -332,7 +392,7 @@ def _lower_expr(
             else:
                 raise ValueError("ternary true-branch arity must match binding targets")
 
-            if len(false_items) == 1 and _CALL_RE.match(false_items[0]):
+            if len(false_items) == 1 and _looks_like_call(false_items[0]):
                 ternary_graph.extend(_lower_expr(false_items[0], out, ctx, when=f"not ({cond})"))
             elif len(false_items) == len(out):
                 for name, item in zip(out, false_items, strict=True):
@@ -353,7 +413,7 @@ def _lower_expr(
         pipe_graph: list[dict[str, Any]] = []
 
         first = stages[0]
-        if _CALL_RE.match(first):
+        if _looks_like_call(first):
             first_out: str | list[str] = out if len(stages) == 1 else _pipeline_temp_out(first, ctx)
             pipe_graph.extend(_lower_simple_call(first, first_out, ctx, when=when))
             pipe_ref = first_out
@@ -362,7 +422,7 @@ def _lower_expr(
 
         for idx, stage in enumerate(stages[1:], start=1):
             stage = stage.strip()
-            if _CALL_RE.match(stage):
+            if _looks_like_call(stage):
                 callee, args, kwargs = _parse_call(stage)
             else:
                 callee = stage
@@ -375,6 +435,9 @@ def _lower_expr(
             pipe_graph.extend(_lower_simple_call(call_expr, next_out, ctx, when=when))
             pipe_ref = next_out
         return pipe_graph
+
+    if _looks_like_call(expr):
+        return _lower_simple_call(expr, out, ctx, when=when)
 
     plus = _split_binary(expr, "+")
     if plus is not None:
@@ -402,10 +465,20 @@ def _lower_expr(
         mul_graph.extend(_lower_simple_call(f"mul({left_ref}, {right_ref})", out, ctx, when=when))
         return mul_graph
 
-    if _CALL_RE.match(expr):
-        return _lower_simple_call(expr, out, ctx, when=when)
-
     return _lower_alias_or_const(expr, out, ctx, when=when)
+
+
+def _module_return_names(module: AxonModule) -> tuple[str, ...]:
+    if module.returns:
+        return module.returns
+    for stmt in reversed(module.statements):
+        if isinstance(stmt, AxonReturn):
+            inferred: list[str] = []
+            for idx, value in enumerate(stmt.values):
+                inferred.append(value if _is_name_token(value) else f"out_{idx}")
+            if inferred:
+                return tuple(inferred)
+    return ()
 
 
 def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
@@ -413,17 +486,18 @@ def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
     graph: list[dict[str, Any]] = []
     outputs: dict[str, str] = {}
     ctx = _LowerCtx(block_signatures={})
+    returns = _module_return_names(module)
 
     _lower_statements(
         statements=module.statements,
         graph=graph,
         outputs=outputs,
-        returns=module.returns,
+        returns=returns,
         ctx=ctx,
     )
 
     if not outputs:
-        for name in module.returns:
+        for name in returns:
             outputs[name] = name
 
     return {"inputs": inputs, "graph": graph, "outputs": outputs}
@@ -523,10 +597,11 @@ def lower_axon_program_to_synapse_spec(
     for module in modules:
         signatures[module.name] = (
             [param.name for param in module.params],
-            list(module.returns),
+            list(_module_return_names(module)),
         )
 
     main = by_name[main_name]
+    main_returns = _module_return_names(main)
     main_inputs = {param.name: {"optional": param.optional} for param in main.params}
     main_graph: list[dict[str, Any]] = []
     main_outputs: dict[str, str] = {}
@@ -534,11 +609,11 @@ def lower_axon_program_to_synapse_spec(
         statements=main.statements,
         graph=main_graph,
         outputs=main_outputs,
-        returns=main.returns,
+        returns=main_returns,
         ctx=_LowerCtx(block_signatures=signatures),
     )
     if not main_outputs:
-        for name in main.returns:
+        for name in main_returns:
             main_outputs[name] = name
     model: dict[str, Any] = {"inputs": main_inputs, "graph": main_graph, "outputs": main_outputs}
     for stmt in main.statements:
@@ -551,17 +626,18 @@ def lower_axon_program_to_synapse_spec(
         if module.name == main_name:
             continue
         block_inputs = {param.name: {"optional": param.optional} for param in module.params}
+        block_returns = _module_return_names(module)
         block_graph: list[dict[str, Any]] = []
         block_outputs: dict[str, str] = {}
         _lower_statements(
             statements=module.statements,
             graph=block_graph,
             outputs=block_outputs,
-            returns=module.returns,
+            returns=block_returns,
             ctx=_LowerCtx(block_signatures=signatures),
         )
         if not block_outputs:
-            for name in module.returns:
+            for name in block_returns:
                 block_outputs[name] = name
         blocks[module.name] = {
             "inputs": block_inputs,
