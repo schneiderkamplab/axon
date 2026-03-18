@@ -11,7 +11,7 @@ OP_NAME = "linear"
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter
     tie = node_spec.get("tie_weight")
-    has_bias = bool(node_spec["bias"]) if "bias" in node_spec else (not isinstance(tie, str))
+    has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     explicit_weight = node_spec.get("weight")
     has_explicit_weight = isinstance(explicit_weight, str) and "." in explicit_weight
     if not has_bias and (isinstance(tie, str) or has_explicit_weight):
@@ -38,7 +38,7 @@ def interpret(
     weight = model._state[linear_weight_path]
 
     bias = None
-    if node_spec.get("bias", True):
+    if node_spec.get("bias", False):
         bias_path = model._infer_param_path(node_spec, node_path=node_path, param_name="bias")
         bias = model._state.get(bias_path)
 
@@ -79,7 +79,7 @@ def compile(
     out_var = assign_out_var(out_name)
     tie = node_spec.get("tie_weight")
     weight_expr = repr(tie) if isinstance(tie, str) else infer_param("weight")
-    has_bias = bool(node_spec["bias"]) if "bias" in node_spec else (not isinstance(tie, str))
+    has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     bias_expr = f"self._state.get({infer_param('bias')})" if has_bias else "None"
 
     weight_layout = str(node_spec.get("weight_layout", "oi"))
