@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -335,11 +336,41 @@ def _known_output_arity(callee: str, ctx: _LowerCtx) -> int | None:
     return known.get(callee)
 
 
+def _infer_split_last_arity(kwargs: dict[str, Any]) -> int | None:
+    sizes = kwargs.get("sizes")
+    if isinstance(sizes, list):
+        return len(sizes)
+    if isinstance(sizes, str):
+        text = sizes.strip()
+        if text.startswith("[") and text.endswith("]"):
+            inner = text[1:-1].strip()
+            if not inner:
+                return 0
+            return len(_split_csv(inner))
+    parts = kwargs.get("parts")
+    if isinstance(parts, int):
+        return parts
+    if isinstance(parts, str):
+        token = parts.strip()
+        if re.fullmatch(r"-?[0-9]+", token):
+            return int(token)
+        try:
+            parsed = ast.literal_eval(token)
+            if isinstance(parsed, int):
+                return parsed
+        except (ValueError, SyntaxError):
+            return None
+    return None
+
+
 def _pipeline_temp_out(stage: str, ctx: _LowerCtx) -> str | list[str]:
     if not _looks_like_call(stage):
         return ctx.fresh("pipe")
-    callee, _, _ = _parse_call(stage)
-    arity = _known_output_arity(callee, ctx)
+    callee, _, kwargs = _parse_call(stage)
+    if callee == "split_last":
+        arity = _infer_split_last_arity(kwargs)
+    else:
+        arity = _known_output_arity(callee, ctx)
     if arity is None or arity <= 1:
         return ctx.fresh("pipe")
     return [ctx.fresh("pipe") for _ in range(arity)]
