@@ -46,6 +46,23 @@ module tiny(x) -> (y) do
     assert len(module.statements) == 2
 
 
+def test_parse_axon_ignores_haskell_style_comments() -> None:
+    source = """
+-- leading comment
+module tiny(x, cache?) -> (y) do -- module comment
+  -- statement comment
+  y <- x |> linear@proj(out_features=4, bias=false) -- inline comment
+  return y -- trailing comment
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert len(node_specs) == 1
+    assert node_specs[0]["op"] == "linear"
+    assert node_specs[0]["in"] == "x"
+    assert node_specs[0]["out"] == "y"
+
+
 def test_lower_pipeline_axon_to_synapse_spec() -> None:
     source = """
 module tiny(x) -> (y) do
@@ -71,6 +88,32 @@ module tiny(x) -> (y) do
         "out": "y",
         "kind": "gelu_new",
     }
+
+
+def test_lower_return_pipeline_expression_to_named_output() -> None:
+    source = """
+module tiny(x, wte) -> (logits) do
+  return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear(out_dim=50257, tie_weight=wte.weight)
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert len(node_specs) == 2
+    assert node_specs[0] == {
+        "op": "layernorm",
+        "in": "x",
+        "out": "pipe_1",
+        "dim": 768,
+        "eps": "1e-05",
+    }
+    assert node_specs[1] == {
+        "op": "linear",
+        "in": "pipe_1",
+        "out": "logits",
+        "out_dim": 50257,
+        "tie_weight": "wte.weight",
+    }
+    assert spec["model"]["outputs"] == {"logits": "logits"}
 
 
 def test_lower_bind_operator_to_synapse_spec() -> None:

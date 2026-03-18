@@ -466,10 +466,12 @@ def _lower_statements(
 
         if isinstance(stmt, AxonReturn):
             for idx, value in enumerate(stmt.values):
-                if idx < len(returns):
-                    outputs[returns[idx]] = value
-                else:
-                    outputs[f"out_{idx}"] = value
+                output_name = returns[idx] if idx < len(returns) else f"out_{idx}"
+                if _is_name_token(value):
+                    outputs[output_name] = value
+                    continue
+                graph.extend(_lower_expr(value, output_name, ctx))
+                outputs[output_name] = output_name
             continue
 
 

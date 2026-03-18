@@ -11,6 +11,37 @@ _REPEAT_RE = re.compile(
 )
 
 
+def _strip_haskell_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    for idx, ch in enumerate(line):
+        prev = line[idx - 1] if idx > 0 else ""
+        if ch == "'" and not in_double and prev != "\\":
+            in_single = not in_single
+            continue
+        if ch == '"' and not in_single and prev != "\\":
+            in_double = not in_double
+            continue
+        if (
+            ch == "-"
+            and not in_single
+            and not in_double
+            and idx + 1 < len(line)
+            and line[idx + 1] == "-"
+        ):
+            return line[:idx]
+    return line
+
+
+def _normalized_source_lines(source: str) -> list[str]:
+    out: list[str] = []
+    for raw in source.splitlines():
+        line = _strip_haskell_comment(raw).rstrip()
+        if line.strip():
+            out.append(line)
+    return out
+
+
 def _split_top_level_csv(text: str) -> list[str]:
     parts: list[str] = []
     depth = 0
@@ -42,7 +73,7 @@ def _parse_params(raw: str) -> tuple[AxonParam, ...]:
 
 
 def parse_axon_module(source: str) -> AxonModule:
-    lines = [line.rstrip() for line in source.splitlines() if line.strip()]
+    lines = _normalized_source_lines(source)
     if not lines:
         raise ValueError("empty Axon source")
 
@@ -144,7 +175,7 @@ def _parse_statements(
 
 
 def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
-    raw_lines = [line.rstrip("\n") for line in source.splitlines()]
+    raw_lines = _normalized_source_lines(source)
     module_starts: list[int] = []
     for idx, line in enumerate(raw_lines):
         if _HEADER_RE.match(line.strip()) is not None:
