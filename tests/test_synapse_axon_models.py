@@ -80,7 +80,23 @@ def _extract_logits(output: Any) -> torch.Tensor:
             "gemma3_270m.axon",
             {"D": 640, "V": 262208, "L": 18, "H": 4, "KVH": 1, "B": None, "S": None},
         ),
-        ("olmoe_1b_7b_0924_synapse.yaml", "olmoe_1b_7b_0924.axon", None),
+        (
+            "olmoe_1b_7b_0924_synapse.yaml",
+            "olmoe_1b_7b_0924.axon",
+            {
+                "D": 2048,
+                "V": 50304,
+                "L": 16,
+                "H": 16,
+                "HD": 128,
+                "E": 64,
+                "EPT": 8,
+                "C": 4096,
+                "EPS": 1.0e-05,
+                "B": None,
+                "S": None,
+            },
+        ),
     ],
 )
 def test_axon_files_roundtrip_to_original_synapse_spec(

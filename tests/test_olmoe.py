@@ -58,10 +58,7 @@ def test_generated_olmoe_matches_hf(repo_root: Path, olmoe_local_path: Path) -> 
         .eval()
     )
 
-    state_dict = {
-        (key[len("model.") :] if key.startswith("model.") else key): value.to(device)
-        for key, value in hf_model.state_dict().items()
-    }
+    state_dict = {key: value.to(device) for key, value in hf_model.state_dict().items()}
     synapse_model = (
         _build_model_from_spec(spec_path, "OlmoeGenerated", state_dict).to(device).eval()
     )
