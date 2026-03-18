@@ -75,7 +75,11 @@ def _extract_logits(output: Any) -> torch.Tensor:
                 "S": None,
             },
         ),
-        ("gemma3_270m_synapse.yaml", "gemma3_270m.axon", None),
+        (
+            "gemma3_270m_synapse.yaml",
+            "gemma3_270m.axon",
+            {"D": 640, "V": None, "L": 18, "H": 4, "KVH": 1, "B": None, "S": None},
+        ),
         ("olmoe_1b_7b_0924_synapse.yaml", "olmoe_1b_7b_0924.axon", None),
     ],
 )
