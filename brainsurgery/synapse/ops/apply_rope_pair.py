@@ -28,15 +28,31 @@ def interpret(
     q = env[ins[0]]
     k = env[ins[1]]
     theta = float(model._eval_expr(node_spec.get("theta", 10000.0), env, symbols))
+    pos_ref = node_spec.get("position_ids")
+    pos_ids = env.get(pos_ref) if isinstance(pos_ref, str) else None
     half = q.shape[-1] // 2
     inv_freq = 1.0 / (
         theta ** (torch.arange(0, half, device=q.device, dtype=q.dtype) / float(half))
     )
-    offset = int(model._eval_expr(node_spec.get("offset", 0), env, symbols))
-    pos = torch.arange(offset, offset + q.shape[-2], device=q.device, dtype=q.dtype)
-    ang = torch.einsum("t,d->td", pos, inv_freq)
-    cos = torch.cos(ang)[None, None, :, :]
-    sin = torch.sin(ang)[None, None, :, :]
+    if pos_ids is not None:
+        if not torch.is_tensor(pos_ids):
+            raise ValueError("apply_rope_pair.position_ids must resolve to tensor or null")
+        if pos_ids.ndim != 2:
+            raise ValueError("apply_rope_pair.position_ids must be rank-2 [batch, seq]")
+        if int(pos_ids.shape[0]) != int(q.shape[0]):
+            raise ValueError("apply_rope_pair.position_ids batch size must match q/k batch")
+        if int(pos_ids.shape[1]) != int(q.shape[-2]):
+            raise ValueError("apply_rope_pair.position_ids width must match q/k sequence length")
+        pos = pos_ids.to(device=q.device, dtype=q.dtype)
+        ang = pos.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
+        cos = torch.cos(ang).unsqueeze(1)
+        sin = torch.sin(ang).unsqueeze(1)
+    else:
+        offset = int(model._eval_expr(node_spec.get("offset", 0), env, symbols))
+        pos = torch.arange(offset, offset + q.shape[-2], device=q.device, dtype=q.dtype)
+        ang = torch.einsum("t,d->td", pos, inv_freq)
+        cos = torch.cos(ang)[None, None, :, :]
+        sin = torch.sin(ang)[None, None, :, :]
     q1, q2 = q[..., :half], q[..., half : 2 * half]
     k1, k2 = k[..., :half], k[..., half : 2 * half]
     env[outs[0]] = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
@@ -73,6 +89,8 @@ def compile(
     q_out = assign_out_var(str(outs[0]))
     k_out = assign_out_var(str(outs[1]))
     theta = emitter._expr_code(node_spec.get("theta", 10000.0), env)
+    pos_name = node_spec.get("position_ids")
+    pos_ids = env.get(pos_name) if isinstance(pos_name, str) and pos_name in env else None
     half = emitter._fresh("half")
     inv_freq = emitter._fresh("inv_freq")
     pos = emitter._fresh("pos")
@@ -87,13 +105,42 @@ def compile(
     lines.append(
         f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype={q}.dtype) / float({half})))"
     )
-    offset = emitter._expr_code(node_spec.get("offset", 0), env)
-    lines.append(
-        f"{indent}{pos} = torch.arange(int({offset}), int({offset}) + {q}.shape[-2], device={q}.device, dtype={q}.dtype)"
-    )
-    lines.append(f"{indent}{ang} = torch.einsum('t,d->td', {pos}, {inv_freq})")
-    lines.append(f"{indent}{cos} = torch.cos({ang})[None, None, :, :]")
-    lines.append(f"{indent}{sin} = torch.sin({ang})[None, None, :, :]")
+    if isinstance(pos_ids, str):
+        lines.append(f"{indent}if {pos_ids} is not None:")
+        lines.append(f"{indent}    if {pos_ids}.ndim != 2:")
+        lines.append(
+            f"{indent}        raise ValueError('apply_rope_pair.position_ids must be rank-2 [batch, seq]')"
+        )
+        lines.append(f"{indent}    if int({pos_ids}.shape[0]) != int({q}.shape[0]):")
+        lines.append(
+            f"{indent}        raise ValueError('apply_rope_pair.position_ids batch size must match q/k batch')"
+        )
+        lines.append(f"{indent}    if int({pos_ids}.shape[1]) != int({q}.shape[-2]):")
+        lines.append(
+            f"{indent}        raise ValueError('apply_rope_pair.position_ids width must match q/k sequence length')"
+        )
+        lines.append(f"{indent}    {pos} = {pos_ids}.to(device={q}.device, dtype={q}.dtype)")
+        lines.append(
+            f"{indent}    {ang} = {pos}.unsqueeze(-1) * {inv_freq}.unsqueeze(0).unsqueeze(0)"
+        )
+        lines.append(f"{indent}    {cos} = torch.cos({ang}).unsqueeze(1)")
+        lines.append(f"{indent}    {sin} = torch.sin({ang}).unsqueeze(1)")
+        lines.append(f"{indent}else:")
+        offset = emitter._expr_code(node_spec.get("offset", 0), env)
+        lines.append(
+            f"{indent}    {pos} = torch.arange(int({offset}), int({offset}) + {q}.shape[-2], device={q}.device, dtype={q}.dtype)"
+        )
+        lines.append(f"{indent}    {ang} = torch.einsum('t,d->td', {pos}, {inv_freq})")
+        lines.append(f"{indent}    {cos} = torch.cos({ang})[None, None, :, :]")
+        lines.append(f"{indent}    {sin} = torch.sin({ang})[None, None, :, :]")
+    else:
+        offset = emitter._expr_code(node_spec.get("offset", 0), env)
+        lines.append(
+            f"{indent}{pos} = torch.arange(int({offset}), int({offset}) + {q}.shape[-2], device={q}.device, dtype={q}.dtype)"
+        )
+        lines.append(f"{indent}{ang} = torch.einsum('t,d->td', {pos}, {inv_freq})")
+        lines.append(f"{indent}{cos} = torch.cos({ang})[None, None, :, :]")
+        lines.append(f"{indent}{sin} = torch.sin({ang})[None, None, :, :]")
     lines.append(f"{indent}{q1} = {q}[..., :{half}]")
     lines.append(f"{indent}{q2} = {q}[..., {half}: 2 * {half}]")
     lines.append(f"{indent}{k1} = {k}[..., :{half}]")
