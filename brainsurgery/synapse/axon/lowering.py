@@ -333,6 +333,22 @@ def _lower_simple_call(
     expr: str, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
+    pre_graph: list[dict[str, Any]] = []
+
+    resolved_args: list[str] = []
+    for arg in args:
+        token = arg.strip()
+        inner = token
+        if token.startswith("(") and token.endswith(")"):
+            inner = token[1:-1].strip()
+        if inner != token and (not _is_name_token(inner)):
+            tmp = ctx.fresh("arg")
+            pre_graph.extend(_lower_expr(inner, tmp, ctx, when=when))
+            resolved_args.append(tmp)
+        else:
+            resolved_args.append(token)
+    args = resolved_args
+
     is_absolute_path = "@@" in callee
     if is_absolute_path:
         callee = callee.replace("@@", "@", 1)
@@ -356,7 +372,7 @@ def _lower_simple_call(
                     when=when,
                 )
             )
-        return lowered_nodes
+        return [*pre_graph, *lowered_nodes]
     if "@" in callee and ctx.scope_stack and not is_absolute_path:
         op_name_with_at, param_path = callee.split("@", 1)
         scope_prefix = ".".join(part for part in ctx.scope_stack if part)
@@ -458,7 +474,7 @@ def _lower_simple_call(
         node_spec: dict[str, Any] = {"use": block_name, "in": in_map, "out": out_map}
         nodes = _with_when([{node_name: node_spec}], when)
         _record_last_dim_for_call(callee=block_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
-        return nodes
+        return [*pre_graph, *nodes]
 
     node_spec = _to_synapse_op(callee, args, kwargs, out)
     if "@" in callee:
@@ -469,7 +485,7 @@ def _lower_simple_call(
             templated_node["param_base"] = param_path
             nodes = _with_when([{node_name: templated_node}], when)
             _record_last_dim_for_call(callee=op_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
-            return nodes
+            return [*pre_graph, *nodes]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
             raise ValueError(f"invalid @ path in Axon call: {expr!r}")
@@ -478,11 +494,11 @@ def _lower_simple_call(
             item = {segment: {"graph": [item]}}
         nodes = _with_when([item], when)
         _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
-        return nodes
+        return [*pre_graph, *nodes]
     node_name = f"n_{ctx.fresh('op')}"
     nodes = _with_when([{node_name: node_spec}], when)
     _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
-    return nodes
+    return [*pre_graph, *nodes]
 
 
 def _lower_alias_or_const(

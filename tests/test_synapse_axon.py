@@ -132,6 +132,21 @@ tiny x = do
     assert "_ir_alias" in ops
 
 
+def test_parenthesized_expression_argument_is_lowered() -> None:
+    source = """
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- add((zeros_like x), x)
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["op"] for node in node_specs]
+    assert "zeros_like" in ops
+    assert "add" in ops
+
+
 def test_at_path_is_scoped_inside_scope_bind() -> None:
     source = """
 tiny :: TokenIds[B,T] -> Tensor[B,T,V]
