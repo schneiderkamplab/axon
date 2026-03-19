@@ -180,7 +180,7 @@ def _to_synapse_op(
         if ns == "cache" and name == "seq_len":
             return {"op": "kv_seq_len", "in": args[0], "out": out}
         if ns == "cache" and name == "coalesce":
-            return {"op": "coalesce_triplet", "in": args, "out": out}
+            return {"op": "coalesce", "in": args, "out": out}
 
     default_op: dict[str, Any] = {"op": callee, "out": out}
     if args:
@@ -330,6 +330,27 @@ def _lower_simple_call(
     expr: str, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
+    if _op_name_from_callee(callee) == "reshape_heads_triplet":
+        if not isinstance(out, list) or len(out) != 3 or len(args) != 3:
+            raise ValueError("reshape_heads_triplet requires 3 inputs and 3 outputs")
+        if "heads" not in kwargs and "head_dim" not in kwargs:
+            raise ValueError("reshape_heads_triplet requires heads or head_dim")
+        lowered_nodes: list[dict[str, Any]] = []
+        for src, dst in zip(args, out, strict=True):
+            head_kwargs: dict[str, Any] = {}
+            if "heads" in kwargs:
+                head_kwargs["heads"] = kwargs["heads"]
+            if "head_dim" in kwargs:
+                head_kwargs["head_dim"] = kwargs["head_dim"]
+            lowered_nodes.extend(
+                _lower_simple_call(
+                    _render_call("reshape_heads", [src], head_kwargs),
+                    dst,
+                    ctx,
+                    when=when,
+                )
+            )
+        return lowered_nodes
     if "@" in callee and ctx.scope_stack:
         op_name_with_at, param_path = callee.split("@", 1)
         scope_prefix = ".".join(part for part in ctx.scope_stack if part)
@@ -449,11 +470,11 @@ def _lower_alias_or_const(
         and scalar == token
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
     ):
-        node = {"op": "alias", "in": token, "out": out}
+        node = {"op": "_ir_alias", "in": token, "out": out}
         if token in ctx.tensor_last_dim:
             ctx.tensor_last_dim[out] = ctx.tensor_last_dim[token]
     else:
-        node = {"op": "const", "value": scalar, "out": out}
+        node = {"op": "_ir_const", "value": scalar, "out": out}
     return _with_when([{node_name: node}], when)
 
 

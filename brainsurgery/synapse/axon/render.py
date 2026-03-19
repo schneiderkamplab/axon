@@ -124,9 +124,9 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
         callee = "cache::update"
     elif op == "kv_seq_len":
         callee = "cache::seq_len"
-    elif op == "coalesce_triplet":
+    elif op == "coalesce":
         callee = "cache::coalesce"
-    elif op == "split_last_dim":
+    elif op == "split_last":
         callee = "split_last"
     else:
         callee = op

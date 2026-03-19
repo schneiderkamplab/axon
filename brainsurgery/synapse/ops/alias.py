@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "alias"
+OP_NAME = "_ir_alias"
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -20,8 +20,8 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope, symbols
-    source = model._require_name(node_spec.get("in"), field="alias.in")
-    out_name = model._require_name(node_spec.get("out"), field="alias.out")
+    source = model._require_name(node_spec.get("in"), field="_ir_alias.in")
+    out_name = model._require_name(node_spec.get("out"), field="_ir_alias.out")
     env[out_name] = env[source]
     return
 

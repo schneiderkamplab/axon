@@ -42,6 +42,25 @@ def _build_runtime_model_from_spec(
     return SynapseProgramModel.from_spec(_load_yaml_mapping(spec_path), state_dict=state_dict)
 
 
+def _load_olmoe_state_dict_from_safetensors(
+    olmoe_local_path: Path, device: torch.device
+) -> dict[str, torch.Tensor]:
+    payload = OmegaConf.to_container(
+        OmegaConf.load(olmoe_local_path / "model.safetensors.index.json"), resolve=True
+    )
+    assert isinstance(payload, dict)
+    weight_map = payload.get("weight_map")
+    assert isinstance(weight_map, dict)
+    shard_names = sorted({str(name) for name in weight_map.values()})
+    safetensors = pytest.importorskip("safetensors")
+    state_dict: dict[str, torch.Tensor] = {}
+    for shard_name in shard_names:
+        st = safetensors.safe_open(str(olmoe_local_path / shard_name), framework="pt")
+        for key in st.keys():
+            state_dict[key] = st.get_tensor(key).to(device)
+    return state_dict
+
+
 def test_generated_olmoe_matches_hf(repo_root: Path, olmoe_local_path: Path) -> None:
     transformers = pytest.importorskip("transformers")
     device = torch.device("cpu")
@@ -58,7 +77,7 @@ def test_generated_olmoe_matches_hf(repo_root: Path, olmoe_local_path: Path) -> 
         .eval()
     )
 
-    state_dict = {key: value.to(device) for key, value in hf_model.state_dict().items()}
+    state_dict = _load_olmoe_state_dict_from_safetensors(olmoe_local_path, device)
     synapse_model = (
         _build_model_from_spec(spec_path, "OlmoeGenerated", state_dict).to(device).eval()
     )

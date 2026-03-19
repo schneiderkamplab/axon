@@ -24,8 +24,15 @@ def interpret(
     outs = node_spec.get("out")
     if not isinstance(outs, list) or len(outs) == 0:
         raise ValueError("split_last requires non-empty list out")
-    parts = int(model._eval_expr(node_spec.get("parts", len(outs)), env, symbols))
-    chunks = x.chunk(parts, dim=-1)
+    sizes = node_spec.get("sizes")
+    if sizes is not None:
+        if not isinstance(sizes, list) or len(sizes) != len(outs):
+            raise ValueError("split_last sizes must be a list with same length as out")
+        split_sizes = [int(model._eval_expr(size, env, symbols)) for size in sizes]
+        chunks = x.split(split_sizes, dim=-1)
+    else:
+        parts = int(model._eval_expr(node_spec.get("parts", len(outs)), env, symbols))
+        chunks = x.chunk(parts, dim=-1)
     for name, tensor in zip(outs, chunks, strict=True):
         env[str(name)] = tensor
 
@@ -45,9 +52,16 @@ def compile(
     outs = node_spec.get("out")
     if not isinstance(outs, list) or len(outs) == 0:
         raise ValueError("split_last requires non-empty list out")
-    parts = emitter._expr_code(node_spec.get("parts", len(outs)), env)
     tmp = emitter._fresh("split")
-    lines.append(f"{indent}{tmp} = torch.chunk({src}, int({parts}), dim=-1)")
+    sizes = node_spec.get("sizes")
+    if sizes is not None:
+        if not isinstance(sizes, list) or len(sizes) != len(outs):
+            raise ValueError("split_last sizes must be a list with same length as out")
+        sizes_code = ", ".join(emitter._expr_code(size, env) for size in sizes)
+        lines.append(f"{indent}{tmp} = torch.split({src}, [{sizes_code}], dim=-1)")
+    else:
+        parts = emitter._expr_code(node_spec.get("parts", len(outs)), env)
+        lines.append(f"{indent}{tmp} = torch.chunk({src}, int({parts}), dim=-1)")
     for idx, out_name in enumerate(outs):
         out_var = emitter._assign_out_var(env, str(out_name))
         lines.append(f"{indent}{out_var} = {tmp}[{idx}]")

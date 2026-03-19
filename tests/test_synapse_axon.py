@@ -419,15 +419,29 @@ tiny q k v bias = do
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
     node_specs = _node_specs(spec["model"]["graph"])
-    assert len(node_specs) == 2
+    assert len(node_specs) == 4
     assert node_specs[0] == {
-        "op": "reshape_heads_triplet",
-        "in": ["q", "k", "v"],
-        "out": ["pipe_1", "pipe_2", "pipe_3"],
+        "op": "reshape_heads",
+        "in": "q",
+        "out": "pipe_1",
         "heads": 12,
         "head_dim": 64,
     }
     assert node_specs[1] == {
+        "op": "reshape_heads",
+        "in": "k",
+        "out": "pipe_2",
+        "heads": 12,
+        "head_dim": 64,
+    }
+    assert node_specs[2] == {
+        "op": "reshape_heads",
+        "in": "v",
+        "out": "pipe_3",
+        "heads": 12,
+        "head_dim": 64,
+    }
+    assert node_specs[3] == {
         "op": "attention",
         "in": ["pipe_1", "pipe_2", "pipe_3"],
         "out": "ctx_heads",

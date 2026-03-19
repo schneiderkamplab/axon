@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "const"
+OP_NAME = "_ir_const"
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -20,7 +20,7 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope, symbols
-    out_name = model._require_name(node_spec.get("out"), field="const.out")
+    out_name = model._require_name(node_spec.get("out"), field="_ir_const.out")
     env[out_name] = node_spec.get("value")
     return
 

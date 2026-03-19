@@ -40,23 +40,25 @@ def _tiny_linear_spec() -> dict[str, object]:
     }
 
 
-def _reshape_triplet_spec(
+def _reshape_triplet_lowered_spec(
     *, heads: int | None = None, head_dim: int | None = None
 ) -> dict[str, object]:
-    node: dict[str, object] = {
-        "op": "reshape_heads_triplet",
-        "in": ["q", "k", "v"],
-        "out": ["qh", "kh", "vh"],
-    }
+    q_node: dict[str, object] = {"op": "reshape_heads", "in": "q", "out": "qh"}
+    k_node: dict[str, object] = {"op": "reshape_heads", "in": "k", "out": "kh"}
+    v_node: dict[str, object] = {"op": "reshape_heads", "in": "v", "out": "vh"}
     if heads is not None:
-        node["heads"] = heads
+        q_node["heads"] = heads
+        k_node["heads"] = heads
+        v_node["heads"] = heads
     if head_dim is not None:
-        node["head_dim"] = head_dim
+        q_node["head_dim"] = head_dim
+        k_node["head_dim"] = head_dim
+        v_node["head_dim"] = head_dim
     return {
         "synapse": 1,
         "model": {
             "inputs": {"q": {}, "k": {}, "v": {}},
-            "graph": [{"r": node}],
+            "graph": [{"q": q_node}, {"k": k_node}, {"v": v_node}],
             "outputs": {"qh": "qh", "kh": "kh", "vh": "vh"},
         },
     }
@@ -172,8 +174,8 @@ model:
     assert logits_yaml.shape == (2, 3, 8)
 
 
-def test_runtime_reshape_heads_triplet_infers_head_dim_from_heads() -> None:
-    spec = _reshape_triplet_spec(heads=12)
+def test_runtime_reshape_heads_triplet_lowering_equivalent_infers_head_dim_from_heads() -> None:
+    spec = _reshape_triplet_lowered_spec(heads=12)
     model = SynapseProgramModel.from_spec(spec)
     q = torch.randn(2, 5, 768)
     out = model(q=q, k=q, v=q)
@@ -182,8 +184,8 @@ def test_runtime_reshape_heads_triplet_infers_head_dim_from_heads() -> None:
     assert out["vh"].shape == (2, 12, 5, 64)
 
 
-def test_runtime_reshape_heads_triplet_infers_heads_from_head_dim() -> None:
-    spec = _reshape_triplet_spec(head_dim=64)
+def test_runtime_reshape_heads_triplet_lowering_equivalent_infers_heads_from_head_dim() -> None:
+    spec = _reshape_triplet_lowered_spec(head_dim=64)
     model = SynapseProgramModel.from_spec(spec)
     q = torch.randn(2, 5, 768)
     out = model(q=q, k=q, v=q)
@@ -192,8 +194,8 @@ def test_runtime_reshape_heads_triplet_infers_heads_from_head_dim() -> None:
     assert out["vh"].shape == (2, 12, 5, 64)
 
 
-def test_runtime_reshape_heads_triplet_requires_heads_or_head_dim() -> None:
-    spec = _reshape_triplet_spec()
+def test_runtime_reshape_heads_triplet_lowering_equivalent_requires_heads_or_head_dim() -> None:
+    spec = _reshape_triplet_lowered_spec()
     model = SynapseProgramModel.from_spec(spec)
     q = torch.randn(2, 5, 768)
     with pytest.raises(ValueError, match="requires heads or head_dim"):
