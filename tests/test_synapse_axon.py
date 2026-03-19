@@ -38,6 +38,32 @@ tiny x cache = do
     assert len(module.statements) == 2
 
 
+def test_parse_axon_module_expression_definition_without_do() -> None:
+    source = """
+inc :: I -> I
+inc x = x + 1
+"""
+    module = parse_axon_module(source)
+    assert module.name == "inc"
+    assert [param.name for param in module.params] == ["x"]
+    assert len(module.statements) == 1
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["op"] for node in node_specs]
+    assert "add" in ops
+
+
+def test_top_level_constant_stays_symbol_with_expression_module_definition() -> None:
+    source = """
+D = 7
+inc :: I -> I
+inc x = x + D
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    assert spec["model"]["symbols"]["D"] == 7
+
+
 def test_parse_repeat_block_statements() -> None:
     source = """
 tiny :: Tensor -> Tensor

@@ -14,7 +14,12 @@ from .types import (
 
 _HEADER_RE = re.compile(r"^module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*->\s*\((.*?)\)\s*do\s*$")
 _SIG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*::\s*(.+)\s*$")
-_DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*(.*?)\s*=\s*do\s*$")
+_DEF_DO_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*(.*?)\s*=\s*do\s*$"
+)
+_DEF_EXPR_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*(.*?)\s*=\s*(.+?)\s*$"
+)
 _FOR_AT_RANGE_RE = re.compile(
     r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
 )
@@ -143,21 +148,24 @@ def _parse_const_scalar(token: str) -> object:
 def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str, object]]:
     body: list[str] = []
     constants: dict[str, object] = {}
+    prev_was_sig = False
     for line in lines:
         if len(line) != len(line.lstrip(" ")):
             body.append(line)
+            prev_was_sig = False
             continue
         stripped = line.strip()
+        if _SIG_RE.match(stripped) is not None:
+            body.append(line)
+            prev_was_sig = True
+            continue
         match = _TOP_CONST_RE.match(stripped)
-        if (
-            match is not None
-            and _SIG_RE.match(stripped) is None
-            and _DEF_RE.match(stripped) is None
-            and stripped != "do"
-        ):
+        if match is not None and not prev_was_sig:
             constants[match.group(1)] = _parse_const_scalar(match.group(2))
+            prev_was_sig = False
             continue
         body.append(line)
+        prev_was_sig = False
     return body, constants
 
 
@@ -199,6 +207,7 @@ def _parse_haskell_header(
         tuple[AxonParam, ...],
         tuple[str, ...],
         int,
+        str | None,
         dict[str, object],
         str | None,
         tuple[str, ...] | None,
@@ -208,8 +217,12 @@ def _parse_haskell_header(
     if len(lines) < 2:
         return None
     sig_match = _SIG_RE.match(lines[0])
-    def_match = _DEF_RE.match(lines[1])
-    if sig_match is None or def_match is None:
+    if sig_match is None:
+        return None
+    def_do_match = _DEF_DO_RE.match(lines[1])
+    def_expr_match = None if def_do_match is not None else _DEF_EXPR_RE.match(lines[1])
+    def_match = def_do_match if def_do_match is not None else def_expr_match
+    if def_match is None:
         return None
 
     name_sig_raw = sig_match.group(1)
@@ -290,8 +303,19 @@ def _parse_haskell_header(
         for dim in ret_shape:
             annotation_symbols.setdefault(dim, None)
     params = tuple(params_out)
+    inline_expr = def_expr_match.group(3).strip() if def_expr_match is not None else None
     # Haskell-style signatures carry output types, not names. Return names will be inferred from `return`.
-    return name_sig, path_param, params, (), 2, annotation_symbols, raw_return_type, ret_shape
+    return (
+        name_sig,
+        path_param,
+        params,
+        (),
+        2,
+        inline_expr,
+        annotation_symbols,
+        raw_return_type,
+        ret_shape,
+    )
 
 
 def parse_axon_module(source: str) -> AxonModule:
@@ -301,17 +325,32 @@ def parse_axon_module(source: str) -> AxonModule:
 
     parsed = _parse_haskell_header(lines)
     if parsed is None:
-        raise ValueError("expected haskell-style pair: '<name> :: ...' + '<name> ... = do'")
+        raise ValueError("expected haskell-style pair: '<name> :: ...' + '<name> ... = do|<expr>'")
     (
         module_name,
         module_path_param,
         params,
         returns,
         body_start,
+        inline_expr,
         annotation_symbols,
         return_type_expr,
         return_shape,
     ) = parsed
+
+    if inline_expr is not None:
+        module = AxonModule(
+            name=module_name,
+            path_param=module_path_param,
+            params=params,
+            returns=returns,
+            statements=(AxonReturn(values=(inline_expr,)),),
+            symbols=None,
+            return_type_expr=return_type_expr,
+            return_shape=return_shape,
+        )
+        module = _inject_symbols_meta(module, annotation_symbols)
+        return _inject_symbols_meta(module, top_constants)
 
     entries = _line_entries(lines[body_start:])
     if not entries:
