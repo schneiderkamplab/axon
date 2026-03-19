@@ -252,3 +252,19 @@ def test_runtime_arange_positions_uses_attention_mask_for_left_padding() -> None
     pos = out["pos"]
     assert torch.equal(pos[0], torch.tensor([0, 1, 2, 3], dtype=torch.long))
     assert torch.equal(pos[1], torch.tensor([0, 0, 0, 1], dtype=torch.long))
+
+
+def test_runtime_linear_handles_empty_batch_without_kernel_work() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [{"n": {"op": "linear", "in": "x", "out": "y", "bias": False}}],
+            "outputs": {"y": "y"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors({"n.weight": torch.randn(8, 4)})
+    x = torch.empty((0, 4), dtype=torch.float32)
+    out = model(x=x)
+    assert out["y"].shape == (0, 8)

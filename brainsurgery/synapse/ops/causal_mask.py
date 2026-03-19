@@ -36,27 +36,47 @@ def interpret(
 
     q_len = q.shape[-2]
     k_len = key_tensor.shape[-2]
+    window_value = (
+        int(model._eval_expr(window_expr, env, symbols)) if window_expr is not None else None
+    )
+    padding_key: tuple[int, int, tuple[int, ...]] | None = None
+    if padding_mask is not None:
+        padding_key = (
+            int(padding_mask.data_ptr()),
+            int(padding_mask.storage_offset()),
+            tuple(int(x) for x in padding_mask.shape),
+        )
+    cache_key = (int(q_len), int(k_len), window_value, q.dtype, q.device, padding_key)
+    cache = getattr(model, "_causal_mask_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(model, "_causal_mask_cache", cache)
+    cached = cache.get(cache_key)
+    if torch.is_tensor(cached):
+        env[out_name] = cached
+        return
+
     i_idx = torch.arange(q_len, device=q.device).unsqueeze(1)
     j_idx = torch.arange(k_len, device=q.device).unsqueeze(0)
 
     if q_len == 1:
-        if window_expr is None:
+        if window_value is None:
             keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
             if padding_mask is None:
                 env[out_name] = None
                 return
         else:
-            win = int(model._eval_expr(window_expr, env, symbols))
+            win = window_value
             if win >= k_len and padding_mask is None:
                 env[out_name] = None
                 return
             keep = j_idx >= (k_len - win)
     else:
-        if window_expr is None:
+        if window_value is None:
             keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
         else:
             keep = j_idx <= i_idx
-            win = int(model._eval_expr(window_expr, env, symbols))
+            win = window_value
             if win >= k_len and q_len == k_len and padding_mask is None:
                 env[out_name] = None
                 return
@@ -78,6 +98,7 @@ def interpret(
         torch.zeros((), dtype=q.dtype, device=q.device),
         torch.full((), mask_value, dtype=q.dtype, device=q.device),
     )
+    cache[cache_key] = env[out_name]
     return
 
 
@@ -108,6 +129,8 @@ def compile(
     out_var = assign_out_var(out_name)
     q_len = emitter._fresh("q_len")
     k_len = emitter._fresh("k_len")
+    cache_key = emitter._fresh("cache_key")
+    cached = emitter._fresh("cached_mask")
     i_idx = emitter._fresh("i_idx")
     j_idx = emitter._fresh("j_idx")
     keep = emitter._fresh("keep")
@@ -122,46 +145,75 @@ def compile(
         return lines
     lines.append(f"{indent}{q_len} = {q}.shape[-2]")
     lines.append(f"{indent}{k_len} = {k}.shape[-2]")
-    lines.append(f"{indent}{j_idx} = torch.arange({k_len}, device={q}.device).unsqueeze(0)")
-    if window_expr is None:
-        lines.append(
-            f"{indent}{keep} = torch.ones(({q_len}, {k_len}), dtype=torch.bool, device={q}.device)"
-        )
-    else:
+    lines.append(f"{indent}if not hasattr(self, '_causal_mask_cache'):")
+    lines.append(f"{indent}    self._causal_mask_cache = {{}}")
+    if window_expr is not None:
         win = emitter._fresh("window")
         window_code = emitter._expr_code(window_expr, env)
         lines.append(f"{indent}{win} = int({window_code})")
-        lines.append(f"{indent}if {q_len} == 1:")
-        lines.append(f"{indent}    {keep} = ({j_idx} >= ({k_len} - {win}))")
+        window_key_expr = win
+    else:
+        win = None
+        window_key_expr = "None"
+    if padding_expr is not None:
+        pad_key = emitter._fresh("pad_key")
+        lines.append(f"{indent}if {padding_expr} is None:")
+        lines.append(f"{indent}    {pad_key} = None")
         lines.append(f"{indent}else:")
-        lines.append(f"{indent}    {i_idx} = torch.arange({q_len}, device={q}.device).unsqueeze(1)")
-        lines.append(f"{indent}    {keep} = ({j_idx} <= {i_idx})")
-        lines.append(f"{indent}    {keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
+        lines.append(
+            f"{indent}    {pad_key} = (int({padding_expr}.data_ptr()), int({padding_expr}.storage_offset()), tuple(int(x) for x in {padding_expr}.shape))"
+        )
+        pad_key_expr = pad_key
+    else:
+        pad_key_expr = "None"
+    lines.append(
+        f"{indent}{cache_key} = (int({q_len}), int({k_len}), {window_key_expr}, {q}.dtype, {q}.device, {pad_key_expr})"
+    )
+    lines.append(f"{indent}{cached} = self._causal_mask_cache.get({cache_key})")
+    lines.append(f"{indent}if torch.is_tensor({cached}):")
+    lines.append(f"{indent}    {out_var} = {cached}")
+    lines.append(f"{indent}else:")
+    body_indent = indent + "    "
+    lines.append(f"{body_indent}{j_idx} = torch.arange({k_len}, device={q}.device).unsqueeze(0)")
+    if window_expr is None:
+        lines.append(
+            f"{body_indent}{keep} = torch.ones(({q_len}, {k_len}), dtype=torch.bool, device={q}.device)"
+        )
+    else:
+        lines.append(f"{body_indent}if {q_len} == 1:")
+        lines.append(f"{body_indent}    {keep} = ({j_idx} >= ({k_len} - {win}))")
+        lines.append(f"{body_indent}else:")
+        lines.append(
+            f"{body_indent}    {i_idx} = torch.arange({q_len}, device={q}.device).unsqueeze(1)"
+        )
+        lines.append(f"{body_indent}    {keep} = ({j_idx} <= {i_idx})")
+        lines.append(f"{body_indent}    {keep} = {keep} & ({j_idx} >= ({i_idx} - {win} + 1))")
 
     if padding_expr is not None:
         pad_keep = emitter._fresh("pad_keep")
-        lines.append(f"{indent}if {padding_expr} is not None:")
-        lines.append(f"{indent}    if {padding_expr}.ndim != 2:")
+        lines.append(f"{body_indent}if {padding_expr} is not None:")
+        lines.append(f"{body_indent}    if {padding_expr}.ndim != 2:")
         lines.append(
-            f"{indent}        raise ValueError('causal_mask.padding_mask must be rank-2 [batch, seq]')"
+            f"{body_indent}        raise ValueError('causal_mask.padding_mask must be rank-2 [batch, seq]')"
         )
-        lines.append(f"{indent}    if int({padding_expr}.shape[-1]) != {k_len}:")
+        lines.append(f"{body_indent}    if int({padding_expr}.shape[-1]) != {k_len}:")
         lines.append(
-            f"{indent}        raise ValueError('causal_mask.padding_mask width must match key sequence length')"
+            f"{body_indent}        raise ValueError('causal_mask.padding_mask width must match key sequence length')"
         )
         lines.append(
-            f"{indent}    {pad_keep} = {padding_expr}.to(torch.bool).unsqueeze(1).unsqueeze(1)"
+            f"{body_indent}    {pad_keep} = {padding_expr}.to(torch.bool).unsqueeze(1).unsqueeze(1)"
         )
-        lines.append(f"{indent}    {keep} = {keep}.unsqueeze(0).unsqueeze(0) & {pad_keep}")
-        lines.append(f"{indent}else:")
-        lines.append(f"{indent}    {keep} = {keep}.view(1, 1, {q_len}, {k_len})")
+        lines.append(f"{body_indent}    {keep} = {keep}.unsqueeze(0).unsqueeze(0) & {pad_keep}")
+        lines.append(f"{body_indent}else:")
+        lines.append(f"{body_indent}    {keep} = {keep}.view(1, 1, {q_len}, {k_len})")
     else:
-        lines.append(f"{indent}{keep} = {keep}.view(1, 1, {q_len}, {k_len})")
+        lines.append(f"{body_indent}{keep} = {keep}.view(1, 1, {q_len}, {k_len})")
 
-    lines.append(f"{indent}{mask_val} = torch.finfo({q}.dtype).min")
+    lines.append(f"{body_indent}{mask_val} = torch.finfo({q}.dtype).min")
     lines.append(
-        f"{indent}{out_var} = torch.where({keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
+        f"{body_indent}{out_var} = torch.where({keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
     )
+    lines.append(f"{body_indent}self._causal_mask_cache[{cache_key}] = {out_var}")
     return lines
 
 

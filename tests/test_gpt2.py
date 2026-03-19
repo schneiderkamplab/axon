@@ -1,53 +1,30 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 import torch
-from omegaconf import OmegaConf
 
-from brainsurgery.synapse import SynapseProgramModel, emit_model_code_from_synapse_spec
-
-
-def _auto_device() -> torch.device:
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
-
-
-def _load_yaml_mapping(path: Path) -> dict[str, Any]:
-    loaded = OmegaConf.load(path)
-    data = OmegaConf.to_container(loaded, resolve=True)
-    assert isinstance(data, dict)
-    return {str(key): value for key, value in data.items()}
+from brainsurgery.synapse import SynapseProgramModel
+from tests.synapse_test_utils import (
+    assert_logits_close,
+    auto_device,
+    build_codegen_model,
+    extract_logits,
+    load_yaml_mapping,
+)
 
 
 def _build_model_from_spec(
     spec_path: Path, class_name: str, state_dict: dict[str, torch.Tensor]
-) -> Any:
-    source = emit_model_code_from_synapse_spec(_load_yaml_mapping(spec_path), class_name=class_name)
-    namespace: dict[str, Any] = {}
-    exec(source, namespace)  # noqa: S102 - test-controlled generated source
-    model_cls = namespace[class_name]
-    return model_cls.from_state_dict(state_dict)
+) -> object:
+    return build_codegen_model(load_yaml_mapping(spec_path), class_name, state_dict)
 
 
 def _build_runtime_model_from_spec(
     spec_path: Path, state_dict: dict[str, torch.Tensor]
 ) -> SynapseProgramModel:
-    return SynapseProgramModel.from_spec(_load_yaml_mapping(spec_path), state_dict=state_dict)
-
-
-def _extract_logits(output: Any) -> torch.Tensor:
-    if isinstance(output, dict):
-        logits = output.get("logits")
-        assert isinstance(logits, torch.Tensor)
-        return logits
-    assert isinstance(output, torch.Tensor)
-    return output
+    return SynapseProgramModel.from_spec(load_yaml_mapping(spec_path), state_dict=state_dict)
 
 
 @pytest.mark.parametrize(
@@ -66,7 +43,7 @@ def test_generated_gpt2_variants_match_hf(
     transformers = pytest.importorskip("transformers")
     safetensors = pytest.importorskip("safetensors")
 
-    device = _auto_device()
+    device = auto_device()
 
     synapse_weights, hf_model_dir = gpt2_local_paths
     spec_path = repo_root / "examples" / spec_name
@@ -93,18 +70,12 @@ def test_generated_gpt2_variants_match_hf(
     max_len = input_ids.shape[1] + 12
 
     with torch.no_grad():
-        synapse_logits = _extract_logits(synapse_model(input_ids))
-        runtime_logits = _extract_logits(runtime_model(input_ids))
+        synapse_logits = extract_logits(synapse_model(input_ids))
+        runtime_logits = extract_logits(runtime_model(input_ids))
         hf_logits = hf_model(input_ids=input_ids).logits
 
-    diff = (synapse_logits - hf_logits).abs()
-    assert float(diff.mean()) < 1.0e-4
-    assert float(diff.max()) < 5.0e-4
-    assert torch.equal(synapse_logits[:, -1, :].argmax(-1), hf_logits[:, -1, :].argmax(-1))
-    runtime_diff = (runtime_logits - hf_logits).abs()
-    assert float(runtime_diff.mean()) < 1.0e-4
-    assert float(runtime_diff.max()) < 5.0e-4
-    assert torch.equal(runtime_logits[:, -1, :].argmax(-1), hf_logits[:, -1, :].argmax(-1))
+    assert_logits_close(synapse_logits, hf_logits, mean_tol=1.0e-4, max_tol=5.0e-4)
+    assert_logits_close(runtime_logits, hf_logits, mean_tol=1.0e-4, max_tol=5.0e-4)
     syn_rt_diff = (synapse_logits - runtime_logits).abs()
     assert float(syn_rt_diff.mean()) < 1.0e-6
     assert float(syn_rt_diff.max()) < 1.0e-5

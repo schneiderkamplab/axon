@@ -406,6 +406,21 @@ emb ids = do
     assert node_specs[0]["embedding_dim"] == "D"
 
 
+def test_add_unifies_symbolic_last_dim_for_following_ops() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor -> Tensor[B,T,D]
+blk tok pos = do
+  x <- tok + pos
+  y <- layernorm pos
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[1]["op"] == "layernorm"
+    assert node_specs[1]["dim"] == "D"
+
+
 def test_embedding_accepts_dim_kwarg() -> None:
     source = """
 emb :: TokenIds[B,T] -> Tensor[B,T,D]
@@ -494,6 +509,42 @@ blk x = do
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["op"] == "linear"
     assert node_specs[0]["transpose"] is True
+
+
+def test_block_signature_propagates_output_last_dim_from_tensor_shape() -> None:
+    source = """
+rms :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+rms@path x = rmsnorm@path x
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- rms@norm x
+  z <- layernorm y
+  return z
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[1]["op"] == "layernorm"
+    assert node_specs[1]["dim"] == "D"
+
+
+def test_block_signature_propagates_output_last_dim_from_scalar_param() -> None:
+    source = """
+lin :: @Path -> Tensor[B,T,Din] -> I -> Tensor[B,T,dim]
+lin@path x dim = linear@path x dim=dim bias=true transpose=true
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,16]
+blk x = do
+  y <- lin@proj x 16
+  z <- layernorm y
+  return z
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[1]["op"] == "layernorm"
+    assert node_specs[1]["dim"] == 16
 
 
 def test_infer_repeat_kv_heads_and_kv_heads_from_typed_shapes() -> None:
@@ -685,6 +736,26 @@ tiny x use_cache = do
     assert node_specs[0]["when"] == "use_cache"
     assert node_specs[1]["when"] == "not (use_cache)"
     assert node_specs[2]["when"] == "not (use_cache)"
+
+
+def test_lower_if_then_else_matches_ternary_lowering() -> None:
+    ternary_source = """
+tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
+tiny x use_cache = do
+  k, v <- use_cache ? cache::update(past, k0, v0) : k0, v0
+  return k, v
+"""
+    if_source = """
+tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
+tiny x use_cache = do
+  k, v <- if use_cache then cache::update(past, k0, v0) else k0, v0
+  return k, v
+"""
+
+    ternary_spec = lower_axon_module_to_synapse_spec(parse_axon_module(ternary_source))
+    if_spec = lower_axon_module_to_synapse_spec(parse_axon_module(if_source))
+
+    assert _node_specs(if_spec["model"]["graph"]) == _node_specs(ternary_spec["model"]["graph"])
 
 
 def test_synapse_to_axon_roundtrip_equivalence_for_subset() -> None:

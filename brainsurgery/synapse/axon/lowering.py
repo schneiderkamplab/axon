@@ -21,6 +21,109 @@ _LAMBDA_RE = re.compile(r"^\\([A-Za-z_][A-Za-z0-9_]*)\s*->\s*(.+)$")
 _ZERO_ARG_CALLS = {"init_list"}
 _INVALID_POSITIONAL_TOKENS = {"+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">="}
 
+_OP_ARITY: dict[str, tuple[int, int]] = {
+    "embedding": (1, 1),
+    "linear": (1, 1),
+    "layernorm": (1, 1),
+    "rmsnorm": (1, 1),
+    "attention": (3, 3),
+    "causal_mask": (1, 1),
+    "reshape_heads": (1, 1),
+    "split_last": (1, 1),
+    "apply_rope_pair": (2, 2),
+    "repeat_kv": (1, 1),
+    "arange_positions": (1, 1),
+    "kv_cache_update": (3, 3),
+    "coalesce": (2, 8),
+    "topk": (1, 1),
+    "softmax": (1, 1),
+    "zeros_like": (1, 1),
+    "moe_select_tokens": (3, 3),
+    "moe_scatter_add": (4, 4),
+    "index": (2, 2),
+    "init_list": (0, 0),
+    "append": (2, 2),
+    "add": (2, 2),
+    "mul": (2, 2),
+    "merge_heads": (1, 1),
+    "activation": (1, 1),
+    "kv_seq_len": (1, 1),
+}
+
+_OP_ALLOWED_KWARGS: dict[str, set[str]] = {
+    "embedding": {"dim", "scale"},
+    "linear": {"dim", "bias", "transpose"},
+    "layernorm": {"dim", "eps"},
+    "rmsnorm": {"dim", "eps", "cast_float", "unit_offset"},
+    "attention": {
+        "backend",
+        "causal",
+        "mask",
+        "scale",
+        "rope_theta",
+        "sliding_window",
+        "causal_mask_buffer",
+    },
+    "causal_mask": {"key", "window", "padding_mask"},
+    "reshape_heads": {"heads", "head_dim"},
+    "split_last": {"parts", "sizes"},
+    "apply_rope_pair": {"position_ids", "theta"},
+    "repeat_kv": {"heads", "kv_heads"},
+    "arange_positions": {"attention_mask"},
+    "kv_cache_update": {"when"},
+    "coalesce": set(),
+    "topk": {"k", "dim"},
+    "softmax": {"dim", "dtype"},
+    "zeros_like": set(),
+    "moe_select_tokens": {"expert"},
+    "moe_scatter_add": set(),
+    "index": set(),
+    "init_list": set(),
+    "append": {"when"},
+    "add": set(),
+    "mul": set(),
+    "merge_heads": set(),
+    "activation": {"kind"},
+    "kv_seq_len": set(),
+}
+
+_OP_KWARG_KINDS: dict[str, dict[str, str]] = {
+    "embedding": {"dim": "dim", "scale": "number"},
+    "linear": {"dim": "dim", "bias": "bool", "transpose": "bool"},
+    "layernorm": {"dim": "dim", "eps": "number"},
+    "rmsnorm": {"dim": "dim", "eps": "number", "cast_float": "bool", "unit_offset": "bool"},
+    "attention": {
+        "backend": "str",
+        "causal": "bool",
+        "mask": "str",
+        "scale": "number",
+        "rope_theta": "number",
+        "sliding_window": "dim",
+        "causal_mask_buffer": "str",
+    },
+    "causal_mask": {"key": "str", "window": "dim", "padding_mask": "str"},
+    "reshape_heads": {"heads": "dim", "head_dim": "dim"},
+    "split_last": {"parts": "int", "sizes": "list_int"},
+    "apply_rope_pair": {"position_ids": "str", "theta": "number"},
+    "repeat_kv": {"heads": "dim", "kv_heads": "dim"},
+    "arange_positions": {"attention_mask": "str"},
+    "kv_cache_update": {},
+    "coalesce": {},
+    "topk": {"k": "dim", "dim": "int"},
+    "softmax": {"dim": "int", "dtype": "str"},
+    "zeros_like": {},
+    "moe_select_tokens": {"expert": "dim"},
+    "moe_scatter_add": {},
+    "index": {},
+    "init_list": {},
+    "append": {},
+    "add": {},
+    "mul": {},
+    "merge_heads": {},
+    "activation": {"kind": "str"},
+    "kv_seq_len": {},
+}
+
 
 def _split_top_level(text: str, sep: str) -> list[str]:
     parts: list[str] = []
@@ -191,11 +294,111 @@ def _to_synapse_op(
     return default_op
 
 
+def _canonical_op_name(callee: str) -> str:
+    if "@" in callee:
+        op_name = callee.split("@", 1)[0]
+        if op_name == "embed":
+            return "embedding"
+        return op_name
+    if "::" in callee:
+        ns, name = callee.split("::", 1)
+        if ns == "act":
+            return "activation"
+        if ns == "cache" and name == "update":
+            return "kv_cache_update"
+        if ns == "cache" and name == "coalesce":
+            return "coalesce"
+        if ns == "cache" and name == "seq_len":
+            return "kv_seq_len"
+    return callee
+
+
+def _normalize_dim_token(value: Any) -> Any:
+    if isinstance(value, str):
+        token = value.strip()
+        if re.fullmatch(r"-?[0-9]+", token):
+            return int(token)
+        return token
+    return value
+
+
+def _dims_compatible(left: Any, right: Any) -> bool:
+    return _normalize_dim_token(left) == _normalize_dim_token(right)
+
+
+def _is_kind(value: Any, kind: str) -> bool:
+    if kind == "bool":
+        return isinstance(value, bool)
+    if kind == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind == "number":
+        if isinstance(value, bool):
+            return False
+        return isinstance(value, (int, float, str))
+    if kind == "str":
+        return isinstance(value, str)
+    if kind == "dim":
+        if isinstance(value, bool):
+            return False
+        return isinstance(value, (int, str))
+    if kind == "list_int":
+        return isinstance(value, list) and all(
+            isinstance(v, int) and not isinstance(v, bool) for v in value
+        )
+    return True
+
+
+def _validate_op_signature(op_name: str, args: list[str], kwargs: dict[str, Any]) -> None:
+    arity = _OP_ARITY.get(op_name)
+    if arity is not None:
+        min_args, max_args = arity
+        if len(args) < min_args or len(args) > max_args:
+            raise ValueError(
+                f"{op_name} expects {min_args}"
+                + (f"..{max_args}" if min_args != max_args else "")
+                + f" positional args, got {len(args)}"
+            )
+    allowed = _OP_ALLOWED_KWARGS.get(op_name)
+    if allowed is not None:
+        unknown = sorted(set(kwargs) - allowed)
+        if unknown:
+            raise ValueError(f"{op_name} unsupported kwargs: {', '.join(unknown)}")
+    kinds = _OP_KWARG_KINDS.get(op_name, {})
+    for key, value in kwargs.items():
+        expected = kinds.get(key)
+        if expected is None:
+            continue
+        if not _is_kind(value, expected):
+            raise ValueError(
+                f"{op_name} kwarg {key!r} expects {expected}, got {type(value).__name__}"
+            )
+
+
+def _merge_when(outer: str | None, inner: Any) -> str | None:
+    if inner is None:
+        return outer
+    if isinstance(inner, bool):
+        inner_text = "true" if inner else "false"
+    else:
+        inner_text = str(inner).strip()
+    if not inner_text or inner_text == "true":
+        return outer
+    if inner_text == "false":
+        return "false"
+    if outer is None or not outer.strip() or outer.strip() == "true":
+        return inner_text
+    if outer.strip() == "false":
+        return "false"
+    return f"({outer}) and ({inner_text})"
+
+
 @dataclass
 class _LowerCtx:
     counter: int = 0
     block_signatures: dict[str, tuple[list[str], list[str]]] | None = None
     block_path_params: dict[str, str | None] | None = None
+    block_param_last_dims: dict[str, dict[str, Any]] | None = None
+    block_output_last_dims: dict[str, dict[str, Any]] | None = None
     tensor_last_dim: dict[str, Any] = field(default_factory=dict)
     tensor_heads: dict[str, Any] = field(default_factory=dict)
     scope_stack: list[str] = field(default_factory=list)
@@ -282,11 +485,63 @@ def _infer_split_sizes_from_last_dim(last_dim: Any, parts: int) -> list[Any] | N
 def _record_last_dim_for_call(
     *, callee: str, args: list[str], kwargs: dict[str, Any], out: str | list[str], ctx: _LowerCtx
 ) -> None:
-    op_name = _op_name_from_callee(callee)
+    resolved_block = _resolve_block_call(callee, ctx)
+    if resolved_block is not None and ctx.block_signatures is not None:
+        block_name, _ = resolved_block
+        input_names, output_names = ctx.block_signatures[block_name]
+        provided: dict[str, str] = {}
+        for idx, value in enumerate(args):
+            if idx < len(input_names):
+                provided[input_names[idx]] = value.strip()
+        for key, value in kwargs.items():
+            if key in input_names:
+                provided[key] = str(value).strip()
+
+        symbol_bindings: dict[str, Any] = {}
+        for param_name, raw in provided.items():
+            if _is_name_token(raw):
+                if raw in ctx.tensor_last_dim:
+                    symbol_bindings[param_name] = ctx.tensor_last_dim[raw]
+                else:
+                    symbol_bindings[param_name] = raw
+                continue
+            parsed = _parse_scalar(raw)
+            symbol_bindings[param_name] = parsed
+
+        param_last_dims = (
+            ctx.block_param_last_dims.get(block_name, {})
+            if isinstance(ctx.block_param_last_dims, dict)
+            else {}
+        )
+        for param_name, sym in param_last_dims.items():
+            if param_name in symbol_bindings and isinstance(sym, str):
+                symbol_bindings[sym] = symbol_bindings[param_name]
+
+        output_last_dims = (
+            ctx.block_output_last_dims.get(block_name, {})
+            if isinstance(ctx.block_output_last_dims, dict)
+            else {}
+        )
+        out_targets = [out] if isinstance(out, str) else list(out)
+        for output_name, target in zip(output_names, out_targets, strict=False):
+            dim_token = output_last_dims.get(output_name)
+            if isinstance(dim_token, str):
+                resolved_dim = symbol_bindings.get(dim_token, dim_token)
+                ctx.tensor_last_dim[target] = resolved_dim
+            elif dim_token is not None:
+                ctx.tensor_last_dim[target] = dim_token
+
+    op_name = _canonical_op_name(callee)
     first_in = args[0].strip() if args else None
+    second_in = args[1].strip() if len(args) > 1 else None
     first_dim = (
         ctx.tensor_last_dim.get(first_in)
         if isinstance(first_in, str) and _is_name_token(first_in)
+        else None
+    )
+    second_dim = (
+        ctx.tensor_last_dim.get(second_in)
+        if isinstance(second_in, str) and _is_name_token(second_in)
         else None
     )
 
@@ -310,8 +565,42 @@ def _record_last_dim_for_call(
         return
 
     last_dim: Any | None = None
-    if op_name in {"layernorm", "rmsnorm", "activation", "add", "mul", "merge_heads"}:
+    if op_name in {"add", "mul"}:
+        if (
+            first_dim is not None
+            and second_dim is not None
+            and not _dims_compatible(first_dim, second_dim)
+        ):
+            raise ValueError(
+                f"{op_name} requires matching last-dim; got {first_dim!r} and {second_dim!r}"
+            )
+        unified = first_dim if first_dim is not None else second_dim
+        if (
+            unified is not None
+            and isinstance(first_in, str)
+            and _is_name_token(first_in)
+            and first_dim is None
+        ):
+            ctx.tensor_last_dim[first_in] = unified
+        if (
+            unified is not None
+            and isinstance(second_in, str)
+            and _is_name_token(second_in)
+            and second_dim is None
+        ):
+            ctx.tensor_last_dim[second_in] = unified
+        last_dim = unified
+    elif op_name in {"layernorm", "rmsnorm", "activation", "merge_heads"}:
         last_dim = first_dim
+    if op_name in {"layernorm", "rmsnorm"}:
+        norm_dim = kwargs.get("dim")
+        if norm_dim is not None:
+            if first_dim is not None and not _dims_compatible(norm_dim, first_dim):
+                raise ValueError(
+                    f"{op_name} dim={norm_dim!r} mismatches input last-dim {first_dim!r}"
+                )
+            if first_dim is None and isinstance(first_in, str) and _is_name_token(first_in):
+                ctx.tensor_last_dim[first_in] = norm_dim
     elif op_name == "embedding":
         last_dim = kwargs.get("embedding_dim")
     elif op_name == "linear":
@@ -334,6 +623,7 @@ def _lower_simple_call(
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
     pre_graph: list[dict[str, Any]] = []
+    effective_when = _merge_when(when, kwargs.pop("when", None))
 
     resolved_args: list[str] = []
     for arg in args:
@@ -369,7 +659,7 @@ def _lower_simple_call(
                     _render_call("reshape_heads", [src], head_kwargs),
                     dst,
                     ctx,
-                    when=when,
+                    when=effective_when,
                 )
             )
         return [*pre_graph, *lowered_nodes]
@@ -379,7 +669,7 @@ def _lower_simple_call(
         if scope_prefix:
             scoped_path = f"{scope_prefix}.{param_path}" if param_path.strip() else scope_prefix
             callee = f"{op_name_with_at}@{scoped_path}"
-    op_name = _op_name_from_callee(callee)
+    op_name = _canonical_op_name(callee)
     if op_name == "embedding":
         if "embedding_dim" in kwargs:
             raise ValueError("embedding does not support embedding_dim; use dim")
@@ -420,6 +710,10 @@ def _lower_simple_call(
         inferred = ctx.tensor_last_dim.get(out)
         if inferred is not None:
             kwargs["embedding_dim"] = inferred
+    validation_kwargs = dict(kwargs)
+    if op_name == "embedding" and "embedding_dim" in validation_kwargs:
+        validation_kwargs["dim"] = validation_kwargs.pop("embedding_dim")
+    _validate_op_signature(op_name, args, validation_kwargs)
     if op_name == "repeat_kv" and args:
         src_name = args[0].strip()
         if _is_name_token(src_name):
@@ -472,7 +766,7 @@ def _lower_simple_call(
 
         node_name = f"n_{ctx.fresh('use')}"
         node_spec: dict[str, Any] = {"use": block_name, "in": in_map, "out": out_map}
-        nodes = _with_when([{node_name: node_spec}], when)
+        nodes = _with_when([{node_name: node_spec}], effective_when)
         _record_last_dim_for_call(callee=block_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
         return [*pre_graph, *nodes]
 
@@ -483,7 +777,7 @@ def _lower_simple_call(
             node_name = f"n_{ctx.fresh('op')}"
             templated_node = _to_synapse_op(op_name, args, kwargs, out)
             templated_node["param_base"] = param_path
-            nodes = _with_when([{node_name: templated_node}], when)
+            nodes = _with_when([{node_name: templated_node}], effective_when)
             _record_last_dim_for_call(callee=op_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
             return [*pre_graph, *nodes]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
@@ -492,11 +786,11 @@ def _lower_simple_call(
         item: dict[str, Any] = {segments[-1]: node_spec}
         for segment in reversed(segments[:-1]):
             item = {segment: {"graph": [item]}}
-        nodes = _with_when([item], when)
+        nodes = _with_when([item], effective_when)
         _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
         return [*pre_graph, *nodes]
     node_name = f"n_{ctx.fresh('op')}"
-    nodes = _with_when([{node_name: node_spec}], when)
+    nodes = _with_when([{node_name: node_spec}], effective_when)
     _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
     return [*pre_graph, *nodes]
 
@@ -549,6 +843,95 @@ def _split_ternary(expr: str) -> tuple[str, str, str] | None:
     if qpos < 0 or cpos < 0:
         return None
     return expr[:qpos].strip(), expr[qpos + 1 : cpos].strip(), expr[cpos + 1 :].strip()
+
+
+def _word_boundary(text: str, index: int) -> bool:
+    if index < 0 or index >= len(text):
+        return True
+    return not (text[index].isalnum() or text[index] == "_")
+
+
+def _find_top_level_keyword(text: str, keyword: str, *, start: int = 0) -> int:
+    depth = 0
+    i = start
+    size = len(keyword)
+    while i <= len(text) - size:
+        ch = text[i]
+        if ch in "([":
+            depth += 1
+            i += 1
+            continue
+        if ch in ")]":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0 and text.startswith(keyword, i):
+            left_ok = _word_boundary(text, i - 1)
+            right_ok = _word_boundary(text, i + size)
+            if left_ok and right_ok:
+                return i
+        i += 1
+    return -1
+
+
+def _split_if_then_else(expr: str) -> tuple[str, str, str] | None:
+    text = expr.strip()
+    if not text.startswith("if") or not _word_boundary(text, 2):
+        return None
+
+    then_pos = _find_top_level_keyword(text, "then", start=2)
+    if then_pos < 0:
+        return None
+
+    cond = text[2:then_pos].strip()
+    if not cond:
+        return None
+
+    body_start = then_pos + len("then")
+    depth = 0
+    nested_if = 0
+    i = body_start
+    else_pos = -1
+    while i < len(text):
+        ch = text[i]
+        if ch in "([":
+            depth += 1
+            i += 1
+            continue
+        if ch in ")]":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0:
+            if (
+                text.startswith("if", i)
+                and _word_boundary(text, i - 1)
+                and _word_boundary(text, i + 2)
+            ):
+                nested_if += 1
+                i += 2
+                continue
+            if (
+                text.startswith("else", i)
+                and _word_boundary(text, i - 1)
+                and _word_boundary(text, i + 4)
+            ):
+                if nested_if == 0:
+                    else_pos = i
+                    break
+                nested_if -= 1
+                i += 4
+                continue
+        i += 1
+
+    if else_pos < 0:
+        return None
+
+    true_expr = text[body_start:else_pos].strip()
+    false_expr = text[else_pos + len("else") :].strip()
+    if not true_expr or not false_expr:
+        return None
+    return cond, true_expr, false_expr
 
 
 def _substitute_var(expr: str, name: str, value: str) -> str:
@@ -684,9 +1067,11 @@ def _lower_expr(
                 bind_ref = bind_next_out
         return bind_graph
 
-    ternary = _split_ternary(expr)
-    if ternary is not None:
-        cond, true_expr, false_expr = ternary
+    conditional = _split_if_then_else(expr)
+    if conditional is None:
+        conditional = _split_ternary(expr)
+    if conditional is not None:
+        cond, true_expr, false_expr = conditional
         if isinstance(out, list):
             true_items = _tuple_items(true_expr)
             false_items = _tuple_items(false_expr)
@@ -738,7 +1123,18 @@ def _lower_expr(
                 out if idx == len(stages) - 1 else _pipeline_temp_out(stage, ctx)
             )
             piped_args = [pipe_ref] if isinstance(pipe_ref, str) else list(pipe_ref)
-            call_expr = _render_call(callee, [*piped_args, *args], kwargs)
+            stage_args = list(args)
+            if stage_args:
+                if isinstance(pipe_ref, str):
+                    if stage_args[0].strip() == pipe_ref:
+                        stage_args = stage_args[1:]
+                else:
+                    n = len(piped_args)
+                    if len(stage_args) >= n and all(
+                        stage_args[i].strip() == piped_args[i] for i in range(n)
+                    ):
+                        stage_args = stage_args[n:]
+            call_expr = _render_call(callee, [*piped_args, *stage_args], kwargs)
             pipe_graph.extend(_lower_simple_call(call_expr, next_out, ctx, when=when))
             pipe_ref = next_out
         return pipe_graph
@@ -796,6 +1192,15 @@ def _module_return_last_dims(module: AxonModule, returns: tuple[str, ...]) -> di
     return {returns[0]: module.return_shape[-1]}
 
 
+def _module_param_last_dims(module: AxonModule) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for param in module.params:
+        if param.shape is None or len(param.shape) == 0:
+            continue
+        out[param.name] = param.shape[-1]
+    return out
+
+
 def _module_return_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
     if not returns or module.return_shape is None or len(module.return_shape) < 2:
         return {}
@@ -826,6 +1231,8 @@ def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
     ctx = _LowerCtx(
         block_signatures={},
         block_path_params={module.name: module.path_param},
+        block_param_last_dims={module.name: _module_param_last_dims(module)},
+        block_output_last_dims={module.name: _module_return_last_dims(module, returns)},
         tensor_last_dim=initial_dims,
         tensor_heads=initial_heads,
         path_param_names={p for p in [module.path_param] if isinstance(p, str)},
@@ -975,15 +1382,20 @@ def lower_axon_program_to_synapse_spec(
 
     signatures: dict[str, tuple[list[str], list[str]]] = {}
     block_path_params: dict[str, str | None] = {}
+    block_param_last_dims: dict[str, dict[str, Any]] = {}
+    block_output_last_dims: dict[str, dict[str, Any]] = {}
     for module in modules:
         input_names = [param.name for param in module.params]
         if module.path_param is not None:
             input_names.append(module.path_param)
+        output_names = list(_module_return_names(module))
         signatures[module.name] = (
             input_names,
-            list(_module_return_names(module)),
+            output_names,
         )
         block_path_params[module.name] = module.path_param
+        block_param_last_dims[module.name] = _module_param_last_dims(module)
+        block_output_last_dims[module.name] = _module_return_last_dims(module, tuple(output_names))
 
     main = by_name[main_name]
     main_returns = _module_return_names(main)
@@ -1010,6 +1422,8 @@ def lower_axon_program_to_synapse_spec(
         ctx=_LowerCtx(
             block_signatures=signatures,
             block_path_params=block_path_params,
+            block_param_last_dims=block_param_last_dims,
+            block_output_last_dims=block_output_last_dims,
             tensor_last_dim=main_initial_dims,
             tensor_heads=main_initial_heads,
             path_param_names={p for p in [main.path_param] if isinstance(p, str)},
@@ -1053,6 +1467,8 @@ def lower_axon_program_to_synapse_spec(
             ctx=_LowerCtx(
                 block_signatures=signatures,
                 block_path_params=block_path_params,
+                block_param_last_dims=block_param_last_dims,
+                block_output_last_dims=block_output_last_dims,
                 tensor_last_dim=block_initial_dims,
                 tensor_heads=block_initial_heads,
                 path_param_names={p for p in [module.path_param] if isinstance(p, str)},

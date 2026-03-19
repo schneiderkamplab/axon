@@ -228,3 +228,22 @@ def test_emit_repeat_block_single_output_loop_carry() -> None:
     out = model(zero=torch.tensor(0.0), one_seed=torch.tensor(1.0))
     assert torch.is_tensor(out["result"])
     assert float(out["result"]) == 3.0
+
+
+def test_generated_linear_handles_empty_batch() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "symbols": {},
+            "inputs": {"x": {}},
+            "graph": [{"n": {"op": "linear", "in": "x", "out": "y", "bias": False}}],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="LinearEmptyModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["LinearEmptyModel"]()
+    model.load_state_dict_tensors({"n.weight": torch.randn(8, 4)})
+    out = model(x=torch.empty((0, 4), dtype=torch.float32))
+    assert out["y"].shape == (0, 8)

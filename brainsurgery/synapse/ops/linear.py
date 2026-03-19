@@ -58,6 +58,10 @@ def interpret(
 
     transpose = _resolve_transpose(node_spec)
     out = model._require_name(node_spec.get("out"), field="linear.out")
+    if x.numel() == 0:
+        out_dim = int(weight.shape[-1]) if transpose else int(weight.shape[0])
+        env[out] = x.new_empty((*x.shape[:-1], out_dim))
+        return
     if transpose:
         y = torch.matmul(x, weight)
         env[out] = y + bias if bias is not None else y
@@ -92,14 +96,25 @@ def compile(
     weight_expr = infer_param("weight")
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     bias_expr = f"self._state.get({infer_param('bias')})" if has_bias else "None"
+    transpose = _resolve_transpose(node_spec)
+    out_dim_expr = (
+        f"self._param({weight_expr}).shape[-1]"
+        if transpose
+        else f"self._param({weight_expr}).shape[0]"
+    )
 
-    if _resolve_transpose(node_spec):
-        lines.append(f"{indent}{out_var} = torch.matmul({src}, self._param({weight_expr}))")
-        lines.append(f"{indent}if {bias_expr} is not None:")
-        lines.append(f"{indent}    {out_var} = {out_var} + {bias_expr}")
+    lines.append(f"{indent}if {src}.numel() == 0:")
+    lines.append(
+        f"{indent}    {out_var} = {src}.new_empty((*{src}.shape[:-1], int({out_dim_expr})))"
+    )
+    lines.append(f"{indent}else:")
+    if transpose:
+        lines.append(f"{indent}    {out_var} = torch.matmul({src}, self._param({weight_expr}))")
+        lines.append(f"{indent}    if {bias_expr} is not None:")
+        lines.append(f"{indent}        {out_var} = {out_var} + {bias_expr}")
     else:
         lines.append(
-            f"{indent}{out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
+            f"{indent}    {out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
         )
 
     return lines
