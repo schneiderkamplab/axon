@@ -338,8 +338,6 @@ class SynapseProgramModel(nn.Module):
             candidate = node_spec[param_name]
             if "." in candidate:
                 return candidate
-        if "share" in node_spec and isinstance(node_spec["share"], str) and param_name == "weight":
-            return node_spec["share"]
         return f"{node_path}.{param_name}" if node_path else param_name
 
     def _resolve_output_ref(self, ref: Any, env: dict[str, Any]) -> Any:

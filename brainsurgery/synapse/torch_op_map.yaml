@@ -26,10 +26,8 @@ ops:
     stateful: true
     constructor:
       in_features: required
-      out_features: required
+      dim: required
       bias: optional
-    call:
-      weight_layout: optional
 
   layernorm:
     kind: module

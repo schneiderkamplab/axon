@@ -36,8 +36,31 @@ def _load_axon_spec(path: Path) -> dict[str, Any]:
 
 
 def _axon_uses_model_prefix_for_embed(repo_root: Path, axon_name: str) -> bool:
-    text = (repo_root / "examples" / axon_name).read_text(encoding="utf-8")
-    return "model.embed_tokens" in text
+    spec = _load_axon_spec(repo_root / "examples" / axon_name)
+    graph = spec.get("model", {}).get("graph", [])
+
+    def _walk(items: list[Any], prefix: str) -> bool:
+        for item in items:
+            if not isinstance(item, dict) or len(item) != 1:
+                continue
+            node_name, node_spec = next(iter(item.items()))
+            if not isinstance(node_spec, dict):
+                continue
+            node_path = f"{prefix}.{node_name}" if prefix else str(node_name)
+            if node_spec.get("op") == "embedding" and node_path.startswith("model."):
+                return True
+            tie_weight = node_spec.get("tie_weight")
+            if isinstance(tie_weight, str) and tie_weight.startswith("model."):
+                return True
+            nested = node_spec.get("graph")
+            if isinstance(nested, list) and _walk(nested, node_path):
+                return True
+            body = node_spec.get("body")
+            if isinstance(body, list) and _walk(body, node_path):
+                return True
+        return False
+
+    return _walk(graph if isinstance(graph, list) else [], "")
 
 
 def _build_codegen_model(

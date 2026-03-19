@@ -8,26 +8,29 @@ from torch.nn import functional as F
 OP_NAME = "linear"
 
 
-def _resolve_weight_layout(node_spec: dict[str, Any]) -> str:
-    has_transpose = "transpose" in node_spec
-    has_layout = "weight_layout" in node_spec
-    if has_transpose and has_layout:
-        raise ValueError("linear node cannot specify both transpose and weight_layout")
-    if has_transpose:
-        transpose = node_spec.get("transpose")
-        if isinstance(transpose, bool):
-            return "io" if transpose else "oi"
-        raise ValueError("linear transpose must be boolean when provided")
-    return str(node_spec.get("weight_layout", "oi"))
+def _validate_linear_keys(node_spec: dict[str, Any]) -> None:
+    if "weight_layout" in node_spec:
+        raise ValueError("linear does not support weight_layout; use transpose=true/false")
+    if "tie_weight" in node_spec:
+        raise ValueError("linear does not support tie_weight; use linear@<path> or weight=<path>")
+    if "share" in node_spec:
+        raise ValueError("linear does not support share; use linear@<path> or weight=<path>")
+
+
+def _resolve_transpose(node_spec: dict[str, Any]) -> bool:
+    _validate_linear_keys(node_spec)
+    transpose = node_spec.get("transpose", False)
+    if isinstance(transpose, bool):
+        return transpose
+    raise ValueError("linear transpose must be boolean when provided")
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter
-    tie = node_spec.get("tie_weight")
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     explicit_weight = node_spec.get("weight")
     has_explicit_weight = isinstance(explicit_weight, str) and "." in explicit_weight
-    if not has_bias and (isinstance(tie, str) or has_explicit_weight):
+    if not has_bias and has_explicit_weight:
         return False
     return True
 
@@ -43,11 +46,9 @@ def interpret(
 ) -> None:
     del scope, symbols
     x = model._read_tensor_input(node_spec.get("in"), env)
-    linear_weight_path: str | None = node_spec.get("tie_weight")
-    if not isinstance(linear_weight_path, str):
-        linear_weight_path = model._infer_param_path(
-            node_spec, node_path=node_path, param_name="weight"
-        )
+    linear_weight_path = model._infer_param_path(
+        node_spec, node_path=node_path, param_name="weight"
+    )
     weight = model._state[linear_weight_path]
 
     bias = None
@@ -55,15 +56,13 @@ def interpret(
         bias_path = model._infer_param_path(node_spec, node_path=node_path, param_name="bias")
         bias = model._state.get(bias_path)
 
-    weight_layout = _resolve_weight_layout(node_spec)
+    transpose = _resolve_transpose(node_spec)
     out = model._require_name(node_spec.get("out"), field="linear.out")
-    if weight_layout == "oi":
-        env[out] = F.linear(x, weight, bias)
-    elif weight_layout == "io":
+    if transpose:
         y = torch.matmul(x, weight)
         env[out] = y + bias if bias is not None else y
     else:
-        raise ValueError(f"Unsupported linear weight_layout: {weight_layout}")
+        env[out] = F.linear(x, weight, bias)
 
 
 def compile(
@@ -90,22 +89,18 @@ def compile(
     src = read(str(node_spec.get("in")))
     out_name = str(node_spec.get("out"))
     out_var = assign_out_var(out_name)
-    tie = node_spec.get("tie_weight")
-    weight_expr = repr(tie) if isinstance(tie, str) else infer_param("weight")
+    weight_expr = infer_param("weight")
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     bias_expr = f"self._state.get({infer_param('bias')})" if has_bias else "None"
 
-    weight_layout = _resolve_weight_layout(node_spec)
-    if weight_layout == "oi":
-        lines.append(
-            f"{indent}{out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
-        )
-    elif weight_layout == "io":
+    if _resolve_transpose(node_spec):
         lines.append(f"{indent}{out_var} = torch.matmul({src}, self._param({weight_expr}))")
         lines.append(f"{indent}if {bias_expr} is not None:")
         lines.append(f"{indent}    {out_var} = {out_var} + {bias_expr}")
     else:
-        raise ValueError(f"Unsupported linear weight_layout: {weight_layout}")
+        lines.append(
+            f"{indent}{out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
+        )
 
     return lines
 

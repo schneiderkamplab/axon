@@ -41,25 +41,6 @@ def _build_runtime_model_from_spec(
     return SynapseProgramModel.from_spec(_load_yaml_mapping(spec_path), state_dict=state_dict)
 
 
-def _spec_uses_model_prefix_for_embed(spec: dict[str, Any]) -> bool:
-    graph = spec.get("model", {}).get("graph", [])
-    if not isinstance(graph, list):
-        return False
-    for node in graph:
-        if not isinstance(node, dict):
-            continue
-        node_spec = next(iter(node.values()), None)
-        if not isinstance(node_spec, dict):
-            continue
-        tie_weight = node_spec.get("tie_weight")
-        if isinstance(tie_weight, str) and tie_weight == "model.embed_tokens.weight":
-            return True
-        if node_spec.get("op") != "embedding":
-            continue
-        return node_spec.get("weight") == "model.embed_tokens.weight"
-    return False
-
-
 def _masked_logits_diff(
     lhs: torch.Tensor, rhs: torch.Tensor, attention_mask: torch.Tensor
 ) -> torch.Tensor:
@@ -91,23 +72,14 @@ def test_generated_gemma3_matches_hf(
     device = _auto_device()
 
     spec_path = repo_root / "examples" / "gemma3_270m_synapse.yaml"
-    spec = _load_yaml_mapping(spec_path)
     weights_path = gemma3_local_path / "model.safetensors"
     if not weights_path.exists():
         pytest.skip(f"missing Gemma3 checkpoint: {weights_path}")
 
     st = safetensors.safe_open(str(weights_path), framework="pt")
-    if _spec_uses_model_prefix_for_embed(spec):
-        state_dict = {
-            key: st.get_tensor(key).to(device=device, dtype=torch.float32) for key in st.keys()
-        }
-    else:
-        state_dict = {
-            (key[len("model.") :] if key.startswith("model.") else key): st.get_tensor(key).to(
-                device=device, dtype=torch.float32
-            )
-            for key in st.keys()
-        }
+    state_dict = {
+        key: st.get_tensor(key).to(device=device, dtype=torch.float32) for key in st.keys()
+    }
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(gemma3_local_path), local_files_only=True

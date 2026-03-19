@@ -470,8 +470,6 @@ class _Emitter:
             candidate = node_spec[param_name]
             if "." in candidate:
                 return repr(candidate)
-        if param_name == "weight" and isinstance(node_spec.get("share"), str):
-            return repr(node_spec["share"])
         return f"self._join_scope({node_path_var}, {param_name!r})"
 
     def _read_env_var(self, env: dict[str, str], name: str) -> str:

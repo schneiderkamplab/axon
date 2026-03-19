@@ -29,9 +29,9 @@ def _tiny_linear_spec() -> dict[str, object]:
                         "op": "linear",
                         "in": "x",
                         "out": "logits",
-                        "out_features": "V",
+                        "dim": "V",
                         "bias": False,
-                        "tie_weight": "embed_tokens.weight",
+                        "weight": "embed_tokens.weight",
                     }
                 },
             ],
@@ -161,9 +161,9 @@ model:
         op: linear
         in: x
         out: logits
-        out_features: V
+        dim: V
         bias: false
-        tie_weight: embed_tokens.weight
+        weight: embed_tokens.weight
   outputs:
     logits: logits
 """,

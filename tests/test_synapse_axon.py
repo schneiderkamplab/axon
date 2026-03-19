@@ -205,7 +205,7 @@ def test_infer_split_last_sizes_from_known_last_dim() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
-  qkv <- linear x out_features=3*D
+  qkv <- linear x dim=3*D
   q, k, v <- split_last qkv
   return q
 """
@@ -216,12 +216,12 @@ blk x = do
     assert node_specs[1]["sizes"] == ["D", "D", "D"]
 
 
-def test_infer_linear_out_features_from_return_shape() -> None:
+def test_infer_linear_dim_from_return_shape() -> None:
     source = """
 gpt2 :: TokenIds[B,T] -> Tensor[B,T,V]
 gpt2 input_ids = do
-  h <- embedding@wte input_ids num_embeddings=V embedding_dim=D
-  logits <- linear h tie_weight=wte.weight
+  h <- embedding@wte input_ids dim=D
+  logits <- linear@wte h
   return logits
 """
     modules = parse_axon_program(source)
@@ -230,14 +230,14 @@ gpt2 input_ids = do
     assert node_specs[1]["op"] == "linear"
     assert node_specs[1]["in"] == "h"
     assert node_specs[1]["out"] == "logits"
-    assert node_specs[1]["out_features"] == "V"
+    assert node_specs[1]["dim"] == "V"
 
 
 def test_infer_embedding_dim_from_typed_output_shape() -> None:
     source = """
 emb :: TokenIds[B,T] -> Tensor[B,T,D]
 emb ids = do
-  x <- embedding ids num_embeddings=V
+  x <- embedding ids
   return x
 """
     modules = parse_axon_program(source)
@@ -247,7 +247,7 @@ emb ids = do
     assert node_specs[0]["embedding_dim"] == "D"
 
 
-def test_embedding_accepts_dim_alias_for_embedding_dim() -> None:
+def test_embedding_accepts_dim_kwarg() -> None:
     source = """
 emb :: TokenIds[B,T] -> Tensor[B,T,D]
 emb ids = do
@@ -261,18 +261,44 @@ emb ids = do
     assert node_specs[0]["embedding_dim"] == "D"
 
 
-def test_linear_accepts_transpose_alias_for_io_layout() -> None:
+def test_embedding_rejects_embedding_dim_kwarg() -> None:
+    source = """
+emb :: TokenIds[B,T] -> Tensor[B,T,D]
+emb ids = do
+  x <- embedding ids embedding_dim=D
+  return x
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="embedding does not support embedding_dim; use dim"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_embedding_rejects_num_embeddings_kwarg() -> None:
+    source = """
+emb :: TokenIds[B,T] -> Tensor[B,T,D]
+emb ids = do
+  x <- embedding ids dim=D num_embeddings=V
+  return x
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError, match="embedding unsupported kwargs: num_embeddings; allowed: dim, scale"
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_linear_accepts_transpose_flag() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
-  y <- linear x out_features=D transpose=true bias=false
+  y <- linear x dim=D transpose=true bias=false
   return y
 """
     modules = parse_axon_program(source)
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["op"] == "linear"
-    assert node_specs[0]["weight_layout"] == "io"
+    assert node_specs[0]["transpose"] is True
 
 
 def test_infer_repeat_kv_heads_and_kv_heads_from_typed_shapes() -> None:
@@ -296,7 +322,7 @@ def test_parse_axon_ignores_haskell_style_comments() -> None:
 tiny :: Tensor -> ?Tensor -> Tensor -- signature comment
 tiny x cache = do -- def comment
   -- statement comment
-  y <- x |> linear@proj(out_features=4, bias=false) -- inline comment
+  y <- x |> linear@proj(dim=4, bias=false) -- inline comment
   return y -- trailing comment
 """
     module = parse_axon_module(source)
@@ -314,7 +340,7 @@ tiny :: Tensor -> Tensor
 tiny x = do
   qkv <- x |>
     layernorm@ln_1(x, dim=768, eps=1e-05) |>
-    linear@attn.c_attn(out_features=2304, weight_layout=io, bias=true)
+    linear@attn.c_attn(dim=2304, transpose=true, bias=true)
   return qkv
 """
     module = parse_axon_module(source)
@@ -362,7 +388,7 @@ def test_lower_return_pipeline_expression_to_named_output() -> None:
     source = """
 tiny :: Tensor -> Tensor -> Tensor
 tiny x wte = do
-  return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear(out_features=50257, tie_weight=wte.weight)
+  return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear@wte(dim=50257)
 """
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
@@ -379,8 +405,7 @@ tiny x wte = do
         "op": "linear",
         "in": "pipe_1",
         "out": "out_0",
-        "out_features": 50257,
-        "tie_weight": "wte.weight",
+        "dim": 50257,
     }
     assert spec["model"]["outputs"] == {"out_0": "out_0"}
 

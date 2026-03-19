@@ -312,7 +312,7 @@ def _record_last_dim_for_call(
     elif op_name == "embedding":
         last_dim = kwargs.get("embedding_dim")
     elif op_name == "linear":
-        last_dim = kwargs.get("out_features", kwargs.get("out_dim", first_dim))
+        last_dim = kwargs.get("dim", first_dim)
 
     if last_dim is not None:
         ctx.tensor_last_dim[out] = last_dim
@@ -358,16 +358,30 @@ def _lower_simple_call(
             scoped_path = f"{scope_prefix}.{param_path}" if param_path.strip() else scope_prefix
             callee = f"{op_name_with_at}@{scoped_path}"
     op_name = _op_name_from_callee(callee)
-    if op_name == "embedding" and "embedding_dim" not in kwargs and "dim" in kwargs:
-        kwargs["embedding_dim"] = kwargs.pop("dim")
+    if op_name == "embedding":
+        if "embedding_dim" in kwargs:
+            raise ValueError("embedding does not support embedding_dim; use dim")
+        allowed_embedding_kwargs = {"dim", "scale"}
+        invalid_embedding_kwargs = sorted(set(kwargs) - allowed_embedding_kwargs)
+        if invalid_embedding_kwargs:
+            bad = ", ".join(invalid_embedding_kwargs)
+            raise ValueError(f"embedding unsupported kwargs: {bad}; allowed: dim, scale")
+        if "dim" in kwargs:
+            kwargs["embedding_dim"] = kwargs.pop("dim")
+    if op_name == "linear" and "weight_layout" in kwargs:
+        raise ValueError("linear does not support weight_layout; use transpose=true/false")
+    if op_name == "linear" and "tie_weight" in kwargs:
+        raise ValueError("linear does not support tie_weight; use linear@<path>")
+    if op_name == "linear" and "out_features" in kwargs:
+        raise ValueError("linear does not support out_features; use dim")
+    if op_name == "linear" and "out_dim" in kwargs:
+        raise ValueError("linear does not support out_dim; use dim")
     if op_name == "linear" and "transpose" in kwargs:
-        if "weight_layout" in kwargs:
-            raise ValueError("linear call cannot specify both transpose and weight_layout")
-        raw_transpose = kwargs.pop("transpose")
+        raw_transpose = kwargs["transpose"]
         if isinstance(raw_transpose, bool):
-            kwargs["weight_layout"] = "io" if raw_transpose else "oi"
+            pass
         elif isinstance(raw_transpose, str) and raw_transpose.lower() in {"true", "false"}:
-            kwargs["weight_layout"] = "io" if raw_transpose.lower() == "true" else "oi"
+            kwargs["transpose"] = raw_transpose.lower() == "true"
         else:
             raise ValueError("linear transpose must be true/false")
     if op_name in {"layernorm", "rmsnorm"} and "dim" not in kwargs and args:
@@ -376,15 +390,10 @@ def _lower_simple_call(
             inferred = ctx.tensor_last_dim.get(first_arg)
             if inferred is not None:
                 kwargs["dim"] = inferred
-    if (
-        op_name == "linear"
-        and "out_features" not in kwargs
-        and "out_dim" not in kwargs
-        and isinstance(out, str)
-    ):
+    if op_name == "linear" and "dim" not in kwargs and isinstance(out, str):
         inferred = ctx.tensor_last_dim.get(out)
         if inferred is not None:
-            kwargs["out_features"] = inferred
+            kwargs["dim"] = inferred
     if op_name == "embedding" and "embedding_dim" not in kwargs and isinstance(out, str):
         inferred = ctx.tensor_last_dim.get(out)
         if inferred is not None:
@@ -812,6 +821,10 @@ def _lower_statements(
                 if isinstance(stmt.name, str) and stmt.name
                 else f"n_{ctx.fresh('repeat')}"
             )
+            if ctx.scope_stack:
+                scope_prefix = ".".join(part for part in ctx.scope_stack if part)
+                if scope_prefix:
+                    repeat_name = f"{scope_prefix}.{repeat_name}"
             repeat_item: dict[str, Any] = {
                 repeat_name.split(".")[-1]: {
                     "op": "repeat",

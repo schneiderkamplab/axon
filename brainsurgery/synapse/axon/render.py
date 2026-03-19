@@ -113,8 +113,6 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
         node_path
         and op in {"linear", "embedding", "layernorm", "rmsnorm"}
         and not isinstance(node_spec.get("weight"), str)
-        and not isinstance(node_spec.get("tie_weight"), str)
-        and not isinstance(node_spec.get("share"), str)
     ):
         callee = f"{op}@{node_path}"
     elif op == "activation" and isinstance(node_spec.get("kind"), str):
