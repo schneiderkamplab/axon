@@ -73,23 +73,19 @@ def _load_state_dict(
     *,
     device: torch.device,
     dtype: torch.dtype,
-    strip_model_prefix: bool,
 ) -> dict[str, torch.Tensor]:
     out: dict[str, torch.Tensor] = {}
     for path in paths:
         st = safetensors.safe_open(str(path), framework="pt")
         for key in st.keys():
-            mapped = key
-            if strip_model_prefix and mapped.startswith("model."):
-                mapped = mapped[len("model.") :]
-            if mapped in out:
-                raise ValueError(f"Duplicate tensor key while reading safetensors shards: {mapped}")
+            if key in out:
+                raise ValueError(f"Duplicate tensor key while reading safetensors shards: {key}")
             tensor = st.get_tensor(key)
             if tensor.is_floating_point():
                 tensor = tensor.to(device=device, dtype=dtype)
             else:
                 tensor = tensor.to(device=device)
-            out[mapped] = tensor
+            out[key] = tensor
     return out
 
 
@@ -207,7 +203,6 @@ def run_axon_test(
     class_name: str = "AxonGeneratedModel",
     main_module: str | None = None,
     dtype: str = "float32",
-    strip_model_prefix: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
@@ -323,7 +318,6 @@ def run_axon_test(
             safetensors_files,
             device=resolved_device,
             dtype=resolved_dtype,
-            strip_model_prefix=strip_model_prefix,
         )
         syn = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
 

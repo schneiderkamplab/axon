@@ -37,7 +37,14 @@ class AxonScope:
     body: tuple["AxonStatement", ...]
 
 
-AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonScope
+@dataclass(frozen=True)
+class AxonScopeBind:
+    targets: tuple[str, ...]
+    prefix: str
+    body: tuple["AxonStatement", ...]
+
+
+AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonScope | AxonScopeBind
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,7 @@ __all__ = [
     "AxonReturn",
     "AxonRepeat",
     "AxonScope",
+    "AxonScopeBind",
     "AxonStatement",
     "AxonModule",
 ]

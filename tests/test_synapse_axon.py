@@ -72,6 +72,124 @@ tiny x = do
         parse_axon_module(source)
 
 
+def test_parse_and_lower_scope_bind_expression() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  y <- scope@attn do
+    h <- linear@proj x dim=4
+    return act::gelu_new h
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    graph = spec["model"]["graph"]
+    assert isinstance(graph, list)
+
+    def collect_ops(items: list[dict[str, Any]]) -> list[str]:
+        ops: list[str] = []
+        for item in items:
+            _, node_spec = next(iter(item.items()))
+            if not isinstance(node_spec, dict):
+                continue
+            op = node_spec.get("op")
+            if isinstance(op, str):
+                ops.append(op)
+            nested = node_spec.get("graph")
+            if isinstance(nested, list):
+                ops.extend(collect_ops(nested))
+        return ops
+
+    ops = collect_ops(graph)
+    assert "linear" in ops
+    assert "activation" in ops
+    assert "_ir_alias" in ops
+
+
+def test_at_path_is_scoped_inside_scope_bind() -> None:
+    source = """
+tiny :: TokenIds[B,T] -> Tensor[B,T,V]
+tiny input_ids = do
+  y <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    return linear@lm_head x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    graph = spec["model"]["graph"]
+
+    def _collect_param_paths(
+        items: list[dict[str, Any]], prefix: str = ""
+    ) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for item in items:
+            name, node_spec = next(iter(item.items()))
+            path = f"{prefix}.{name}" if prefix else name
+            if not isinstance(node_spec, dict):
+                continue
+            op = node_spec.get("op")
+            if isinstance(op, str):
+                out.append((path, op))
+            nested = node_spec.get("graph")
+            if isinstance(nested, list):
+                out.extend(_collect_param_paths(nested, path))
+        return out
+
+    ops = _collect_param_paths(graph)
+    assert ("model.embed_tokens", "embedding") in ops
+    assert ("model.lm_head", "linear") in ops
+
+
+def test_double_at_path_is_absolute_inside_scope_bind() -> None:
+    source = """
+tiny :: TokenIds[B,T] -> Tensor[B,T,V]
+tiny input_ids = do
+  y <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    return linear@@lm_head x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    graph = spec["model"]["graph"]
+
+    def _collect_param_paths(
+        items: list[dict[str, Any]], prefix: str = ""
+    ) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for item in items:
+            name, node_spec = next(iter(item.items()))
+            path = f"{prefix}.{name}" if prefix else name
+            if not isinstance(node_spec, dict):
+                continue
+            op = node_spec.get("op")
+            if isinstance(op, str):
+                out.append((path, op))
+            nested = node_spec.get("graph")
+            if isinstance(nested, list):
+                out.extend(_collect_param_paths(nested, path))
+        return out
+
+    ops = _collect_param_paths(graph)
+    assert ("model.embed_tokens", "embedding") in ops
+    assert ("lm_head", "linear") in ops
+    assert ("model.lm_head", "linear") not in ops
+
+
+def test_parse_rejects_scope_statement_form() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  scope@attn do
+    y <- linear@proj x dim=4
+    return y
+  return x
+"""
+    with pytest.raises(ValueError, match="scope statement form is not supported"):
+        parse_axon_module(source)
+
+
 def test_parse_for_at_range_loop_sugar() -> None:
     source = """
 tiny :: Tensor -> Tensor

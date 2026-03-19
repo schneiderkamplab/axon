@@ -8,7 +8,7 @@ from .types import (
     AxonParam,
     AxonRepeat,
     AxonReturn,
-    AxonScope,
+    AxonScopeBind,
     AxonStatement,
 )
 
@@ -19,6 +19,7 @@ _FOR_AT_RANGE_RE = re.compile(
     r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
 )
 _SCOPE_RE = re.compile(r"^scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
+_BIND_SCOPE_RE = re.compile(r"^(.+?)<-\s*scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
 _TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 _TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
 
@@ -324,6 +325,7 @@ def _parse_statements(
 
         for_at_match = _FOR_AT_RANGE_RE.match(line)
         scope_match = _SCOPE_RE.match(line)
+        bind_scope_match = _BIND_SCOPE_RE.match(line)
         if for_at_match is not None:
             repeat_name = for_at_match.group(1).strip() if for_at_match.group(1) else None
             var = for_at_match.group(2).strip()
@@ -354,17 +356,26 @@ def _parse_statements(
             )
             i = new_i
             continue
-        if scope_match is not None:
-            prefix = scope_match.group(1).strip()
+        if bind_scope_match is not None:
+            raw_targets = bind_scope_match.group(1).strip()
+            targets = tuple(part.strip() for part in _split_top_level_csv(raw_targets))
+            if not targets:
+                raise ValueError("scope bind requires one or more targets")
+            prefix = bind_scope_match.group(2).strip()
             if i + 1 >= len(lines):
-                raise ValueError("scope requires indented body")
+                raise ValueError("scope bind requires indented body")
             next_indent, _ = lines[i + 1]
             if next_indent <= indent:
-                raise ValueError("scope requires indented body")
+                raise ValueError("scope bind requires indented body")
             body, new_i = _parse_statements(lines, i + 1, next_indent)
-            out.append(AxonScope(prefix=prefix, body=tuple(body)))
+            out.append(AxonScopeBind(targets=targets, prefix=prefix, body=tuple(body)))
             i = new_i
             continue
+        if scope_match is not None:
+            del scope_match
+            raise ValueError(
+                "scope statement form is not supported; use '<target> <- scope@name do ... return ...'"
+            )
 
         while i + 1 < len(lines):
             nxt_indent, nxt = lines[i + 1]

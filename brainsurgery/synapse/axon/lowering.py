@@ -11,6 +11,7 @@ from .types import (
     AxonRepeat,
     AxonReturn,
     AxonScope,
+    AxonScopeBind,
     AxonStatement,
 )
 
@@ -330,6 +331,9 @@ def _lower_simple_call(
     expr: str, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
+    is_absolute_path = "@@" in callee
+    if is_absolute_path:
+        callee = callee.replace("@@", "@", 1)
     if _op_name_from_callee(callee) == "reshape_heads_triplet":
         if not isinstance(out, list) or len(out) != 3 or len(args) != 3:
             raise ValueError("reshape_heads_triplet requires 3 inputs and 3 outputs")
@@ -351,7 +355,7 @@ def _lower_simple_call(
                 )
             )
         return lowered_nodes
-    if "@" in callee and ctx.scope_stack:
+    if "@" in callee and ctx.scope_stack and not is_absolute_path:
         op_name_with_at, param_path = callee.split("@", 1)
         scope_prefix = ".".join(part for part in ctx.scope_stack if part)
         if scope_prefix:
@@ -853,6 +857,31 @@ def _lower_statements(
                 )
             finally:
                 ctx.scope_stack.pop()
+            continue
+
+        if isinstance(stmt, AxonScopeBind):
+            ctx.scope_stack.append(stmt.prefix)
+            scoped_outputs: dict[str, str] = {}
+            try:
+                _lower_statements(
+                    statements=stmt.body,
+                    graph=graph,
+                    outputs=scoped_outputs,
+                    returns=(),
+                    ctx=ctx,
+                )
+            finally:
+                ctx.scope_stack.pop()
+            for idx, target in enumerate(stmt.targets):
+                output_name = f"out_{idx}"
+                if output_name not in scoped_outputs:
+                    raise ValueError(
+                        f"scope bind for {stmt.prefix!r} must return value {idx} via `return`"
+                    )
+                source_name = scoped_outputs[output_name]
+                if target == source_name:
+                    continue
+                graph.extend(_lower_expr(source_name, target, ctx))
             continue
 
         if isinstance(stmt, AxonBind):

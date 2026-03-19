@@ -7,6 +7,15 @@ from torch.nn import functional as F
 OP_NAME = "layernorm"
 
 
+def _validate_layernorm_keys(node_spec: dict[str, Any]) -> None:
+    if "params" in node_spec:
+        raise ValueError("layernorm does not support params overrides")
+    if "weight" in node_spec:
+        raise ValueError("layernorm does not support explicit weight binding")
+    if "bias" in node_spec:
+        raise ValueError("layernorm does not support explicit bias binding")
+
+
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return True
@@ -21,11 +30,10 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
+    _validate_layernorm_keys(node_spec)
     x = model._read_tensor_input(node_spec.get("in"), env)
-    weight = model._state[
-        model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-    ]
-    bias = model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="bias")]
+    weight = model._state[model._join(node_path, "weight")]
+    bias = model._state[model._join(node_path, "bias")]
     eps_value = model._eval_expr(node_spec.get("eps", 1e-5), env, symbols)
     out = model._require_name(node_spec.get("out"), field="layernorm.out")
     env[out] = F.layer_norm(x, (x.shape[-1],), weight=weight, bias=bias, eps=float(eps_value))
@@ -41,13 +49,11 @@ def compile(
     scope_var: str,
     indent: str,
 ) -> list[str]:
+    _validate_layernorm_keys(node_spec)
     lines: list[str] = []
 
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
-
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
 
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
@@ -56,8 +62,8 @@ def compile(
     out_name = str(node_spec.get("out"))
     out_var = assign_out_var(out_name)
     eps = emitter._expr_code(node_spec.get("eps", 1e-5), env)
-    w = f"emitter._param({infer_param('weight')})"
-    b = f"emitter._param({infer_param('bias')})"
+    w = f"emitter._param(self._join_scope({node_path_var}, 'weight'))"
+    b = f"emitter._param(self._join_scope({node_path_var}, 'bias'))"
     lines.append(
         f"{indent}{out_var} = F.layer_norm({src}, ({src}.shape[-1],), weight={w}, bias={b}, eps=float({eps}))"
     )

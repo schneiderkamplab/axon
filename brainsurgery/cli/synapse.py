@@ -238,11 +238,6 @@ def axon_test(
         "--dtype",
         help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
     ),
-    strip_model_prefix: bool = typer.Option(
-        False,
-        "--strip-model-prefix",
-        help="Strip leading 'model.' from safetensors keys.",
-    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -259,7 +254,6 @@ def axon_test(
             class_name=class_name,
             main_module=main_module,
             dtype=dtype,
-            strip_model_prefix=strip_model_prefix,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

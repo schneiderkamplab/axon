@@ -35,34 +35,6 @@ def _load_axon_spec(path: Path) -> dict[str, Any]:
     return lower_axon_program_to_synapse_spec(modules)
 
 
-def _axon_uses_model_prefix_for_embed(repo_root: Path, axon_name: str) -> bool:
-    spec = _load_axon_spec(repo_root / "examples" / axon_name)
-    graph = spec.get("model", {}).get("graph", [])
-
-    def _walk(items: list[Any], prefix: str) -> bool:
-        for item in items:
-            if not isinstance(item, dict) or len(item) != 1:
-                continue
-            node_name, node_spec = next(iter(item.items()))
-            if not isinstance(node_spec, dict):
-                continue
-            node_path = f"{prefix}.{node_name}" if prefix else str(node_name)
-            if node_spec.get("op") == "embedding" and node_path.startswith("model."):
-                return True
-            tie_weight = node_spec.get("tie_weight")
-            if isinstance(tie_weight, str) and tie_weight.startswith("model."):
-                return True
-            nested = node_spec.get("graph")
-            if isinstance(nested, list) and _walk(nested, node_path):
-                return True
-            body = node_spec.get("body")
-            if isinstance(body, list) and _walk(body, node_path):
-                return True
-        return False
-
-    return _walk(graph if isinstance(graph, list) else [], "")
-
-
 def _build_codegen_model(
     spec: dict[str, Any], class_name: str, state_dict: dict[str, torch.Tensor]
 ) -> Any:
@@ -187,17 +159,9 @@ def test_codegen_and_runtime_from_axon_match_hf_decoder_models(
         hf_dir = gemma3_local_path
         tokenizer = transformers.AutoTokenizer.from_pretrained(str(hf_dir), local_files_only=True)
         st = safetensors.safe_open(str(hf_dir / "model.safetensors"), framework="pt")
-        if _axon_uses_model_prefix_for_embed(repo_root, axon_name):
-            state_dict = {
-                key: st.get_tensor(key).to(device=device, dtype=torch.float32) for key in st.keys()
-            }
-        else:
-            state_dict = {
-                (key[len("model.") :] if key.startswith("model.") else key): st.get_tensor(key).to(
-                    device=device, dtype=torch.float32
-                )
-                for key in st.keys()
-            }
+        state_dict = {
+            key: st.get_tensor(key).to(device=device, dtype=torch.float32) for key in st.keys()
+        }
 
     hf_model = (
         transformers.AutoModelForCausalLM.from_pretrained(
@@ -276,12 +240,7 @@ def test_codegen_and_runtime_from_axon_match_hf_olmoe_cpu(
     for shard_name in shard_names:
         st = safetensors.safe_open(str(olmoe_local_path / shard_name), framework="pt")
         for key in st.keys():
-            mapped = (
-                key
-                if _axon_uses_model_prefix_for_embed(repo_root, "olmoe_1b_7b_0924.axon")
-                else (key[len("model.") :] if key.startswith("model.") else key)
-            )
-            state_dict[mapped] = st.get_tensor(key).to(device)
+            state_dict[key] = st.get_tensor(key).to(device)
     spec = _load_axon_spec(repo_root / "examples" / "olmoe_1b_7b_0924.axon")
     cg_model = _build_codegen_model(spec, "AxonOlmoeGenerated", state_dict).to(device).eval()
     rt_model = SynapseProgramModel.from_spec(spec, state_dict=state_dict).to(device).eval()
