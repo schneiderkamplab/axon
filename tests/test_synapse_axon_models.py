@@ -229,6 +229,7 @@ def test_codegen_and_runtime_from_axon_match_hf_olmoe_cpu(
     repo_root: Path, olmoe_local_path: Path
 ) -> None:
     transformers = pytest.importorskip("transformers")
+    safetensors = pytest.importorskip("safetensors")
     device = torch.device("cpu")
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -242,16 +243,22 @@ def test_codegen_and_runtime_from_axon_match_hf_olmoe_cpu(
         .eval()
     )
 
-    state_dict = {
-        (
-            key
-            if _axon_uses_model_prefix_for_embed(repo_root, "olmoe_1b_7b_0924.axon")
-            else key[len("model.") :]
-        )
-        if key.startswith("model.")
-        else key: value.to(device)
-        for key, value in hf_model.state_dict().items()
-    }
+    index_path = olmoe_local_path / "model.safetensors.index.json"
+    payload = OmegaConf.to_container(OmegaConf.load(index_path), resolve=True)
+    assert isinstance(payload, dict)
+    weight_map = payload.get("weight_map")
+    assert isinstance(weight_map, dict)
+    shard_names = sorted({str(name) for name in weight_map.values()})
+    state_dict: dict[str, torch.Tensor] = {}
+    for shard_name in shard_names:
+        st = safetensors.safe_open(str(olmoe_local_path / shard_name), framework="pt")
+        for key in st.keys():
+            mapped = (
+                key
+                if _axon_uses_model_prefix_for_embed(repo_root, "olmoe_1b_7b_0924.axon")
+                else (key[len("model.") :] if key.startswith("model.") else key)
+            )
+            state_dict[mapped] = st.get_tensor(key).to(device)
     spec = _load_axon_spec(repo_root / "examples" / "olmoe_1b_7b_0924.axon")
     cg_model = _build_codegen_model(spec, "AxonOlmoeGenerated", state_dict).to(device).eval()
     rt_model = SynapseProgramModel.from_spec(spec, state_dict=state_dict).to(device).eval()

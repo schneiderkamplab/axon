@@ -1,10 +1,10 @@
 from .axon import (
     AxonBind,
-    AxonMeta,
     AxonModule,
     AxonParam,
-    AxonRawNode,
+    AxonRepeat,
     AxonReturn,
+    AxonScope,
     lower_axon_module_to_synapse_block,
     lower_axon_module_to_synapse_spec,
     lower_axon_program_to_synapse_spec,
@@ -18,11 +18,11 @@ from .runtime import SynapseProgramModel
 
 __all__ = [
     "AxonBind",
-    "AxonMeta",
     "AxonModule",
     "AxonParam",
-    "AxonRawNode",
+    "AxonRepeat",
     "AxonReturn",
+    "AxonScope",
     "SynapseProgramModel",
     "emit_model_code_from_synapse_spec",
     "run_axon_test",

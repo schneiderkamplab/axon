@@ -23,24 +23,21 @@ class AxonReturn:
 
 
 @dataclass(frozen=True)
-class AxonRawNode:
-    name: str
-    node_spec: dict[str, object]
-
-
-@dataclass(frozen=True)
-class AxonMeta:
-    key: str
-    value: object
-
-
-@dataclass(frozen=True)
 class AxonRepeat:
     name: str | None
     var: str
     range_expr: str
     start_expr: str
-    body: tuple["AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat", ...]
+    body: tuple["AxonStatement", ...]
+
+
+@dataclass(frozen=True)
+class AxonScope:
+    prefix: str
+    body: tuple["AxonStatement", ...]
+
+
+AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonScope
 
 
 @dataclass(frozen=True)
@@ -48,7 +45,8 @@ class AxonModule:
     name: str
     params: tuple[AxonParam, ...]
     returns: tuple[str, ...]
-    statements: tuple[AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat, ...]
+    statements: tuple[AxonStatement, ...]
+    symbols: dict[str, object] | None = None
     return_type_expr: str | None = None
     return_shape: tuple[str, ...] | None = None
 
@@ -57,8 +55,8 @@ __all__ = [
     "AxonParam",
     "AxonBind",
     "AxonReturn",
-    "AxonRawNode",
-    "AxonMeta",
     "AxonRepeat",
+    "AxonScope",
+    "AxonStatement",
     "AxonModule",
 ]

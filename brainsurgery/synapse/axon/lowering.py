@@ -5,7 +5,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .types import AxonBind, AxonMeta, AxonModule, AxonRawNode, AxonRepeat, AxonReturn
+from .types import (
+    AxonBind,
+    AxonModule,
+    AxonRepeat,
+    AxonReturn,
+    AxonScope,
+    AxonStatement,
+)
 
 _CALL_PAREN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_:.@]*)\((.*)\)$")
 _CALLEE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:.@]*$")
@@ -189,6 +196,7 @@ class _LowerCtx:
     block_signatures: dict[str, tuple[list[str], list[str]]] | None = None
     tensor_last_dim: dict[str, Any] = field(default_factory=dict)
     tensor_heads: dict[str, Any] = field(default_factory=dict)
+    scope_stack: list[str] = field(default_factory=list)
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
@@ -322,6 +330,12 @@ def _lower_simple_call(
     expr: str, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
 ) -> list[dict[str, Any]]:
     callee, args, kwargs = _parse_call(expr)
+    if "@" in callee and ctx.scope_stack:
+        op_name_with_at, param_path = callee.split("@", 1)
+        scope_prefix = ".".join(part for part in ctx.scope_stack if part)
+        if scope_prefix:
+            scoped_path = f"{scope_prefix}.{param_path}" if param_path.strip() else scope_prefix
+            callee = f"{op_name_with_at}@{scoped_path}"
     op_name = _op_name_from_callee(callee)
     if op_name == "embedding" and "embedding_dim" not in kwargs and "dim" in kwargs:
         kwargs["embedding_dim"] = kwargs.pop("dim")
@@ -746,9 +760,8 @@ def lower_axon_module_to_synapse_spec(module: AxonModule) -> dict[str, Any]:
         "graph": block["graph"],
         "outputs": block["outputs"],
     }
-    for stmt in module.statements:
-        if isinstance(stmt, AxonMeta):
-            model[stmt.key] = stmt.value
+    if module.symbols:
+        model["symbols"] = dict(module.symbols)
     return {
         "synapse": 1,
         "model": model,
@@ -757,20 +770,13 @@ def lower_axon_module_to_synapse_spec(module: AxonModule) -> dict[str, Any]:
 
 def _lower_statements(
     *,
-    statements: tuple[AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat, ...],
+    statements: tuple[AxonStatement, ...],
     graph: list[dict[str, Any]],
     outputs: dict[str, str],
     returns: tuple[str, ...],
     ctx: _LowerCtx,
 ) -> None:
     for stmt in statements:
-        if isinstance(stmt, AxonRawNode):
-            graph.append({stmt.name: dict(stmt.node_spec)})
-            continue
-
-        if isinstance(stmt, AxonMeta):
-            continue
-
         if isinstance(stmt, AxonRepeat):
             body_graph: list[dict[str, Any]] = []
             _lower_statements(
@@ -799,6 +805,20 @@ def _lower_statements(
             for segment in reversed(segments[:-1]):
                 repeat_item = {segment: {"graph": [repeat_item]}}
             graph.append(repeat_item)
+            continue
+
+        if isinstance(stmt, AxonScope):
+            ctx.scope_stack.append(stmt.prefix)
+            try:
+                _lower_statements(
+                    statements=stmt.body,
+                    graph=graph,
+                    outputs=outputs,
+                    returns=returns,
+                    ctx=ctx,
+                )
+            finally:
+                ctx.scope_stack.pop()
             continue
 
         if isinstance(stmt, AxonBind):
@@ -870,9 +890,8 @@ def lower_axon_program_to_synapse_spec(
         for name in main_returns:
             main_outputs[name] = name
     model: dict[str, Any] = {"inputs": main_inputs, "graph": main_graph, "outputs": main_outputs}
-    for stmt in main.statements:
-        if isinstance(stmt, AxonMeta):
-            model[stmt.key] = stmt.value
+    if main.symbols:
+        model["symbols"] = dict(main.symbols)
     spec: dict[str, Any] = {"synapse": 1, "model": model}
 
     blocks: dict[str, Any] = {}

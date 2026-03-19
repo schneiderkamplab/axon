@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-import json
 import re
 
-from .types import AxonBind, AxonMeta, AxonModule, AxonParam, AxonRawNode, AxonRepeat, AxonReturn
+from .types import (
+    AxonBind,
+    AxonModule,
+    AxonParam,
+    AxonRepeat,
+    AxonReturn,
+    AxonScope,
+    AxonStatement,
+)
 
 _HEADER_RE = re.compile(r"^module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*->\s*\((.*?)\)\s*do\s*$")
 _SIG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*::\s*(.+)\s*$")
 _DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*=\s*do\s*$")
-_REPEAT_RE = re.compile(
-    r"^repeat(?:\s+([A-Za-z_][A-Za-z0-9_.]*)\s*:)?\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+?)(?:\s+do)?\s*$"
-)
 _FOR_AT_RANGE_RE = re.compile(
     r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
 )
+_SCOPE_RE = re.compile(r"^scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
 _TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 _TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
 
@@ -143,7 +148,6 @@ def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str,
         match = _TOP_CONST_RE.match(stripped)
         if (
             match is not None
-            and _HEADER_RE.match(stripped) is None
             and _SIG_RE.match(stripped) is None
             and _DEF_RE.match(stripped) is None
             and stripped != "do"
@@ -157,29 +161,15 @@ def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str,
 def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> AxonModule:
     if not symbols:
         return module
-    updated = list(module.statements)
-    for idx, stmt in enumerate(updated):
-        if not isinstance(stmt, AxonMeta) or stmt.key != "symbols":
-            continue
-        if not isinstance(stmt.value, dict):
-            raise ValueError("meta symbols must be a JSON object to merge top-level constants")
-        merged = dict(symbols)
-        merged.update({str(k): v for k, v in stmt.value.items()})
-        updated[idx] = AxonMeta(key="symbols", value=merged)
-        return AxonModule(
-            name=module.name,
-            params=module.params,
-            returns=module.returns,
-            statements=tuple(updated),
-            return_type_expr=module.return_type_expr,
-            return_shape=module.return_shape,
-        )
-    updated.append(AxonMeta(key="symbols", value=dict(symbols)))
+    merged: dict[str, object] = dict(symbols)
+    if module.symbols:
+        merged.update({str(k): v for k, v in module.symbols.items()})
     return AxonModule(
         name=module.name,
         params=module.params,
         returns=module.returns,
-        statements=tuple(updated),
+        statements=module.statements,
+        symbols=merged,
         return_type_expr=module.return_type_expr,
         return_shape=module.return_shape,
     )
@@ -255,32 +245,18 @@ def parse_axon_module(source: str) -> AxonModule:
     if not lines:
         raise ValueError("empty Axon source")
 
-    header_match = _HEADER_RE.match(lines[0])
-    if header_match is not None:
-        module_name = header_match.group(1)
-        params = _parse_params(header_match.group(2))
-        returns = tuple(part.strip() for part in _split_top_level_csv(header_match.group(3)))
-        body_start = 1
-        return_type_expr: str | None = None
-        return_shape: tuple[str, ...] | None = None
-    else:
-        parsed = _parse_haskell_header(lines)
-        if parsed is None:
-            raise ValueError(
-                "expected module header or haskell-style pair: "
-                "'module <name>(...) -> (...) do' OR '<name> :: ...' + '<name> ... = do'"
-            )
-        (
-            module_name,
-            params,
-            returns,
-            body_start,
-            annotation_symbols,
-            return_type_expr,
-            return_shape,
-        ) = parsed
-    if header_match is not None:
-        annotation_symbols = {}
+    parsed = _parse_haskell_header(lines)
+    if parsed is None:
+        raise ValueError("expected haskell-style pair: '<name> :: ...' + '<name> ... = do'")
+    (
+        module_name,
+        params,
+        returns,
+        body_start,
+        annotation_symbols,
+        return_type_expr,
+        return_shape,
+    ) = parsed
 
     entries = _line_entries(lines[body_start:])
     if not entries:
@@ -289,6 +265,7 @@ def parse_axon_module(source: str) -> AxonModule:
             params=params,
             returns=returns,
             statements=(),
+            symbols=top_constants if top_constants else None,
             return_type_expr=return_type_expr,
             return_shape=return_shape,
         )
@@ -302,6 +279,7 @@ def parse_axon_module(source: str) -> AxonModule:
         params=params,
         returns=returns,
         statements=tuple(statements),
+        symbols=None,
         return_type_expr=return_type_expr,
         return_shape=return_shape,
     )
@@ -309,18 +287,7 @@ def parse_axon_module(source: str) -> AxonModule:
     return _inject_symbols_meta(module, top_constants)
 
 
-def _parse_simple_line(line: str) -> AxonBind | AxonReturn | AxonRawNode | AxonMeta:
-    if line.startswith("node ") and " = " in line:
-        left, right = line.split(" = ", 1)
-        _, node_name = left.split(" ", 1)
-        node_spec = json.loads(right)
-        if not isinstance(node_spec, dict):
-            raise ValueError(f"node statement expects JSON object: {line!r}")
-        return AxonRawNode(name=node_name.strip(), node_spec=node_spec)
-    if line.startswith("meta ") and " = " in line:
-        left, right = line.split(" = ", 1)
-        _, key = left.split(" ", 1)
-        return AxonMeta(key=key.strip(), value=json.loads(right))
+def _parse_simple_line(line: str) -> AxonBind | AxonReturn:
     if line.startswith("return "):
         values = tuple(_split_top_level_csv(line[len("return ") :].strip()))
         return AxonReturn(values=values)
@@ -345,8 +312,8 @@ def _parse_statements(
     lines: list[tuple[int, str]],
     start: int,
     current_indent: int,
-) -> tuple[list[AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat], int]:
-    out: list[AxonBind | AxonReturn | AxonRawNode | AxonMeta | AxonRepeat] = []
+) -> tuple[list[AxonStatement], int]:
+    out: list[AxonStatement] = []
     i = start
     while i < len(lines):
         indent, line = lines[i]
@@ -355,33 +322,26 @@ def _parse_statements(
         if indent > current_indent:
             raise ValueError(f"unexpected indentation at line: {line!r}")
 
-        repeat_match = _REPEAT_RE.match(line)
         for_at_match = _FOR_AT_RANGE_RE.match(line)
-        if repeat_match is not None or for_at_match is not None:
-            if repeat_match is not None:
-                repeat_name = repeat_match.group(1).strip() if repeat_match.group(1) else None
-                var = repeat_match.group(2).strip()
-                range_expr = repeat_match.group(3).strip()
-                start_expr = "0"
-            else:
-                assert for_at_match is not None
-                repeat_name = for_at_match.group(1).strip() if for_at_match.group(1) else None
-                var = for_at_match.group(2).strip()
-                start_delim = for_at_match.group(3)
-                start_raw = for_at_match.group(4).strip()
-                end_raw = for_at_match.group(5).strip()
-                end_delim = for_at_match.group(6)
+        scope_match = _SCOPE_RE.match(line)
+        if for_at_match is not None:
+            repeat_name = for_at_match.group(1).strip() if for_at_match.group(1) else None
+            var = for_at_match.group(2).strip()
+            start_delim = for_at_match.group(3)
+            start_raw = for_at_match.group(4).strip()
+            end_raw = for_at_match.group(5).strip()
+            end_delim = for_at_match.group(6)
 
-                start_expr = start_raw if start_delim == "[" else f"({start_raw}) + 1"
-                end_exclusive = f"({end_raw}) + 1" if end_delim == "]" else end_raw
-                range_expr = (
-                    end_exclusive if start_expr == "0" else f"({end_exclusive}) - ({start_expr})"
-                )
+            start_expr = start_raw if start_delim == "[" else f"({start_raw}) + 1"
+            end_exclusive = f"({end_raw}) + 1" if end_delim == "]" else end_raw
+            range_expr = (
+                end_exclusive if start_expr == "0" else f"({end_exclusive}) - ({start_expr})"
+            )
             if i + 1 >= len(lines):
-                raise ValueError("repeat requires indented body")
+                raise ValueError("for@ requires indented body")
             next_indent, _ = lines[i + 1]
             if next_indent <= indent:
-                raise ValueError("repeat requires indented body")
+                raise ValueError("for@ requires indented body")
             body, new_i = _parse_statements(lines, i + 1, next_indent)
             out.append(
                 AxonRepeat(
@@ -392,6 +352,17 @@ def _parse_statements(
                     body=tuple(body),
                 )
             )
+            i = new_i
+            continue
+        if scope_match is not None:
+            prefix = scope_match.group(1).strip()
+            if i + 1 >= len(lines):
+                raise ValueError("scope requires indented body")
+            next_indent, _ = lines[i + 1]
+            if next_indent <= indent:
+                raise ValueError("scope requires indented body")
+            body, new_i = _parse_statements(lines, i + 1, next_indent)
+            out.append(AxonScope(prefix=prefix, body=tuple(body)))
             i = new_i
             continue
 
@@ -420,7 +391,7 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
         if len(line) != len(line.lstrip(" ")):
             continue
         stripped = line.strip()
-        if _HEADER_RE.match(stripped) is not None or _SIG_RE.match(stripped) is not None:
+        if _SIG_RE.match(stripped) is not None:
             module_starts.append(idx)
     if not module_starts:
         return (parse_axon_module(source),)

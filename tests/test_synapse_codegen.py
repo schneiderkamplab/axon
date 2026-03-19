@@ -111,7 +111,7 @@ def test_cli_synapse_to_axon_and_back_roundtrip(tmp_path: Path) -> None:
     )
     assert axon_path.exists()
     axon_text = axon_path.read_text(encoding="utf-8")
-    assert axon_text.startswith("module tiny(")
+    assert axon_text.startswith("tiny :: ")
     assert "meta __inputs" not in axon_text
     assert "meta __outputs" not in axon_text
 
@@ -142,7 +142,9 @@ def test_cli_synapse_to_axon_requires_force_for_existing_output(tmp_path: Path) 
 def test_cli_axon_to_synapse_requires_yaml_output(tmp_path: Path) -> None:
     axon_path = tmp_path / "spec.axon"
     bad_output = tmp_path / "lowered.txt"
-    axon_path.write_text("module tiny(x) -> (y) do\n  y <- x\n  return y\n", encoding="utf-8")
+    axon_path.write_text(
+        "tiny :: Tensor -> Tensor\ntiny x = do\n  y <- x\n  return y\n", encoding="utf-8"
+    )
 
     with pytest.raises(typer.BadParameter) as exc_info:
         axon_to_synapse(axon_path=axon_path, output_path=bad_output, force=False)

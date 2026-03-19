@@ -5,15 +5,24 @@ from .lowering import (
 )
 from .parser import parse_axon_module, parse_axon_program
 from .render import synapse_spec_to_axon_module_text
-from .types import AxonBind, AxonMeta, AxonModule, AxonParam, AxonRawNode, AxonReturn
+from .types import (
+    AxonBind,
+    AxonModule,
+    AxonParam,
+    AxonRepeat,
+    AxonReturn,
+    AxonScope,
+    AxonStatement,
+)
 
 __all__ = [
     "AxonBind",
-    "AxonMeta",
     "AxonModule",
     "AxonParam",
-    "AxonRawNode",
+    "AxonRepeat",
     "AxonReturn",
+    "AxonScope",
+    "AxonStatement",
     "parse_axon_module",
     "parse_axon_program",
     "lower_axon_module_to_synapse_block",

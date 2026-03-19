@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from brainsurgery.synapse import (
     lower_axon_module_to_synapse_spec,
     lower_axon_program_to_synapse_spec,
@@ -23,7 +25,8 @@ def _node_specs(graph: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def test_parse_axon_module_header_and_bindings() -> None:
     source = """
-module tiny(x, cache?) -> (y) do
+tiny :: Tensor -> ?Tensor -> Tensor
+tiny x cache = do
   y <- x |> linear@proj |> act::gelu_new
   return y
 """
@@ -31,14 +34,15 @@ module tiny(x, cache?) -> (y) do
     assert module.name == "tiny"
     assert [param.name for param in module.params] == ["x", "cache"]
     assert [param.optional for param in module.params] == [False, True]
-    assert module.returns == ("y",)
+    assert module.returns == ()
     assert len(module.statements) == 2
 
 
 def test_parse_repeat_block_statements() -> None:
     source = """
-module tiny(x) -> (y) do
-  repeat loop: i in 3 do
+tiny :: Tensor -> Tensor
+tiny x = do
+  for@loop i <- [0..3) do
     y <- add(x, x)
   return y
 """
@@ -46,9 +50,32 @@ module tiny(x) -> (y) do
     assert len(module.statements) == 2
 
 
+def test_parse_rejects_legacy_node_statement() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  node n1 = {"op":"add","in":["x","x"],"out":"y"}
+  return y
+"""
+    with pytest.raises(ValueError, match="unsupported Axon statement"):
+        parse_axon_module(source)
+
+
+def test_parse_rejects_legacy_meta_statement() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  meta symbols = {"D":768}
+  return x
+"""
+    with pytest.raises(ValueError, match="unsupported Axon statement"):
+        parse_axon_module(source)
+
+
 def test_parse_for_at_range_loop_sugar() -> None:
     source = """
-module tiny(x) -> (y) do
+tiny :: Tensor -> Tensor
+tiny x = do
   for@model.layers i <- [0..3] do
     y <- add(x, x)
   return y
@@ -64,7 +91,8 @@ module tiny(x) -> (y) do
 
 def test_parse_for_at_range_loop_sugar_with_nonzero_start() -> None:
     source = """
-module tiny(x) -> (y) do
+tiny :: Tensor -> Tensor
+tiny x = do
   for@model.layers i <- [1..4] do
     y <- add(x, x)
   return y
@@ -81,7 +109,8 @@ module tiny(x) -> (y) do
 
 def test_parse_for_at_range_loop_sugar_half_open_with_paren() -> None:
     source = """
-module tiny(x) -> (y) do
+tiny :: Tensor -> Tensor
+tiny x = do
   for@model.layers i <- [1..4) do
     y <- add(x, x)
   return y
@@ -98,7 +127,8 @@ module tiny(x) -> (y) do
 
 def test_parse_for_at_range_loop_sugar_left_open_right_closed() -> None:
     source = """
-module tiny(x) -> (y) do
+tiny :: Tensor -> Tensor
+tiny x = do
   for@model.layers i <- (0..4] do
     y <- add(x, x)
   return y
@@ -263,7 +293,8 @@ rk k = do
 def test_parse_axon_ignores_haskell_style_comments() -> None:
     source = """
 -- leading comment
-module tiny(x, cache?) -> (y) do -- module comment
+tiny :: Tensor -> ?Tensor -> Tensor -- signature comment
+tiny x cache = do -- def comment
   -- statement comment
   y <- x |> linear@proj(out_features=4, bias=false) -- inline comment
   return y -- trailing comment
@@ -279,7 +310,8 @@ module tiny(x, cache?) -> (y) do -- module comment
 
 def test_parse_and_lower_pipeline_with_trailing_operator_continuations() -> None:
     source = """
-module tiny(x) -> (qkv) do
+tiny :: Tensor -> Tensor
+tiny x = do
   qkv <- x |>
     layernorm@ln_1(x, dim=768, eps=1e-05) |>
     linear@attn.c_attn(out_features=2304, weight_layout=io, bias=true)
@@ -300,7 +332,8 @@ module tiny(x) -> (qkv) do
 
 def test_lower_pipeline_axon_to_synapse_spec() -> None:
     source = """
-module tiny(x) -> (y) do
+tiny :: Tensor -> Tensor
+tiny x = do
   y <- x |> linear@proj |> act::gelu_new
   return y
 """
@@ -327,7 +360,8 @@ module tiny(x) -> (y) do
 
 def test_lower_return_pipeline_expression_to_named_output() -> None:
     source = """
-module tiny(x, wte) -> (logits) do
+tiny :: Tensor -> Tensor -> Tensor
+tiny x wte = do
   return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear(out_features=50257, tie_weight=wte.weight)
 """
     module = parse_axon_module(source)
@@ -344,16 +378,17 @@ module tiny(x, wte) -> (logits) do
     assert node_specs[1] == {
         "op": "linear",
         "in": "pipe_1",
-        "out": "logits",
+        "out": "out_0",
         "out_features": 50257,
         "tie_weight": "wte.weight",
     }
-    assert spec["model"]["outputs"] == {"logits": "logits"}
+    assert spec["model"]["outputs"] == {"out_0": "out_0"}
 
 
 def test_lower_bind_operator_to_synapse_spec() -> None:
     source = """
-module tiny(x) -> (y) do
+tiny :: Tensor -> Tensor
+tiny x = do
   y <- linear@p1(x) >>= \\z -> act::gelu_new(z)
   return y
 """
@@ -375,7 +410,8 @@ module tiny(x) -> (y) do
 
 def test_lower_pipeline_multi_output_stage_into_next_call_args() -> None:
     source = """
-module tiny(q, k, v, bias) -> (ctx_heads) do
+tiny :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
+tiny q k v bias = do
   ctx_heads <- reshape_heads_triplet(q, k, v, heads=12, head_dim=64) |>
     attention(backend=sdpa, causal=true, causal_mask_buffer=bias)
   return ctx_heads
@@ -403,7 +439,8 @@ module tiny(q, k, v, bias) -> (ctx_heads) do
 
 def test_lower_ternary_to_when_guards() -> None:
     source = """
-module tiny(x, use_cache?) -> (k, v) do
+tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
+tiny x use_cache = do
   k, v <- use_cache ? cache::update(past, k0, v0) : k0, v0
   return k, v
 """
@@ -542,7 +579,7 @@ def test_synapse_to_axon_readable_blocks_lower_back_via_program() -> None:
     axon = synapse_spec_to_axon_module_text(spec, module_name="main")
     modules = parse_axon_program(axon)
     spec2 = lower_axon_program_to_synapse_spec(modules)
-    assert spec2["model"]["outputs"] == spec["model"]["outputs"]
+    assert spec2["model"]["outputs"] == {"x": "x"}
     assert "blocks" in spec2["model"]
     assert "blk" in spec2["model"]["blocks"]
-    assert "repeat loop: i in 2 do" in axon
+    assert "for@loop i <- [0..(0) + (2)) do" in axon

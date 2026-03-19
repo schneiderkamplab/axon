@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import ast
-import json
 import re
 from typing import Any
-
-
-def _json_inline(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
 
 
 def _format_scalar(value: Any) -> str:
@@ -171,7 +166,15 @@ def _render_module(
         params.append(f"{name}?" if optional else str(name))
 
     return_names = list(outputs.keys()) if outputs else ["out"]
-    lines = [f"module {module_name}({', '.join(params)}) -> ({', '.join(return_names)}) do"]
+    arg_types = ["?Tensor" if p.endswith("?") else "Tensor" for p in params]
+    if len(return_names) == 1:
+        ret_type = "Tensor"
+    else:
+        ret_type = "(" + ", ".join("Tensor" for _ in return_names) + ")"
+    sig = " -> ".join([*arg_types, ret_type]) if arg_types else ret_type
+    def_params = [p[:-1] if p.endswith("?") else p for p in params]
+    def_head = f"{module_name} {' '.join(def_params)}".rstrip()
+    lines = [f"{module_name} :: {sig}", f"{def_head} = do"]
 
     def render_graph(items: list[Any], *, scope: str, indent: str) -> None:
         for item in items:
@@ -186,10 +189,14 @@ def _render_module(
             if node_spec.get("op") == "repeat":
                 var = str(node_spec.get("var"))
                 range_expr = _format_scalar(node_spec.get("range"))
+                start_expr = _format_scalar(node_spec.get("start", 0))
+                end_expr = f"({start_expr}) + ({range_expr})"
                 body = node_spec.get("body")
                 if isinstance(body, list):
                     repeat_name = node_path if scope else str(node_name)
-                    lines.append(f"{indent}repeat {repeat_name}: {var} in {range_expr} do")
+                    lines.append(
+                        f"{indent}for@{repeat_name} {var} <- [{start_expr}..{end_expr}) do"
+                    )
                     render_graph(body, scope=node_path, indent=indent + "  ")
                     continue
 
@@ -227,7 +234,7 @@ def _render_module(
                 lines.append(f"{indent}{lhs} <- {rhs}")
                 continue
 
-            lines.append(f"{indent}node {node_name} = {_json_inline(node_spec)}")
+            raise ValueError(f"node {node_path!r} cannot be rendered in strict Axon syntax")
 
     render_graph(graph, scope="", indent="  ")
 
