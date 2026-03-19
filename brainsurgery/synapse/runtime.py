@@ -252,7 +252,14 @@ class SynapseProgramModel(nn.Module):
                 raise ValueError(f"Node {node_name!r} missing string op")
 
             node_path = self._join(scope, node_name)
-            self._execute_op(op, node_spec, env, node_path=node_path, scope=scope, symbols=symbols)
+            exec_node_spec = node_spec
+            param_base = node_spec.get("param_base")
+            if isinstance(param_base, str) and isinstance(env.get(param_base), str):
+                exec_node_spec = dict(node_spec)
+                exec_node_spec[param_base] = env[param_base]
+            self._execute_op(
+                op, exec_node_spec, env, node_path=node_path, scope=scope, symbols=symbols
+            )
 
     def _run_block_use(
         self,
@@ -329,6 +336,12 @@ class SynapseProgramModel(nn.Module):
     def _infer_param_path(
         self, node_spec: dict[str, Any], *, node_path: str, param_name: str
     ) -> str:
+        param_base = node_spec.get("param_base")
+        if isinstance(param_base, str):
+            base_resolved = node_spec.get(param_base)
+            base = base_resolved if isinstance(base_resolved, str) else param_base
+            scoped_base = self._join(self._scope_of(node_path), base)
+            return f"{scoped_base}.{param_name}" if scoped_base else param_name
         explicit_params = node_spec.get("params")
         if isinstance(explicit_params, dict):
             explicit = explicit_params.get(param_name)
@@ -441,3 +454,8 @@ class SynapseProgramModel(nn.Module):
         if not right:
             return left
         return f"{left}.{right}"
+
+    def _scope_of(self, node_path: str) -> str:
+        if "." not in node_path:
+            return ""
+        return node_path.rsplit(".", 1)[0]

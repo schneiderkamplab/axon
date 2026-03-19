@@ -13,8 +13,8 @@ from .types import (
 )
 
 _HEADER_RE = re.compile(r"^module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*->\s*\((.*?)\)\s*do\s*$")
-_SIG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*::\s*(.+)\s*$")
-_DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*=\s*do\s*$")
+_SIG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*::\s*(.+)\s*$")
+_DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*(.*?)\s*=\s*do\s*$")
 _FOR_AT_RANGE_RE = re.compile(
     r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
 )
@@ -22,6 +22,8 @@ _SCOPE_RE = re.compile(r"^scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
 _BIND_SCOPE_RE = re.compile(r"^(.+?)<-\s*scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
 _TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 _TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
+_PATH_SIG_ARG_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)$")
+_PATH_SIG_SHORT_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)$")
 
 
 def _strip_haskell_comment(line: str) -> str:
@@ -167,6 +169,7 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
         merged.update({str(k): v for k, v in module.symbols.items()})
     return AxonModule(
         name=module.name,
+        path_param=module.path_param,
         params=module.params,
         returns=module.returns,
         statements=module.statements,
@@ -176,11 +179,23 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
     )
 
 
+def _split_module_path_param(name: str) -> tuple[str, str | None]:
+    if "@" not in name:
+        return name, None
+    base, path_param = name.split("@", 1)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", base):
+        raise ValueError(f"invalid module name: {name!r}")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path_param):
+        raise ValueError(f"invalid module path parameter: {name!r}")
+    return base, path_param
+
+
 def _parse_haskell_header(
     lines: list[str],
 ) -> (
     tuple[
         str,
+        str | None,
         tuple[AxonParam, ...],
         tuple[str, ...],
         int,
@@ -197,16 +212,54 @@ def _parse_haskell_header(
     if sig_match is None or def_match is None:
         return None
 
-    name_sig = sig_match.group(1)
-    name_def = def_match.group(1)
+    name_sig_raw = sig_match.group(1)
+    name_def_raw = def_match.group(1)
+    name_sig, path_param_sig = _split_module_path_param(name_sig_raw)
+    name_def, path_param_def = _split_module_path_param(name_def_raw)
     if name_sig != name_def:
-        raise ValueError(f"signature/definition name mismatch: {name_sig!r} != {name_def!r}")
+        raise ValueError(
+            f"signature/definition name mismatch: {name_sig_raw!r} != {name_def_raw!r}"
+        )
+    if (
+        path_param_sig is not None
+        and path_param_def is not None
+        and path_param_sig != path_param_def
+    ):
+        raise ValueError(
+            f"signature/definition path parameter mismatch: {name_sig_raw!r} != {name_def_raw!r}"
+        )
+    path_param = path_param_sig if path_param_sig is not None else path_param_def
 
     sig_expr = sig_match.group(2).strip()
     parts = _split_top_level(sig_expr, "->")
     if len(parts) < 1:
         raise ValueError("invalid Axon type signature")
     arg_types = parts[:-1]
+    if arg_types:
+        first_arg = arg_types[0].strip()
+        path_sig_match = _PATH_SIG_ARG_RE.match(first_arg)
+        path_sig_short = _PATH_SIG_SHORT_RE.match(first_arg)
+        if path_sig_match is not None or path_sig_short is not None:
+            if path_sig_match is not None:
+                path_sig_name = path_sig_match.group(1)
+                path_sig_type = path_sig_match.group(2)
+            else:
+                path_sig_type = path_sig_short.group(1) if path_sig_short is not None else ""
+                path_sig_name = path_param
+            if path_sig_type != "Path":
+                raise ValueError(
+                    f"path signature type must be Path, got {path_sig_type!r}. Use '@Path'."
+                )
+            if path_param is None:
+                raise ValueError(
+                    "path signature annotation requires a module path parameter in the definition"
+                )
+            if path_sig_name != path_param:
+                raise ValueError(
+                    "path signature parameter does not match module path parameter:"
+                    f" {path_sig_name!r} != {path_param!r}"
+                )
+            arg_types = arg_types[1:]
     raw_return_type = parts[-1].strip()
     opt_flags = [arg.strip().startswith("?") for arg in arg_types]
 
@@ -238,7 +291,7 @@ def _parse_haskell_header(
             annotation_symbols.setdefault(dim, None)
     params = tuple(params_out)
     # Haskell-style signatures carry output types, not names. Return names will be inferred from `return`.
-    return name_sig, params, (), 2, annotation_symbols, raw_return_type, ret_shape
+    return name_sig, path_param, params, (), 2, annotation_symbols, raw_return_type, ret_shape
 
 
 def parse_axon_module(source: str) -> AxonModule:
@@ -251,6 +304,7 @@ def parse_axon_module(source: str) -> AxonModule:
         raise ValueError("expected haskell-style pair: '<name> :: ...' + '<name> ... = do'")
     (
         module_name,
+        module_path_param,
         params,
         returns,
         body_start,
@@ -263,6 +317,7 @@ def parse_axon_module(source: str) -> AxonModule:
     if not entries:
         return AxonModule(
             name=module_name,
+            path_param=module_path_param,
             params=params,
             returns=returns,
             statements=(),
@@ -277,6 +332,7 @@ def parse_axon_module(source: str) -> AxonModule:
 
     module = AxonModule(
         name=module_name,
+        path_param=module_path_param,
         params=params,
         returns=returns,
         statements=tuple(statements),

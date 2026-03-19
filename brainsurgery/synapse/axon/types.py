@@ -50,6 +50,7 @@ AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonScope | AxonScopeBind
 @dataclass(frozen=True)
 class AxonModule:
     name: str
+    path_param: str | None
     params: tuple[AxonParam, ...]
     returns: tuple[str, ...]
     statements: tuple[AxonStatement, ...]

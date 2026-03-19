@@ -405,6 +405,42 @@ emb ids = do
         lower_axon_program_to_synapse_spec(modules)
 
 
+def test_path_parameterized_block_call_binds_param_base() -> None:
+    source = """
+lin_bt :: @Path -> Tensor -> I -> Tensor
+lin_bt@path x d = do
+  return linear@path x dim=d bias=true transpose=true
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- lin_bt@attn.c_proj x D
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    model_nodes = _node_specs(spec["model"]["graph"])
+    assert model_nodes[0]["use"] == "lin_bt"
+    assert model_nodes[0]["in"]["path"] == "'attn.c_proj'"
+    block_nodes = _node_specs(spec["model"]["blocks"]["lin_bt"]["graph"])
+    assert block_nodes[0]["op"] == "linear"
+    assert block_nodes[0]["param_base"] == "path"
+
+
+def test_path_parameter_annotation_rejects_non_path_type() -> None:
+    source = """
+lin_bt :: @ParamPath -> Tensor -> I -> Tensor
+lin_bt@path x d = do
+  return linear@path x dim=d bias=true transpose=true
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- lin_bt@attn.c_proj x D
+  return y
+"""
+    with pytest.raises(ValueError, match=r"path signature type must be Path"):
+        parse_axon_program(source)
+
+
 def test_linear_accepts_transpose_flag() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]

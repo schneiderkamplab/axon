@@ -57,6 +57,7 @@ class _Emitter:
         self.model = spec["model"]
         self.symbols = symbols
         self._counter = 0
+        self._active_env: dict[str, str] = {}
 
     def render(self) -> str:
         lines: list[str] = []
@@ -97,6 +98,11 @@ class _Emitter:
                 "        if not right:",
                 "            return left",
                 '        return f"{left}.{right}"',
+                "",
+                "    def _scope_of(self, node_path: str) -> str:",
+                "        if '.' not in node_path:",
+                "            return ''",
+                "        return node_path.rsplit('.', 1)[0]",
                 "",
                 "    def _safe_get(self, env: dict[str, Any], name: str) -> Any:",
                 "        if name not in env:",
@@ -443,14 +449,19 @@ class _Emitter:
         op_module = get_op_module(op)
         if op_module is None:
             raise NotImplementedError(f"Unsupported op in codegen compiler: {op}")
-        return op_module.compile(
-            self,
-            node_spec,
-            env,
-            node_path_var=node_path_var,
-            scope_var=scope_var,
-            indent=indent,
-        )
+        prev_env = self._active_env
+        self._active_env = env
+        try:
+            return op_module.compile(
+                self,
+                node_spec,
+                env,
+                node_path_var=node_path_var,
+                scope_var=scope_var,
+                indent=indent,
+            )
+        finally:
+            self._active_env = prev_env
 
     def _assign_out_var(self, env: dict[str, str], out_name: str) -> str:
         existing = env.get(out_name)
@@ -463,6 +474,21 @@ class _Emitter:
     def _infer_param_expr(
         self, node_spec: dict[str, Any], node_path_var: str, param_name: str
     ) -> str:
+        param_base = node_spec.get("param_base")
+        if isinstance(param_base, str):
+            scope_expr = f"self._scope_of({node_path_var})"
+            if param_base in self._active_env:
+                base_expr = self._active_env[param_base]
+                return (
+                    f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
+                )
+            if isinstance(node_spec.get(param_base), str):
+                base_expr = repr(node_spec[param_base])
+                return (
+                    f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
+                )
+            base_expr = repr(param_base)
+            return f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
         explicit_params = node_spec.get("params")
         if isinstance(explicit_params, dict) and isinstance(explicit_params.get(param_name), str):
             return repr(explicit_params[param_name])

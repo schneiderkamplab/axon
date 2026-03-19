@@ -195,9 +195,11 @@ def _to_synapse_op(
 class _LowerCtx:
     counter: int = 0
     block_signatures: dict[str, tuple[list[str], list[str]]] | None = None
+    block_path_params: dict[str, str | None] | None = None
     tensor_last_dim: dict[str, Any] = field(default_factory=dict)
     tensor_heads: dict[str, Any] = field(default_factory=dict)
     scope_stack: list[str] = field(default_factory=list)
+    path_param_names: set[str] = field(default_factory=set)
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
@@ -426,8 +428,10 @@ def _lower_simple_call(
             split_sizes = _infer_split_sizes_from_last_dim(inferred, len(out))
             if split_sizes is not None:
                 kwargs["sizes"] = split_sizes
-    if ctx.block_signatures and callee in ctx.block_signatures:
-        input_names, output_names = ctx.block_signatures[callee]
+    resolved_block = _resolve_block_call(callee, ctx)
+    if resolved_block is not None and ctx.block_signatures:
+        block_name, path_bindings = resolved_block
+        input_names, output_names = ctx.block_signatures[block_name]
         provided: dict[str, str] = {}
         for idx, value in enumerate(args):
             if idx >= len(input_names):
@@ -437,6 +441,10 @@ def _lower_simple_call(
             if key not in input_names:
                 raise ValueError(f"unknown block input {key!r} for call {callee!r}")
             provided[key] = str(value)
+        for key, concrete_path in path_bindings.items():
+            if key not in input_names:
+                raise ValueError(f"unknown block path parameter {key!r} for call {callee!r}")
+            provided[key] = repr(concrete_path)
         in_map = {name: provided[name] for name in input_names if name in provided}
 
         out_values = [out] if isinstance(out, str) else list(out)
@@ -447,14 +455,21 @@ def _lower_simple_call(
         out_map = {name: out_values[idx] for idx, name in enumerate(output_names)}
 
         node_name = f"n_{ctx.fresh('use')}"
-        node_spec: dict[str, Any] = {"use": callee, "in": in_map, "out": out_map}
+        node_spec: dict[str, Any] = {"use": block_name, "in": in_map, "out": out_map}
         nodes = _with_when([{node_name: node_spec}], when)
-        _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
+        _record_last_dim_for_call(callee=block_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
         return nodes
 
     node_spec = _to_synapse_op(callee, args, kwargs, out)
     if "@" in callee:
-        _, param_path = callee.split("@", 1)
+        op_name, param_path = callee.split("@", 1)
+        if param_path in ctx.path_param_names:
+            node_name = f"n_{ctx.fresh('op')}"
+            templated_node = _to_synapse_op(op_name, args, kwargs, out)
+            templated_node["param_base"] = param_path
+            nodes = _with_when([{node_name: templated_node}], when)
+            _record_last_dim_for_call(callee=op_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
+            return nodes
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
             raise ValueError(f"invalid @ path in Axon call: {expr!r}")
@@ -545,9 +560,29 @@ def _is_name_token(expr: str) -> bool:
     return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token) is not None
 
 
+def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str]] | None:
+    if not ctx.block_signatures:
+        return None
+    if callee in ctx.block_signatures:
+        return callee, {}
+    if "@" not in callee:
+        return None
+    base, concrete_path = callee.split("@", 1)
+    if base not in ctx.block_signatures:
+        return None
+    path_param = (
+        ctx.block_path_params.get(base) if isinstance(ctx.block_path_params, dict) else None
+    )
+    if not isinstance(path_param, str):
+        return None
+    return base, {path_param: concrete_path}
+
+
 def _known_output_arity(callee: str, ctx: _LowerCtx) -> int | None:
-    if ctx.block_signatures and callee in ctx.block_signatures:
-        _, output_names = ctx.block_signatures[callee]
+    resolved = _resolve_block_call(callee, ctx)
+    if resolved is not None and ctx.block_signatures:
+        block_name, _ = resolved
+        _, output_names = ctx.block_signatures[block_name]
         return len(output_names)
 
     known: dict[str, int] = {
@@ -755,6 +790,8 @@ def _module_return_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[s
 
 def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
     inputs = {param.name: {"optional": param.optional} for param in module.params}
+    if module.path_param is not None:
+        inputs[module.path_param] = {"optional": False}
     graph: list[dict[str, Any]] = []
     outputs: dict[str, str] = {}
     returns = _module_return_names(module)
@@ -770,7 +807,13 @@ def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
     }
     initial_dims.update(_module_return_last_dims(module, returns))
     initial_heads.update(_module_return_heads(module, returns))
-    ctx = _LowerCtx(block_signatures={}, tensor_last_dim=initial_dims, tensor_heads=initial_heads)
+    ctx = _LowerCtx(
+        block_signatures={},
+        block_path_params={module.name: module.path_param},
+        tensor_last_dim=initial_dims,
+        tensor_heads=initial_heads,
+        path_param_names={p for p in [module.path_param] if isinstance(p, str)},
+    )
 
     _lower_statements(
         statements=module.statements,
@@ -915,11 +958,16 @@ def lower_axon_program_to_synapse_spec(
         raise ValueError(f"Unknown main module: {main_name!r}")
 
     signatures: dict[str, tuple[list[str], list[str]]] = {}
+    block_path_params: dict[str, str | None] = {}
     for module in modules:
+        input_names = [param.name for param in module.params]
+        if module.path_param is not None:
+            input_names.append(module.path_param)
         signatures[module.name] = (
-            [param.name for param in module.params],
+            input_names,
             list(_module_return_names(module)),
         )
+        block_path_params[module.name] = module.path_param
 
     main = by_name[main_name]
     main_returns = _module_return_names(main)
@@ -945,8 +993,10 @@ def lower_axon_program_to_synapse_spec(
         returns=main_returns,
         ctx=_LowerCtx(
             block_signatures=signatures,
+            block_path_params=block_path_params,
             tensor_last_dim=main_initial_dims,
             tensor_heads=main_initial_heads,
+            path_param_names={p for p in [main.path_param] if isinstance(p, str)},
         ),
     )
     if not main_outputs:
@@ -962,6 +1012,8 @@ def lower_axon_program_to_synapse_spec(
         if module.name == main_name:
             continue
         block_inputs = {param.name: {"optional": param.optional} for param in module.params}
+        if module.path_param is not None:
+            block_inputs[module.path_param] = {"optional": False}
         block_returns = _module_return_names(module)
         block_graph: list[dict[str, Any]] = []
         block_outputs: dict[str, str] = {}
@@ -984,8 +1036,10 @@ def lower_axon_program_to_synapse_spec(
             returns=block_returns,
             ctx=_LowerCtx(
                 block_signatures=signatures,
+                block_path_params=block_path_params,
                 tensor_last_dim=block_initial_dims,
                 tensor_heads=block_initial_heads,
+                path_param_names={p for p in [module.path_param] if isinstance(p, str)},
             ),
         )
         if not block_outputs:
