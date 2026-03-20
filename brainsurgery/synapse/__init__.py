@@ -10,6 +10,7 @@ from .axon import (
     lower_axon_program_to_synapse_spec,
     parse_axon_module,
     parse_axon_program,
+    parse_axon_program_from_path,
     synapse_spec_to_axon_module_text,
 )
 from .axon_test import run_axon_test
@@ -32,5 +33,6 @@ __all__ = [
     "load_synapse_torch_op_map",
     "parse_axon_module",
     "parse_axon_program",
+    "parse_axon_program_from_path",
     "synapse_spec_to_axon_module_text",
 ]

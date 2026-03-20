@@ -109,6 +109,25 @@ class _Emitter:
                 '            raise ValueError(f"Missing variable in graph env: {name}")',
                 "        return env[name]",
                 "",
+                "    def _prepare_env(self, input_ids: torch.Tensor | None, inputs: dict[str, Any], input_specs: dict[str, Any]) -> dict[str, Any]:",
+                "        env = {'input_ids': input_ids, **inputs} if input_ids is not None else dict(inputs)",
+                "        for input_name, input_spec in input_specs.items():",
+                "            optional = isinstance(input_spec, dict) and bool(input_spec.get('optional', False))",
+                "            if input_name in env:",
+                "                continue",
+                "            if optional:",
+                "                env[input_name] = None",
+                "            else:",
+                "                raise ValueError(f'Missing required input: {input_name}')",
+                "        return env",
+                "",
+                "    def _repeat_values(self, *, range_value: int, start_value: int):",
+                "        if not isinstance(range_value, int):",
+                "            raise ValueError(f'repeat range must resolve to int, got {range_value!r}')",
+                "        if not isinstance(start_value, int):",
+                "            raise ValueError(f'repeat start must resolve to int, got {start_value!r}')",
+                "        return range(start_value, start_value + range_value)",
+                "",
             ]
         )
 
@@ -174,9 +193,8 @@ class _Emitter:
 
         lines = [
             "    def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:",
-            "        if input_ids is not None:",
-            "            inputs = {'input_ids': input_ids, **inputs}",
-            "        env: dict[str, Any] = dict(inputs)",
+            f"        input_specs = {repr(inputs)}",
+            "        env = self._prepare_env(input_ids, inputs, input_specs)",
             "        scope = ''",
             "        emitter = self",
         ]
@@ -304,12 +322,14 @@ class _Emitter:
                     raise ValueError("repeat requires string var")
                 range_code = self._expr_code(node_spec.get("range"), env)
                 start_code = self._expr_code(node_spec.get("start", 0), env)
-                loop_var = self._py_name(var_name)
-                lines.append(f"{inner_indent}for {loop_var} in range(int({range_code})):")
                 saved = env.get(var_name)
                 iter_value = self._fresh(self._py_name(var_name))
+                range_var = self._fresh("range")
+                start_var = self._fresh("start")
+                lines.append(f"{inner_indent}{range_var} = int({range_code})")
+                lines.append(f"{inner_indent}{start_var} = int({start_code})")
                 lines.append(
-                    f"{inner_indent}    {iter_value} = int({start_code}) + int({loop_var})"
+                    f"{inner_indent}for {iter_value} in self._repeat_values(range_value={range_var}, start_value={start_var}):"
                 )
                 env[var_name] = iter_value
                 child_scope = self._fresh("scope")
@@ -419,18 +439,13 @@ class _Emitter:
             var = self._fresh(self._py_name(block_out_name))
             tmp_vars.append(var)
 
+        call_args = ", ".join([*arg_codes, f"scope={scope_var}"])
         if len(tmp_vars) == 1:
             call_line = (
-                f"{indent}{tmp_vars[0]} = self._block_{self._py_name(block_name)}("
-                + ", ".join(arg_codes)
-                + f", scope={scope_var})"
+                f"{indent}{tmp_vars[0]} = self._block_{self._py_name(block_name)}({call_args})"
             )
         else:
-            call_line = (
-                f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}("
-                + ", ".join(arg_codes)
-                + f", scope={scope_var})"
-            )
+            call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
         lines = [call_line]
         for (block_out_name, dst_name), tmp in zip(out_bindings.items(), tmp_vars, strict=True):

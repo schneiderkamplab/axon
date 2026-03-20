@@ -45,7 +45,9 @@ def interpret(
     for out_name, candidates in zip(outs, groups, strict=True):
         value = None
         for candidate in candidates:
-            if candidate in env and env[candidate] is not None:
+            if candidate not in env:
+                raise ValueError(f"coalesce candidate {candidate!r} missing in env")
+            if env[candidate] is not None:
                 value = env[candidate]
                 break
         env[out_name] = value

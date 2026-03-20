@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from brainsurgery.synapse import (
     SynapseProgramModel,
     lower_axon_program_to_synapse_spec,
-    parse_axon_program,
+    parse_axon_program_from_path,
 )
 from tests.synapse_test_utils import (
     assert_logits_close,
@@ -22,7 +22,7 @@ from tests.synapse_test_utils import (
 
 
 def _load_axon_spec(path: Path) -> dict[str, Any]:
-    modules = parse_axon_program(path.read_text(encoding="utf-8"))
+    modules = parse_axon_program_from_path(path)
     return lower_axon_program_to_synapse_spec(modules)
 
 
@@ -110,9 +110,9 @@ def test_axon_files_roundtrip_to_original_synapse_spec(
     )
     assert lowered.get("model", {}).get("outputs") == expected.get("model", {}).get("outputs")
     assert lowered.get("model", {}).get("symbols") == expected_symbols
-    assert set(lowered.get("model", {}).get("blocks", {}).keys()) == set(
-        expected.get("model", {}).get("blocks", {}).keys()
-    )
+    lowered_blocks = set(lowered.get("model", {}).get("blocks", {}).keys())
+    expected_blocks = set(expected.get("model", {}).get("blocks", {}).keys())
+    assert expected_blocks.issubset(lowered_blocks)
 
 
 @pytest.mark.parametrize(

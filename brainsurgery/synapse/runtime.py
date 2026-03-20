@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -64,9 +65,6 @@ class SynapseProgramModel(nn.Module):
         self._state = dict(state_dict)
 
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:
-        if input_ids is not None:
-            inputs = {"input_ids": input_ids, **inputs}
-
         spec = self.spec
         model = spec.get("model", {})
         symbols_raw = model.get("symbols", {})
@@ -75,16 +73,8 @@ class SynapseProgramModel(nn.Module):
         input_specs = model.get("inputs", {})
         if not isinstance(input_specs, dict):
             raise ValueError("model.inputs must be a mapping when present")
-
-        env: dict[str, Any] = dict(inputs)
-        for input_name, input_spec in input_specs.items():
-            optional = isinstance(input_spec, dict) and bool(input_spec.get("optional", False))
-            if input_name in env:
-                continue
-            if optional:
-                env[input_name] = None
-            else:
-                raise ValueError(f"Missing required input: {input_name}")
+        env = self._prepare_env(input_ids=input_ids, inputs=inputs, input_specs=input_specs)
+        self._validate_input_shapes(env, input_specs, symbols)
         self._run_graph(model.get("graph", []), env, scope="", symbols=symbols, blocks=blocks)
 
         outputs = model.get("outputs", {})
@@ -197,6 +187,35 @@ class SynapseProgramModel(nn.Module):
                 self.train()
         return generated[:, :cur_len]
 
+    def _prepare_env(
+        self,
+        *,
+        input_ids: torch.Tensor | None,
+        inputs: dict[str, Any],
+        input_specs: dict[str, Any],
+    ) -> dict[str, Any]:
+        env: dict[str, Any]
+        if input_ids is not None:
+            env = {"input_ids": input_ids, **inputs}
+        else:
+            env = dict(inputs)
+        for input_name, input_spec in input_specs.items():
+            optional = isinstance(input_spec, dict) and bool(input_spec.get("optional", False))
+            if input_name in env:
+                continue
+            if optional:
+                env[input_name] = None
+            else:
+                raise ValueError(f"Missing required input: {input_name}")
+        return env
+
+    def _repeat_values(self, *, range_value: int, start_value: int) -> range:
+        if not isinstance(range_value, int):
+            raise ValueError(f"repeat range must resolve to int, got {range_value!r}")
+        if not isinstance(start_value, int):
+            raise ValueError(f"repeat start must resolve to int, got {start_value!r}")
+        return range(start_value, start_value + range_value)
+
     def _run_graph(
         self,
         graph: list[Any],
@@ -223,19 +242,16 @@ class SynapseProgramModel(nn.Module):
             op = node_spec.get("op")
             if op == "repeat":
                 range_value = self._eval_expr(node_spec.get("range"), env, symbols)
-                if not isinstance(range_value, int):
-                    raise ValueError(f"repeat range must resolve to int, got {range_value!r}")
                 start_value = self._eval_expr(node_spec.get("start", 0), env, symbols)
-                if not isinstance(start_value, int):
-                    raise ValueError(f"repeat start must resolve to int, got {start_value!r}")
                 var_name = node_spec.get("var")
                 if not isinstance(var_name, str):
                     raise ValueError("repeat requires string 'var'")
                 body = node_spec.get("body")
                 if not isinstance(body, list):
                     raise ValueError("repeat requires list 'body'")
-                for i in range(range_value):
-                    iter_value = start_value + i
+                for iter_value in self._repeat_values(
+                    range_value=range_value, start_value=start_value
+                ):
                     env[var_name] = iter_value
                     repeat_scope = self._join(scope, f"{node_name}.{iter_value}")
                     self._run_graph(body, env, scope=repeat_scope, symbols=symbols, blocks=blocks)
@@ -367,6 +383,76 @@ class SynapseProgramModel(nn.Module):
             if isinstance(from_ref, str):
                 return env[from_ref]
         raise ValueError(f"Unsupported output ref: {ref!r}")
+
+    def _validate_input_shapes(
+        self,
+        env: dict[str, Any],
+        input_specs: dict[str, Any],
+        symbols: dict[str, int | float | bool],
+    ) -> None:
+        dim_bindings: dict[str, int] = {}
+        for input_name, input_spec in input_specs.items():
+            if not isinstance(input_spec, dict):
+                continue
+            shape_spec = input_spec.get("shape")
+            if not isinstance(shape_spec, list):
+                continue
+            value = env.get(input_name)
+            if value is None:
+                continue
+            if not torch.is_tensor(value):
+                raise ValueError(f"Input {input_name!r} must be a tensor for declared shape checks")
+            expected_rank = len(shape_spec)
+            if value.ndim != expected_rank:
+                raise ValueError(
+                    f"Input {input_name!r} rank mismatch: expected {expected_rank}, got {value.ndim}"
+                )
+            for axis, dim_token in enumerate(shape_spec):
+                actual = int(value.shape[axis])
+                if isinstance(dim_token, bool):
+                    raise ValueError(
+                        f"Input {input_name!r} has invalid boolean dim token at axis {axis}"
+                    )
+                if isinstance(dim_token, int):
+                    if actual != dim_token:
+                        raise ValueError(
+                            f"Input {input_name!r} shape mismatch at axis {axis}: "
+                            f"expected {dim_token}, got {actual}"
+                        )
+                    continue
+                if not isinstance(dim_token, str):
+                    continue
+                token = dim_token.strip()
+                if not token:
+                    continue
+                if re.fullmatch(r"-?[0-9]+", token):
+                    expected = int(token)
+                    if actual != expected:
+                        raise ValueError(
+                            f"Input {input_name!r} shape mismatch at axis {axis}: "
+                            f"expected {expected}, got {actual}"
+                        )
+                    continue
+                symbol_value = symbols.get(token)
+                if isinstance(symbol_value, bool):
+                    raise ValueError(
+                        f"Input {input_name!r} has invalid boolean symbol {token!r} at axis {axis}"
+                    )
+                if isinstance(symbol_value, int):
+                    if actual != symbol_value:
+                        raise ValueError(
+                            f"Input {input_name!r} shape mismatch at axis {axis}: "
+                            f"expected symbol {token}={symbol_value}, got {actual}"
+                        )
+                    continue
+                bound = dim_bindings.get(token)
+                if bound is None:
+                    dim_bindings[token] = actual
+                elif actual != bound:
+                    raise ValueError(
+                        f"Input {input_name!r} shape mismatch at axis {axis}: "
+                        f"symbol {token} was previously bound to {bound}, got {actual}"
+                    )
 
     def _read_tensor_input(self, ref: Any, env: dict[str, Any]) -> torch.Tensor:
         if not isinstance(ref, str):

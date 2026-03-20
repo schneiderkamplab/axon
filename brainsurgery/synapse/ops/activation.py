@@ -33,6 +33,8 @@ def interpret(
         env[out] = F.relu(x)
     elif kind == "silu":
         env[out] = F.silu(x)
+    elif kind == "swiglu":
+        env[out] = F.silu(x) * x
     else:
         raise ValueError(f"Unsupported activation kind: {kind}")
     return
@@ -72,6 +74,8 @@ def compile(
         lines.append(f"{indent}{out_var} = F.relu({src})")
     elif kind == "silu":
         lines.append(f"{indent}{out_var} = F.silu({src})")
+    elif kind == "swiglu":
+        lines.append(f"{indent}{out_var} = F.silu({src}) * {src}")
     else:
         raise ValueError(f"Unsupported activation kind: {kind}")
     return lines

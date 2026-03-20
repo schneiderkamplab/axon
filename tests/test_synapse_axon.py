@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from brainsurgery.synapse import (
     lower_axon_program_to_synapse_spec,
     parse_axon_module,
     parse_axon_program,
+    parse_axon_program_from_path,
     synapse_spec_to_axon_module_text,
 )
 
@@ -51,6 +53,390 @@ inc x = x + 1
     node_specs = _node_specs(spec["model"]["graph"])
     ops = [node["op"] for node in node_specs]
     assert "add" in ops
+
+
+def test_primitive_activation_alias_lowering() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  y <- _act_gelu_pytorch_tanh x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "activation"
+    assert node_specs[0]["kind"] == "gelu_pytorch_tanh"
+
+
+def test_pointfree_definition_is_eta_expanded() -> None:
+    source = """
+silu :: Tensor[B,T,D] -> Tensor[B,T,D]
+silu = _act_silu
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- silu x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    blocks = spec["model"]["blocks"]
+    assert "silu" in blocks
+    silu_nodes = _node_specs(blocks["silu"]["graph"])
+    assert silu_nodes[0]["op"] == "activation"
+    assert silu_nodes[0]["kind"] == "silu"
+
+
+def test_lowering_reports_shape_mismatch_from_signature_on_block_call() -> None:
+    source = """
+blk :: Tensor[B,T,768] -> Tensor[B,T,768]
+blk x = do
+  return x
+
+main :: Tensor[B,T,640] -> Tensor[B,T,768]
+main x = do
+  y <- blk x
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"shape mismatch in call 'blk'"):
+        lower_axon_program_to_synapse_spec(modules, main_module="main")
+
+
+def test_namespaced_module_call_with_import() -> None:
+    source = """
+import Lib
+
+Lib.swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
+Lib.swiglu x = do
+  return act::silu x * x
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Lib.swiglu x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["use"] == "Lib.swiglu"
+
+
+def test_namespaced_module_call_requires_import() -> None:
+    source = """
+Lib.swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
+Lib.swiglu x = do
+  return act::silu x * x
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Lib.swiglu x
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"requires `import Lib`"):
+        lower_axon_program_to_synapse_spec(modules, main_module="main")
+
+
+def test_builtin_act_import_resolves_from_builtin_file(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Activations
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Activations.swiglu x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if "use" in first:
+        assert first["use"] == "Activations.swiglu"
+    else:
+        assert first["op"] == "activation"
+        assert first["kind"] == "swiglu"
+
+
+def test_builtin_cache_import_resolves_from_builtin_file(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Cache
+
+main :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> ?Cache
+main past k v use_cache = do
+  k_all, v_all, present <- Cache.update past k v when=use_cache
+  cache <- Cache.init
+  cache <- use_cache ? Cache.append cache present : cache
+  return cache
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["use"] == "Cache.update"
+    second = node_specs[1]
+    if "use" in second:
+        assert second["use"] == "Cache.init"
+    else:
+        assert second["op"] == "init_list"
+    third = node_specs[2]
+    if "use" in third:
+        assert third["use"] == "Cache.append"
+    else:
+        assert third["op"] == "append"
+
+
+def test_import_resolution_prefers_local_file_over_builtins(tmp_path: Path) -> None:
+    local_act = tmp_path / "Activations.axon"
+    local_act.write_text(
+        """
+Activations.swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
+Activations.swiglu x = do
+  return act::relu x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Activations
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Activations.swiglu x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    blocks = spec["model"]["blocks"]
+    assert "Activations.swiglu" in blocks
+    block_nodes = _node_specs(blocks["Activations.swiglu"]["graph"])
+    assert block_nodes[0]["op"] == "activation"
+    assert block_nodes[0]["kind"] == "relu"
+
+
+def test_selective_import_parenthesized_brings_member_into_scope(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Activations (gelu_new)
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- gelu_new x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if "use" in first:
+        assert first["use"] == "Activations.gelu_new"
+    else:
+        assert first["op"] == "activation"
+        assert first["kind"] == "gelu_new"
+
+
+def test_selective_import_shorthand_brings_member_into_scope(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Activations gelu_new
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- gelu_new x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if "use" in first:
+        assert first["use"] == "Activations.gelu_new"
+    else:
+        assert first["op"] == "activation"
+        assert first["kind"] == "gelu_new"
+
+
+def test_local_module_name_shadows_selective_import() -> None:
+    source = """
+import Activations (gelu_new)
+
+gelu_new :: Tensor[B,T,D] -> Tensor[B,T,D]
+gelu_new x = do
+  return x
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- gelu_new x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["use"] == "gelu_new"
+
+
+def test_parse_program_from_path_loads_imported_axon_modules(tmp_path: Path) -> None:
+    lib_path = tmp_path / "Lib.axon"
+    lib_path.write_text(
+        """
+Lib.id :: Tensor[B,T,D] -> Tensor[B,T,D]
+Lib.id x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Lib
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Lib.id x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["use"] == "Lib.id"
+
+
+def test_prelude_is_implicitly_available_from_file_parse(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- gelu_new x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if "use" in first:
+        assert first["use"] == "Prelude.gelu_new"
+    else:
+        assert first["op"] == "activation"
+        assert first["kind"] == "gelu_new"
+
+
+def test_prelude_does_not_override_native_linear_op_semantics(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- linear@proj x dim=16 bias=true transpose=true
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "linear"
+    assert node_specs[0]["dim"] == 16
+    assert node_specs[0]["bias"] is True
+    assert node_specs[0]["transpose"] is True
+
+
+def test_cache_builtin_import_resolves_from_builtin_file(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Cache
+
+main :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (?Tensor[B,H,T,D], ?Tensor[B,H,T,D], ?Cache)
+main past k v = do
+  k_all, v_all, present <- Cache.update past k v
+  return k_all, v_all, present
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["use"] == "Cache.update"
+
+
+def test_moe_builtin_import_resolves_from_builtin_file(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import MoE
+
+main :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> I -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
+main hidden topk_scores topk_indices expert = do
+  selected_hidden, token_idx, topk_pos, selected_scores <- MoE.select hidden topk_scores topk_indices expert
+  return selected_hidden, token_idx, topk_pos, selected_scores
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if "use" in first:
+        assert first["use"] == "MoE.select"
+    else:
+        assert first["op"] == "moe_select_tokens"
+
+
+def test_multi_path_parameters_support_triple_at_call_syntax() -> None:
+    source = """
+expert_ffn@gate@up@down :: @Path -> @Path -> @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+expert_ffn@gate@up@down x = do
+  g <- linear@gate x
+  u <- linear@up x
+  y <- g |> mul u |> linear@down
+  return y
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- expert_ffn@mlp.gate_proj@mlp.up_proj@mlp.down_proj x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["use"] == "expert_ffn"
+    assert node_specs[0]["in"]["gate"] == "'mlp.gate_proj'"
+    assert node_specs[0]["in"]["up"] == "'mlp.up_proj'"
+    assert node_specs[0]["in"]["down"] == "'mlp.down_proj'"
 
 
 def test_top_level_constant_stays_symbol_with_expression_module_definition() -> None:
@@ -360,19 +746,247 @@ blk x = do
     assert node_specs[0]["dim"] == "D"
 
 
-def test_infer_split_last_sizes_from_known_last_dim() -> None:
+def test_infer_split_sizes_from_known_last_dim() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
   qkv <- linear x dim=3*D
-  q, k, v <- split_last qkv
+  q, k, v <- split qkv
   return q
 """
     modules = parse_axon_program(source)
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
-    assert node_specs[1]["op"] == "split_last"
+    assert node_specs[1]["op"] == "split"
     assert node_specs[1]["sizes"] == ["D", "D", "D"]
+
+
+def test_split_rejects_parts_and_sizes_together() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  q, k <- split x parts=2 sizes=[4,4]
+  return q
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="split accepts either parts or sizes, not both"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_split_rejects_output_arity_mismatch_for_parts() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  q, k <- split x parts=3
+  return q
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"split parts=3 requires 3 outputs, got 2"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_split_requires_tuple_binding_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  q <- split x parts=1
+  return q
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="split requires tuple/list binding outputs"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_topk_requires_k_kwarg() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  vals, idx <- topk x
+  return vals
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"topk missing required kwargs: k"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_topk_requires_two_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  vals <- topk x k=8
+  return vals
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="topk requires exactly two outputs: values, indices"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_moe_select_tokens_requires_expert_kwarg() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,EPT] -> Tensor[B,T,EPT] -> Tensor[B,T,D]
+blk x scores idx = do
+  x_sel, token_idx, topk_pos, sel_scores <- moe_select_tokens x scores idx
+  return x_sel
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"moe_select_tokens missing required kwargs: expert"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_moe_select_tokens_requires_four_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,EPT] -> Tensor[B,T,EPT] -> Tensor[B,T,D]
+blk x scores idx = do
+  x_sel <- moe_select_tokens x scores idx expert=0
+  return x_sel
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError,
+        match=(
+            "moe_select_tokens requires exactly four outputs: "
+            "selected_hidden, token_idx, topk_pos, selected_scores"
+        ),
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_moe_scatter_add_requires_single_output() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
+blk m idx upd scores = do
+  a, b <- moe_scatter_add m idx upd scores
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="moe_scatter_add requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_coalesce_requires_tuple_binding_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- cache::coalesce x x
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="coalesce requires tuple/list binding outputs"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_coalesce_requires_divisible_input_output_counts() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  a, b <- cache::coalesce x x x
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="coalesce input count must be divisible by output count"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_coalesce_requires_variable_name_inputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  a, b <- cache::coalesce x add(x, x)
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="coalesce inputs must be variable names"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_topk_accepts_largest_and_sorted_kwargs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  vals, idx <- topk x k=8 dim=-1 largest=false sorted=false
+  return vals
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "topk"
+    assert node_specs[0]["largest"] is False
+    assert node_specs[0]["sorted"] is False
+
+
+def test_softmax_rejects_tuple_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y, z <- softmax x dim=-1
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="softmax requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_softmax_rejects_unsupported_dtype() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- softmax x dim=-1 dtype=float64
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"Unsupported softmax dtype: float64"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_softmax_accepts_supported_dtype_and_default_dim() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- softmax x dtype=bfloat16
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["op"] == "softmax"
+    assert node_specs[0]["dtype"] == "bfloat16"
+    assert "dim" not in node_specs[0]
+
+
+def test_zeros_like_rejects_tuple_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y, z <- zeros_like x
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="zeros_like requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_add_rejects_tuple_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
+blk x y = do
+  a, b <- add x y
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="add requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_mul_rejects_tuple_outputs() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
+blk x y = do
+  a, b <- mul x y
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="mul requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
 
 
 def test_infer_linear_dim_from_return_shape() -> None:

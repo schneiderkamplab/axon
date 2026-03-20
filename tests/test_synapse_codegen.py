@@ -164,6 +164,7 @@ def test_optional_input_defaults_to_none_in_emitted_code() -> None:
         },
     }
     source = emit_model_code_from_synapse_spec(spec, class_name="OptionalModel")
+    assert "def _prepare_env(" in source
     assert "x = env.get('x')" in source
 
 

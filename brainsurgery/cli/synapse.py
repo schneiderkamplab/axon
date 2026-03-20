@@ -29,11 +29,13 @@ def _emit_model_code(spec: dict[str, Any], class_name: str) -> str:
     return emit_fn(spec, class_name=class_name)
 
 
-def _parse_axon_to_synapse_spec(source: str, *, main_module: str | None = None) -> dict[str, Any]:
+def _parse_axon_to_synapse_spec(
+    axon_path: Path, *, main_module: str | None = None
+) -> dict[str, Any]:
     module = _synapse_module()
-    parse_fn = getattr(module, "parse_axon_program")
+    parse_fn = getattr(module, "parse_axon_program_from_path")
     lower_fn = getattr(module, "lower_axon_program_to_synapse_spec")
-    parsed = parse_fn(source)
+    parsed = parse_fn(axon_path)
     return lower_fn(parsed, main_module=main_module)
 
 
@@ -123,11 +125,10 @@ def axon_to_synapse(
     if output_path.suffix not in {".yaml", ".yml"}:
         raise typer.BadParameter("Output path must end with .yaml or .yml")
 
-    source = axon_path.read_text(encoding="utf-8")
     if isinstance(main_module, OptionInfo):
         main_module = None
     try:
-        spec = _parse_axon_to_synapse_spec(source, main_module=main_module)
+        spec = _parse_axon_to_synapse_spec(axon_path, main_module=main_module)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from .types import (
     AxonBind,
@@ -13,13 +14,10 @@ from .types import (
 )
 
 _HEADER_RE = re.compile(r"^module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*->\s*\((.*?)\)\s*do\s*$")
-_SIG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*::\s*(.+)\s*$")
-_DEF_DO_RE = re.compile(
-    r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*(.*?)\s*=\s*do\s*$"
-)
-_DEF_EXPR_RE = re.compile(
-    r"^([A-Za-z_][A-Za-z0-9_]*(?:@[A-Za-z_][A-Za-z0-9_]*)?)\s*(.*?)\s*=\s*(.+?)\s*$"
-)
+_MOD_NAME_RE = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_SIG_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*::\s*(.+)\s*$")
+_DEF_DO_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*?)\s*=\s*do\s*$")
+_DEF_EXPR_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*?)\s*=\s*(.+?)\s*$")
 _FOR_AT_RANGE_RE = re.compile(
     r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
 )
@@ -29,6 +27,9 @@ _TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 _TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
 _PATH_SIG_ARG_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)$")
 _PATH_SIG_SHORT_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)$")
+_IMPORT_RE = re.compile(rf"^import\s+({_MOD_NAME_RE})(?:\s+(.*))?$")
+_IMPORT_MEMBER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SIMPLE_CALLEE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:.@]*$")
 
 
 def _strip_haskell_comment(line: str) -> str:
@@ -178,24 +179,80 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
     return AxonModule(
         name=module.name,
         path_param=module.path_param,
+        path_params=module.path_params,
         params=module.params,
         returns=module.returns,
         statements=module.statements,
+        imports=module.imports,
+        imported_members=module.imported_members,
         symbols=merged,
         return_type_expr=module.return_type_expr,
         return_shape=module.return_shape,
     )
 
 
-def _split_module_path_param(name: str) -> tuple[str, str | None]:
+def _split_module_path_params(name: str) -> tuple[str, tuple[str, ...]]:
     if "@" not in name:
-        return name, None
-    base, path_param = name.split("@", 1)
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", base):
+        return name, ()
+    parts = name.split("@")
+    base = parts[0]
+    path_params = tuple(parts[1:])
+    if not re.fullmatch(_MOD_NAME_RE, base):
         raise ValueError(f"invalid module name: {name!r}")
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path_param):
-        raise ValueError(f"invalid module path parameter: {name!r}")
-    return base, path_param
+    for path_param in path_params:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path_param):
+            raise ValueError(f"invalid module path parameter: {name!r}")
+    if len(set(path_params)) != len(path_params):
+        raise ValueError(f"duplicate module path parameter in {name!r}")
+    return base, path_params
+
+
+def _parse_import_members(raw: str) -> tuple[str, ...]:
+    text = raw.strip()
+    if not text:
+        return ()
+    if text.startswith("("):
+        if not text.endswith(")"):
+            raise ValueError(f"invalid import member list: {raw!r}")
+        inner = text[1:-1].strip()
+        if not inner:
+            return ()
+        tokens = _split_top_level_csv(inner)
+    else:
+        normalized = text.replace(",", " ")
+        tokens = [part.strip() for part in normalized.split() if part.strip()]
+    if not tokens:
+        return ()
+    for token in tokens:
+        if _IMPORT_MEMBER_RE.fullmatch(token) is None:
+            raise ValueError(f"invalid imported member name: {token!r}")
+    deduped = tuple(dict.fromkeys(tokens))
+    return deduped
+
+
+def _extract_top_level_imports(
+    lines: list[str],
+) -> tuple[list[str], tuple[str, ...], dict[str, tuple[str, ...]]]:
+    body: list[str] = []
+    imports: list[str] = []
+    imported_members: dict[str, tuple[str, ...]] = {}
+    for line in lines:
+        if len(line) != len(line.lstrip(" ")):
+            body.append(line)
+            continue
+        match = _IMPORT_RE.match(line.strip())
+        if match is not None:
+            namespace = match.group(1)
+            imports.append(namespace)
+            raw_members = match.group(2) or ""
+            members = _parse_import_members(raw_members)
+            if members:
+                prev = imported_members.get(namespace, ())
+                imported_members[namespace] = tuple(dict.fromkeys([*prev, *members]))
+            continue
+        body.append(line)
+    deduped = tuple(dict.fromkeys(imports))
+    return body, deduped, imported_members
 
 
 def _parse_haskell_header(
@@ -204,6 +261,7 @@ def _parse_haskell_header(
     tuple[
         str,
         str | None,
+        tuple[str, ...],
         tuple[AxonParam, ...],
         tuple[str, ...],
         int,
@@ -227,60 +285,79 @@ def _parse_haskell_header(
 
     name_sig_raw = sig_match.group(1)
     name_def_raw = def_match.group(1)
-    name_sig, path_param_sig = _split_module_path_param(name_sig_raw)
-    name_def, path_param_def = _split_module_path_param(name_def_raw)
+    name_sig, path_params_sig = _split_module_path_params(name_sig_raw)
+    name_def, path_params_def = _split_module_path_params(name_def_raw)
     if name_sig != name_def:
         raise ValueError(
             f"signature/definition name mismatch: {name_sig_raw!r} != {name_def_raw!r}"
         )
-    if (
-        path_param_sig is not None
-        and path_param_def is not None
-        and path_param_sig != path_param_def
-    ):
+    if path_params_sig and path_params_def and path_params_sig != path_params_def:
         raise ValueError(
             f"signature/definition path parameter mismatch: {name_sig_raw!r} != {name_def_raw!r}"
         )
-    path_param = path_param_sig if path_param_sig is not None else path_param_def
+    path_params = path_params_sig if path_params_sig else path_params_def
+    path_param = path_params[0] if path_params else None
 
     sig_expr = sig_match.group(2).strip()
     parts = _split_top_level(sig_expr, "->")
     if len(parts) < 1:
         raise ValueError("invalid Axon type signature")
     arg_types = parts[:-1]
-    if arg_types:
-        first_arg = arg_types[0].strip()
-        path_sig_match = _PATH_SIG_ARG_RE.match(first_arg)
-        path_sig_short = _PATH_SIG_SHORT_RE.match(first_arg)
-        if path_sig_match is not None or path_sig_short is not None:
-            if path_sig_match is not None:
-                path_sig_name = path_sig_match.group(1)
-                path_sig_type = path_sig_match.group(2)
-            else:
-                path_sig_type = path_sig_short.group(1) if path_sig_short is not None else ""
-                path_sig_name = path_param
-            if path_sig_type != "Path":
+    consumed_path_types = 0
+    while consumed_path_types < len(arg_types):
+        current = arg_types[consumed_path_types].strip()
+        path_sig_match = _PATH_SIG_ARG_RE.match(current)
+        path_sig_short = _PATH_SIG_SHORT_RE.match(current)
+        if path_sig_match is None and path_sig_short is None:
+            break
+        if path_sig_match is not None:
+            path_sig_name = path_sig_match.group(1)
+            path_sig_type = path_sig_match.group(2)
+        else:
+            path_sig_type = path_sig_short.group(1) if path_sig_short is not None else ""
+            if consumed_path_types >= len(path_params):
                 raise ValueError(
-                    f"path signature type must be Path, got {path_sig_type!r}. Use '@Path'."
+                    "path signature annotation count exceeds module path parameters in definition"
                 )
-            if path_param is None:
-                raise ValueError(
-                    "path signature annotation requires a module path parameter in the definition"
-                )
-            if path_sig_name != path_param:
-                raise ValueError(
-                    "path signature parameter does not match module path parameter:"
-                    f" {path_sig_name!r} != {path_param!r}"
-                )
-            arg_types = arg_types[1:]
+            path_sig_name = path_params[consumed_path_types]
+        if path_sig_type != "Path":
+            raise ValueError(
+                f"path signature type must be Path, got {path_sig_type!r}. Use '@Path'."
+            )
+        if not path_params:
+            raise ValueError(
+                "path signature annotation requires a module path parameter in the definition"
+            )
+        expected_name = (
+            path_params[consumed_path_types] if consumed_path_types < len(path_params) else None
+        )
+        if path_sig_name != expected_name:
+            raise ValueError(
+                "path signature parameter does not match module path parameter:"
+                f" {path_sig_name!r} != {expected_name!r}"
+            )
+        consumed_path_types += 1
+    if consumed_path_types != len(path_params):
+        raise ValueError("path signature annotation count must match module path parameter count")
+    arg_types = arg_types[consumed_path_types:]
     raw_return_type = parts[-1].strip()
     opt_flags = [arg.strip().startswith("?") for arg in arg_types]
 
     arg_names = [p for p in def_match.group(2).strip().split() if p]
+    inline_expr = def_expr_match.group(3).strip() if def_expr_match is not None else None
     if len(arg_names) != len(opt_flags):
-        raise ValueError(
-            f"signature arg count ({len(opt_flags)}) does not match definition args ({len(arg_names)})"
+        allow_pointfree_eta = (
+            len(arg_names) == 0
+            and len(opt_flags) > 0
+            and inline_expr is not None
+            and _SIMPLE_CALLEE_RE.fullmatch(inline_expr) is not None
         )
+        if not allow_pointfree_eta:
+            raise ValueError(
+                f"signature arg count ({len(opt_flags)}) does not match definition args ({len(arg_names)})"
+            )
+        arg_names = [f"arg_{idx}" for idx in range(len(opt_flags))]
+        inline_expr = f"{inline_expr} {' '.join(arg_names)}"
     annotation_symbols: dict[str, object] = {}
     params_out: list[AxonParam] = []
     for idx, arg_name in enumerate(arg_names):
@@ -303,11 +380,11 @@ def _parse_haskell_header(
         for dim in ret_shape:
             annotation_symbols.setdefault(dim, None)
     params = tuple(params_out)
-    inline_expr = def_expr_match.group(3).strip() if def_expr_match is not None else None
     # Haskell-style signatures carry output types, not names. Return names will be inferred from `return`.
     return (
         name_sig,
         path_param,
+        path_params,
         params,
         (),
         2,
@@ -320,6 +397,7 @@ def _parse_haskell_header(
 
 def parse_axon_module(source: str) -> AxonModule:
     lines, top_constants = _extract_top_level_constants(_normalized_source_lines(source))
+    lines, imports, imported_members = _extract_top_level_imports(lines)
     if not lines:
         raise ValueError("empty Axon source")
 
@@ -329,6 +407,7 @@ def parse_axon_module(source: str) -> AxonModule:
     (
         module_name,
         module_path_param,
+        module_path_params,
         params,
         returns,
         body_start,
@@ -342,9 +421,12 @@ def parse_axon_module(source: str) -> AxonModule:
         module = AxonModule(
             name=module_name,
             path_param=module_path_param,
+            path_params=module_path_params,
             params=params,
             returns=returns,
             statements=(AxonReturn(values=(inline_expr,)),),
+            imports=imports,
+            imported_members=imported_members or None,
             symbols=None,
             return_type_expr=return_type_expr,
             return_shape=return_shape,
@@ -357,9 +439,12 @@ def parse_axon_module(source: str) -> AxonModule:
         return AxonModule(
             name=module_name,
             path_param=module_path_param,
+            path_params=module_path_params,
             params=params,
             returns=returns,
             statements=(),
+            imports=imports,
+            imported_members=imported_members or None,
             symbols=top_constants if top_constants else None,
             return_type_expr=return_type_expr,
             return_shape=return_shape,
@@ -372,9 +457,12 @@ def parse_axon_module(source: str) -> AxonModule:
     module = AxonModule(
         name=module_name,
         path_param=module_path_param,
+        path_params=module_path_params,
         params=params,
         returns=returns,
         statements=tuple(statements),
+        imports=imports,
+        imported_members=imported_members or None,
         symbols=None,
         return_type_expr=return_type_expr,
         return_shape=return_shape,
@@ -492,6 +580,7 @@ def _parse_statements(
 
 def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
     raw_lines, top_constants = _extract_top_level_constants(_normalized_source_lines(source))
+    raw_lines, top_imports, top_imported_members = _extract_top_level_imports(raw_lines)
     module_starts: list[int] = []
     for idx, line in enumerate(raw_lines):
         if len(line) != len(line.lstrip(" ")):
@@ -508,10 +597,110 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
         chunk = "\n".join(raw_lines[start:end]).strip()
         if not chunk:
             continue
-        modules.append(parse_axon_module(chunk))
+        module = parse_axon_module(chunk)
+        merged_imports = tuple(dict.fromkeys([*top_imports, *module.imports]))
+        merged_imported_members: dict[str, tuple[str, ...]] = dict(top_imported_members)
+        if module.imported_members:
+            for namespace, members in module.imported_members.items():
+                prev = merged_imported_members.get(namespace, ())
+                merged_imported_members[namespace] = tuple(dict.fromkeys([*prev, *members]))
+        modules.append(
+            AxonModule(
+                name=module.name,
+                path_param=module.path_param,
+                path_params=module.path_params,
+                params=module.params,
+                returns=module.returns,
+                statements=module.statements,
+                imports=merged_imports,
+                imported_members=merged_imported_members or None,
+                symbols=module.symbols,
+                return_type_expr=module.return_type_expr,
+                return_shape=module.return_shape,
+            )
+        )
     if modules:
         modules[-1] = _inject_symbols_meta(modules[-1], top_constants)
     return tuple(modules)
 
 
-__all__ = ["parse_axon_module", "parse_axon_program"]
+def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
+    root = path.resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"Axon file not found: {root}")
+    if not root.is_file():
+        raise ValueError(f"Axon import root must be a file: {root}")
+
+    seen_paths: set[Path] = set()
+    visiting: list[Path] = []
+    ordered_modules: list[AxonModule] = []
+
+    builtins_dir = (Path(__file__).resolve().parents[1] / "builtins").resolve()
+    prelude_file = (builtins_dir / "Prelude.axon").resolve()
+
+    def _apply_namespace(
+        modules: tuple[AxonModule, ...], namespace: str | None
+    ) -> tuple[AxonModule, ...]:
+        if not namespace:
+            return modules
+        namespaced: list[AxonModule] = []
+        for module in modules:
+            if "." in module.name:
+                namespaced.append(module)
+                continue
+            namespaced.append(
+                AxonModule(
+                    name=f"{namespace}.{module.name}",
+                    path_param=module.path_param,
+                    path_params=module.path_params,
+                    params=module.params,
+                    returns=module.returns,
+                    statements=module.statements,
+                    imports=module.imports,
+                    imported_members=module.imported_members,
+                    symbols=module.symbols,
+                    return_type_expr=module.return_type_expr,
+                    return_shape=module.return_shape,
+                )
+            )
+        return tuple(namespaced)
+
+    def _resolve_import_path(base_file: Path, import_name: str) -> Path:
+        rel = Path(*import_name.split(".")).with_suffix(".axon")
+        local_candidate = (base_file.parent / rel).resolve()
+        if local_candidate.exists():
+            return local_candidate
+        builtin_candidate = (builtins_dir / rel).resolve()
+        if builtin_candidate.exists():
+            return builtin_candidate
+        raise FileNotFoundError(
+            f"Axon import {import_name!r} not found from {base_file}: "
+            f"tried {local_candidate} and {builtin_candidate}"
+        )
+
+    def _load_file(file_path: Path, *, namespace: str | None = None) -> None:
+        resolved = file_path.resolve()
+        if resolved in seen_paths:
+            return
+        if resolved in visiting:
+            cycle = " -> ".join(str(p) for p in [*visiting, resolved])
+            raise ValueError(f"Cyclic Axon imports detected: {cycle}")
+        visiting.append(resolved)
+        source = resolved.read_text(encoding="utf-8")
+        modules = _apply_namespace(parse_axon_program(source), namespace)
+        import_names: set[str] = set()
+        for module in modules:
+            import_names.update(module.imports)
+        for import_name in sorted(import_names):
+            _load_file(_resolve_import_path(resolved, import_name), namespace=import_name)
+        ordered_modules.extend(modules)
+        seen_paths.add(resolved)
+        visiting.pop()
+
+    if prelude_file.exists() and prelude_file != root:
+        _load_file(prelude_file, namespace="Prelude")
+    _load_file(root)
+    return tuple(ordered_modules)
+
+
+__all__ = ["parse_axon_module", "parse_axon_program", "parse_axon_program_from_path"]

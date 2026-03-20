@@ -38,6 +38,7 @@ dev = ["build", "mypy", "pre-commit", "pytest", "ruff", "twine"]
 [tool.hatch.build]
 include = [
     'brainsurgery',
+    'brainsurgery/synapse/builtins/*.axon',
     'LICENSE',
     'README.md',
 ]

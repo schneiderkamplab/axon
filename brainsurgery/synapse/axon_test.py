@@ -15,7 +15,7 @@ from mltiming import timing
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .axon import lower_axon_program_to_synapse_spec, parse_axon_program
+from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from .codegen import emit_model_code_from_synapse_spec
 
 
@@ -232,8 +232,7 @@ def run_axon_test(
         synapse_yaml_path = tmp_path / "lowered_synapse.yaml"
         generated_py_path = tmp_path / "generated_model.py"
 
-        axon_source = axon_file.read_text(encoding="utf-8")
-        modules = parse_axon_program(axon_source)
+        modules = parse_axon_program_from_path(axon_file)
         synapse_spec = lower_axon_program_to_synapse_spec(modules, main_module=main_module)
 
         synapse_yaml_path.write_text(

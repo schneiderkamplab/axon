@@ -43,6 +43,13 @@ def extract_logits(output: Any) -> torch.Tensor:
     return output
 
 
+def masked_logits_diff(
+    lhs: torch.Tensor, rhs: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    token_mask = attention_mask.to(torch.bool).unsqueeze(-1).expand_as(lhs)
+    return (lhs - rhs).abs()[token_mask]
+
+
 def assert_logits_close(
     actual: torch.Tensor,
     reference: torch.Tensor,
@@ -56,10 +63,32 @@ def assert_logits_close(
     assert torch.equal(actual[:, -1, :].argmax(-1), reference[:, -1, :].argmax(-1))
 
 
+def assert_masked_logits_close(
+    actual: torch.Tensor,
+    reference: torch.Tensor,
+    attention_mask: torch.Tensor,
+    *,
+    mean_tol: float,
+    max_tol: float,
+) -> None:
+    diff = masked_logits_diff(actual, reference, attention_mask)
+    assert float(diff.mean()) < mean_tol
+    assert float(diff.max()) < max_tol
+    b_idx = torch.arange(attention_mask.shape[0], device=attention_mask.device)
+    seq_positions = torch.arange(attention_mask.shape[1], device=attention_mask.device).unsqueeze(0)
+    last_idx = torch.where(attention_mask.to(torch.bool), seq_positions, -1).max(dim=-1).values
+    assert torch.equal(
+        actual[b_idx, last_idx, :].argmax(-1),
+        reference[b_idx, last_idx, :].argmax(-1),
+    )
+
+
 __all__ = [
     "auto_device",
     "load_yaml_mapping",
     "build_codegen_model",
     "extract_logits",
+    "masked_logits_diff",
     "assert_logits_close",
+    "assert_masked_logits_close",
 ]
