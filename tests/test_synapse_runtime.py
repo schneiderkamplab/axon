@@ -116,8 +116,7 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
                 {
                     "p": {
                         "_op": "position_ids",
-                        "_args": "input_ids",
-                        "attention_mask": "attention_mask",
+                        "_args": ["input_ids", "attention_mask"],
                         "_bind": "pos",
                     }
                 }

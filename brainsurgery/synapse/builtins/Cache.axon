@@ -21,3 +21,8 @@ index = List.index
 
 append :: Cache -> CacheLayer -> Cache
 append = List.append
+
+past_length :: ?Cache -> I
+past_length cache = do
+  first <- _list_index cache 0
+  return _cache_seq_len first

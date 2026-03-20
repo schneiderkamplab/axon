@@ -33,7 +33,7 @@ _OP_ARITY: dict[str, tuple[int, int]] = {
     "split": (1, 1),
     "apply_rope_pair": (2, 2),
     "repeat_kv": (1, 2),
-    "position_ids": (1, 1),
+    "position_ids": (2, 2),
     "kv_cache_update": (3, 3),
     "coalesce": (2, 8),
     "topk": (1, 1),
@@ -70,7 +70,7 @@ _OP_ALLOWED_KWARGS: dict[str, set[str]] = {
     "split": {"dim", "parts", "sizes"},
     "apply_rope_pair": {"position_ids", "theta"},
     "repeat_kv": {"heads", "kv_heads", "repeats", "times", "dim"},
-    "position_ids": {"attention_mask", "past_length"},
+    "position_ids": {"past_length"},
     "kv_cache_update": {"when"},
     "coalesce": set(),
     "topk": {"k", "dim", "largest", "sorted"},
@@ -113,7 +113,7 @@ _OP_KWARG_KINDS: dict[str, dict[str, str]] = {
         "times": "dim",
         "dim": "int",
     },
-    "position_ids": {"attention_mask": "str", "past_length": "dim"},
+    "position_ids": {"past_length": "dim"},
     "kv_cache_update": {},
     "coalesce": {},
     "topk": {"k": "dim", "dim": "int", "largest": "bool", "sorted": "bool"},
@@ -265,6 +265,28 @@ def _looks_like_call(expr: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _strip_wrapping_parens(text: str) -> str:
+    current = text.strip()
+    while current.startswith("(") and current.endswith(")"):
+        depth = 0
+        valid = True
+        for idx, ch in enumerate(current):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    valid = False
+                    break
+                if depth == 0 and idx != len(current) - 1:
+                    valid = False
+                    break
+        if not valid or depth != 0:
+            break
+        current = current[1:-1].strip()
+    return current
 
 
 def _render_call(callee: str, args: list[str], kwargs: dict[str, Any]) -> str:
@@ -968,6 +990,18 @@ def _lower_simple_call(
         else:
             resolved_args.append(token)
     args = resolved_args
+
+    resolved_kwargs: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        if isinstance(value, str):
+            stripped_value = _strip_wrapping_parens(value)
+            if _looks_like_call(stripped_value):
+                tmp = ctx.fresh("kwarg")
+                pre_graph.extend(_lower_expr(stripped_value, tmp, ctx, when=when))
+                resolved_kwargs[key] = tmp
+                continue
+        resolved_kwargs[key] = value
+    kwargs = resolved_kwargs
 
     # Canonicalize positional expert for the primitive MoE selector.
     if callee == "_moe_select" and "expert" not in kwargs and len(args) >= 4:

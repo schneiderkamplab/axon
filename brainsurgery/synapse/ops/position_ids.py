@@ -34,12 +34,15 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    x = model._read_tensor_input(node_spec.get("_args"), env)
+    args = node_spec.get("_args")
+    if not isinstance(args, list) or len(args) != 2:
+        raise ValueError("position_ids expects _args as [input_ids, attn_mask]")
+    x = model._read_tensor_input(args[0], env)
     if x.ndim != 2:
         raise ValueError("position_ids._args must resolve to rank-2 [batch, seq] tensor")
     seq_len = int(x.shape[1])
     out = model._require_name(node_spec.get("_bind"), field="position_ids._bind")
-    mask_ref = node_spec.get("attention_mask")
+    mask_ref = args[1]
     mask_tensor = env.get(mask_ref) if isinstance(mask_ref, str) else None
     if mask_tensor is not None:
         if not torch.is_tensor(mask_tensor):
@@ -80,8 +83,11 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("_args")))
-    mask_name = node_spec.get("attention_mask")
+    args = node_spec.get("_args")
+    if not isinstance(args, list) or len(args) != 2:
+        raise ValueError("position_ids expects _args as [input_ids, attn_mask]")
+    src = read(str(args[0]))
+    mask_name = args[1]
     mask = env.get(mask_name) if isinstance(mask_name, str) and mask_name in env else None
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)

@@ -1433,6 +1433,22 @@ tiny x = do
     }
 
 
+def test_nested_call_expression_in_kwarg_lowers_via_temp_binding() -> None:
+    source = """
+tiny :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> Tensor[B,S]
+tiny input_ids attn_mask past_key_values = do
+  pos <- position_ids input_ids attn_mask past_length=(_cache_seq_len (_list_index past_key_values 0))
+  return pos
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "index"
+    assert node_specs[1]["_op"] == "kv_seq_len"
+    assert node_specs[2]["_op"] == "position_ids"
+    assert node_specs[2]["past_length"] == node_specs[1]["_bind"]
+
+
 def test_lower_pipeline_multi_output_stage_into_next_call_args() -> None:
     source = """
 tiny :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
