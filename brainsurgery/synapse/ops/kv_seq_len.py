@@ -21,8 +21,8 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    ref = node_spec.get("in")
-    out_name = model._require_name(node_spec.get("out"), field="kv_seq_len.out")
+    ref = node_spec.get("_args")
+    out_name = model._require_name(node_spec.get("_bind"), field="kv_seq_len._bind")
     if not isinstance(ref, str):
         raise ValueError("kv_seq_len.in must be a string")
     value = env.get(ref)
@@ -55,10 +55,10 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    ref = node_spec.get("in")
+    ref = node_spec.get("_args")
     if not isinstance(ref, str):
         raise ValueError("kv_seq_len.in must be string")
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     src = read(ref)
     lines.append(f"{indent}if {src} is None:")

@@ -17,18 +17,18 @@ def _tiny_linear_spec() -> dict[str, object]:
             "graph": [
                 {
                     "embed_tokens": {
-                        "op": "embedding",
-                        "in": "input_ids",
-                        "out": "x",
+                        "_op": "embedding",
+                        "_args": "input_ids",
+                        "_bind": "x",
                         "num_embeddings": "V",
                         "embedding_dim": "D",
                     }
                 },
                 {
                     "lm_head": {
-                        "op": "linear",
-                        "in": "x",
-                        "out": "logits",
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "logits",
                         "dim": "V",
                         "bias": False,
                         "weight": "embed_tokens.weight",
@@ -43,9 +43,9 @@ def _tiny_linear_spec() -> dict[str, object]:
 def _reshape_triplet_lowered_spec(
     *, heads: int | None = None, head_dim: int | None = None
 ) -> dict[str, object]:
-    q_node: dict[str, object] = {"op": "reshape_heads", "in": "q", "out": "qh"}
-    k_node: dict[str, object] = {"op": "reshape_heads", "in": "k", "out": "kh"}
-    v_node: dict[str, object] = {"op": "reshape_heads", "in": "v", "out": "vh"}
+    q_node: dict[str, object] = {"_op": "reshape_heads", "_args": "q", "_bind": "qh"}
+    k_node: dict[str, object] = {"_op": "reshape_heads", "_args": "k", "_bind": "kh"}
+    v_node: dict[str, object] = {"_op": "reshape_heads", "_args": "v", "_bind": "vh"}
     if heads is not None:
         q_node["heads"] = heads
         k_node["heads"] = heads
@@ -68,9 +68,9 @@ def _reshape_heads_spec(
     *, heads: int | None = None, head_dim: int | None = None
 ) -> dict[str, object]:
     node: dict[str, object] = {
-        "op": "reshape_heads",
-        "in": "x",
-        "out": "xh",
+        "_op": "reshape_heads",
+        "_args": "x",
+        "_bind": "xh",
     }
     if heads is not None:
         node["heads"] = heads
@@ -94,12 +94,12 @@ def _causal_mask_with_padding_spec() -> dict[str, object]:
             "graph": [
                 {
                     "m": {
-                        "op": "causal_mask",
-                        "in": "q",
+                        "_op": "causal_mask",
+                        "_args": "q",
                         "key": "k",
                         "padding_mask": "padding_mask",
                         "window": 8,
-                        "out": "mask",
+                        "_bind": "mask",
                     }
                 }
             ],
@@ -116,10 +116,10 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
             "graph": [
                 {
                     "p": {
-                        "op": "arange_positions",
-                        "in": "input_ids",
+                        "_op": "arange_positions",
+                        "_args": "input_ids",
                         "attention_mask": "attention_mask",
-                        "out": "pos",
+                        "_bind": "pos",
                     }
                 }
             ],
@@ -136,9 +136,9 @@ def _coalesce_spec() -> dict[str, object]:
             "graph": [
                 {
                     "n": {
-                        "op": "coalesce",
-                        "in": ["a", "b", "c", "d"],
-                        "out": ["o1", "o2"],
+                        "_op": "coalesce",
+                        "_args": ["a", "b", "c", "d"],
+                        "_bind": ["o1", "o2"],
                     }
                 }
             ],
@@ -155,9 +155,9 @@ def _moe_select_tokens_spec(*, expert: object = 1) -> dict[str, object]:
             "graph": [
                 {
                     "sel": {
-                        "op": "moe_select_tokens",
-                        "in": ["x", "scores", "idx"],
-                        "out": ["x_sel", "token_idx", "topk_pos", "sel_scores"],
+                        "_op": "moe_select_tokens",
+                        "_args": ["x", "scores", "idx"],
+                        "_bind": ["x_sel", "token_idx", "topk_pos", "sel_scores"],
                         "expert": expert,
                     }
                 }
@@ -180,9 +180,9 @@ def _moe_scatter_add_spec() -> dict[str, object]:
             "graph": [
                 {
                     "scatter": {
-                        "op": "moe_scatter_add",
-                        "in": ["m", "token_idx", "upd", "scores"],
-                        "out": "m_out",
+                        "_op": "moe_scatter_add",
+                        "_args": ["m", "token_idx", "upd", "scores"],
+                        "_bind": "m_out",
                     }
                 }
             ],
@@ -215,15 +215,15 @@ model:
     D: 4
   graph:
     - embed_tokens:
-        op: embedding
-        in: input_ids
-        out: x
+        _op: embedding
+        _args: input_ids
+        _bind: x
         num_embeddings: V
         embedding_dim: D
     - lm_head:
-        op: linear
-        in: x
-        out: logits
+        _op: linear
+        _args: x
+        _bind: logits
         dim: V
         bias: false
         weight: embed_tokens.weight
@@ -331,7 +331,7 @@ def test_runtime_coalesce_raises_for_missing_candidate() -> None:
     assert isinstance(graph, list)
     node = graph[0]["n"]
     assert isinstance(node, dict)
-    node["in"] = ["a", "b", "missing", "d"]
+    node["_args"] = ["a", "b", "missing", "d"]
     model = SynapseProgramModel.from_spec(spec)
     with pytest.raises(ValueError, match="coalesce candidate 'missing' missing in env"):
         model(a=None, b=torch.tensor(2), c=None, d=None)
@@ -515,7 +515,7 @@ def test_runtime_linear_handles_empty_batch_without_kernel_work() -> None:
         "synapse": 1,
         "model": {
             "inputs": {"x": {}},
-            "graph": [{"n": {"op": "linear", "in": "x", "out": "y", "bias": False}}],
+            "graph": [{"n": {"_op": "linear", "_args": "x", "_bind": "y", "bias": False}}],
             "outputs": {"y": "y"},
         },
     }

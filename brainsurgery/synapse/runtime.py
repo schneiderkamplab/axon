@@ -239,7 +239,7 @@ class SynapseProgramModel(nn.Module):
                 if not self._check_when(when_expr, env, symbols):
                     continue
 
-            op = node_spec.get("op")
+            op = node_spec.get("_op")
             if op == "repeat":
                 range_value = self._eval_expr(node_spec.get("range"), env, symbols)
                 start_value = self._eval_expr(node_spec.get("start", 0), env, symbols)
@@ -258,8 +258,8 @@ class SynapseProgramModel(nn.Module):
                 env.pop(var_name, None)
                 continue
 
-            if "use" in node_spec:
-                self._run_block_use(node_spec, env, scope=scope, symbols=symbols, blocks=blocks)
+            if op == "call":
+                self._run_block_call(node_spec, env, scope=scope, symbols=symbols, blocks=blocks)
                 continue
 
             if "graph" in node_spec and op is None:
@@ -283,7 +283,7 @@ class SynapseProgramModel(nn.Module):
                 op, exec_node_spec, env, node_path=node_path, scope=scope, symbols=symbols
             )
 
-    def _run_block_use(
+    def _run_block_call(
         self,
         node_spec: dict[str, Any],
         env: dict[str, Any],
@@ -292,41 +292,74 @@ class SynapseProgramModel(nn.Module):
         symbols: dict[str, int | float | bool],
         blocks: dict[str, Any],
     ) -> None:
-        block_name = node_spec.get("use")
+        block_name = node_spec.get("_target")
         if not isinstance(block_name, str):
-            raise ValueError("use must be a string block name")
+            raise ValueError("call requires string _target block name")
         block_spec = blocks.get(block_name)
         if not isinstance(block_spec, dict):
             raise ValueError(f"Unknown block {block_name!r}")
 
         block_env = dict(env)
-        in_bindings = node_spec.get("in", {})
-        if not isinstance(in_bindings, dict):
-            raise ValueError("block use 'in' must be mapping")
-        for block_input_name, src_name in in_bindings.items():
+        block_inputs = block_spec.get("inputs", {})
+        if not isinstance(block_inputs, dict):
+            raise ValueError("block spec must include mapping inputs")
+        input_names = list(block_inputs.keys())
+        raw_args = node_spec.get("_args")
+        positional: list[Any]
+        if raw_args is None:
+            positional = []
+        elif isinstance(raw_args, list):
+            positional = list(raw_args)
+        else:
+            positional = [raw_args]
+        for idx, src_name in enumerate(positional):
+            if idx >= len(input_names):
+                raise ValueError(f"too many positional args for call {block_name!r}")
+            block_input_name = input_names[idx]
             if isinstance(src_name, str) and src_name in env:
                 block_env[block_input_name] = env[src_name]
             else:
                 block_env[block_input_name] = self._eval_expr(src_name, env, symbols)
+
+        for key, value in node_spec.items():
+            if key.startswith("_") or key in {"when", "graph"}:
+                continue
+            if key not in block_inputs:
+                continue
+            if isinstance(value, str) and value in env:
+                block_env[key] = env[value]
+            else:
+                block_env[key] = self._eval_expr(value, env, symbols)
 
         block_graph = block_spec.get("graph")
         if not isinstance(block_graph, list):
             raise ValueError("block spec must include list graph")
         self._run_graph(block_graph, block_env, scope=scope, symbols=symbols, blocks=blocks)
 
-        out_bindings = node_spec.get("out", {})
-        if not isinstance(out_bindings, dict):
-            raise ValueError("block use 'out' must be mapping")
-        for block_out_name, dst_name in out_bindings.items():
-            env[dst_name] = block_env.get(block_out_name)
+        block_outputs = block_spec.get("outputs", {})
+        if not isinstance(block_outputs, dict):
+            raise ValueError("block spec must include mapping outputs")
+        output_names = list(block_outputs.keys())
+        raw_bind = node_spec.get("_bind")
+        if raw_bind is None:
+            raise ValueError("call requires _bind")
+        binds = raw_bind if isinstance(raw_bind, list) else [raw_bind]
+        if len(binds) != len(output_names):
+            raise ValueError(
+                f"call {block_name!r} bind arity mismatch: expected {len(output_names)}, got {len(binds)}"
+            )
+        for out_name, dst_name in zip(output_names, binds, strict=True):
+            env[str(dst_name)] = block_env.get(out_name)
 
     def _node_output_names(self, node_spec: dict[str, Any]) -> list[str]:
-        if "use" in node_spec:
-            out_bindings = node_spec.get("out")
-            if isinstance(out_bindings, dict):
-                return [str(v) for v in out_bindings.values()]
+        if node_spec.get("_op") == "call":
+            bind_value = node_spec.get("_bind")
+            if isinstance(bind_value, str):
+                return [bind_value]
+            if isinstance(bind_value, list):
+                return [str(v) for v in bind_value]
             return []
-        out_value = node_spec.get("out")
+        out_value = node_spec.get("_bind")
         if isinstance(out_value, str):
             return [out_value]
         if isinstance(out_value, list):

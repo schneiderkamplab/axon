@@ -19,7 +19,7 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    out_name = model._require_name(node_spec.get("out"), field="init_list.out")
+    out_name = model._require_name(node_spec.get("_bind"), field="init_list._bind")
     env[out_name] = []
     return
 
@@ -44,7 +44,7 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}{out_var} = []")
     return lines

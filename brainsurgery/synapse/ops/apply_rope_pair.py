@@ -21,8 +21,8 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    ins = node_spec.get("in")
-    outs = node_spec.get("out")
+    ins = node_spec.get("_args")
+    outs = node_spec.get("_bind")
     if not isinstance(ins, list) or len(ins) != 2 or not isinstance(outs, list) or len(outs) != 2:
         raise ValueError("apply_rope_pair expects in=[q,k], out=[q_rot,k_rot]")
     q = env[ins[0]]
@@ -80,8 +80,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    ins = node_spec.get("in")
-    outs = node_spec.get("out")
+    ins = node_spec.get("_args")
+    outs = node_spec.get("_bind")
     if not isinstance(ins, list) or len(ins) != 2 or not isinstance(outs, list) or len(outs) != 2:
         raise ValueError("apply_rope_pair expects in=[q,k], out=[q_rot,k_rot]")
     q = read(str(ins[0]))

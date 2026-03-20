@@ -85,8 +85,8 @@ def _resolve_value(value: Any, symbols: dict[str, Any]) -> Any:
 
 
 def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = None) -> str:
-    op = str(node_spec.get("op"))
-    in_value = node_spec.get("in")
+    op = str(node_spec.get("_op"))
+    in_value = node_spec.get("_args")
     in_args: list[str]
     if isinstance(in_value, list):
         in_args = [str(item) for item in in_value]
@@ -97,7 +97,7 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
 
     kwargs: list[str] = []
     for key, value in node_spec.items():
-        if key in {"op", "in", "out", "params"}:
+        if key in {"_op", "_args", "_bind", "_target", "params"}:
             continue
         kwargs.append(f"{key}={_format_scalar(value)}")
 
@@ -139,14 +139,14 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
 
 
 def _can_render_as_bind(node_spec: dict[str, Any]) -> bool:
-    if "use" in node_spec:
+    if node_spec.get("_op") == "call":
         return False
-    if "graph" in node_spec and "op" not in node_spec:
+    if "graph" in node_spec and "_op" not in node_spec:
         return False
-    out_ref = node_spec.get("out")
+    out_ref = node_spec.get("_bind")
     if not isinstance(out_ref, (str, list)):
         return False
-    return isinstance(node_spec.get("op"), str)
+    return isinstance(node_spec.get("_op"), str)
 
 
 def _render_module(
@@ -184,7 +184,7 @@ def _render_module(
             node_spec = _resolve_value(node_spec, symbols)
 
             node_path = f"{scope}.{node_name}" if scope else str(node_name)
-            if node_spec.get("op") == "repeat":
+            if node_spec.get("_op") == "repeat":
                 var = str(node_spec.get("var"))
                 range_expr = _format_scalar(node_spec.get("range"))
                 start_expr = _format_scalar(node_spec.get("start", 0))
@@ -198,23 +198,33 @@ def _render_module(
                     render_graph(body, scope=node_path, indent=indent + "  ")
                     continue
 
-            if isinstance(node_spec.get("use"), str):
-                callee = str(node_spec["use"])
-                in_map = node_spec.get("in", {})
-                out_map = node_spec.get("out", {})
-                if not isinstance(in_map, dict) or not isinstance(out_map, dict):
-                    raise ValueError(f"invalid use-node maps: {node_spec!r}")
-                in_order = list(in_map.keys())
-                out_order = list(out_map.keys())
-                if callee in signatures:
-                    in_order = [name for name in signatures[callee][0] if name in in_map]
-                    out_order = [name for name in signatures[callee][1] if name in out_map]
-                lhs = ", ".join(str(out_map[name]) for name in out_order)
-                args = ", ".join(str(in_map[name]) for name in in_order)
+            if node_spec.get("_op") == "call":
+                callee = str(node_spec.get("_target"))
+                raw_args = node_spec.get("_args")
+                bind = node_spec.get("_bind")
+                args_values = (
+                    raw_args
+                    if isinstance(raw_args, list)
+                    else ([raw_args] if raw_args is not None else [])
+                )
+                if isinstance(bind, list):
+                    out_values = [str(v) for v in bind]
+                elif isinstance(bind, str):
+                    out_values = [bind]
+                else:
+                    raise ValueError(f"invalid call bind: {node_spec!r}")
+                kwargs_parts: list[str] = []
+                for key, value in node_spec.items():
+                    if key.startswith("_") or key in {"when", "graph"}:
+                        continue
+                    kwargs_parts.append(f"{key}={value}")
+                args_parts = [str(v) for v in args_values] + kwargs_parts
+                lhs = ", ".join(out_values)
+                args = ", ".join(args_parts)
                 lines.append(f"{indent}{lhs} <- {callee}({args})")
                 continue
 
-            if "graph" in node_spec and "op" not in node_spec:
+            if "graph" in node_spec and "_op" not in node_spec:
                 nested = node_spec.get("graph")
                 if not isinstance(nested, list):
                     raise ValueError(f"invalid nested graph node: {node_spec!r}")
@@ -222,7 +232,7 @@ def _render_module(
                 continue
 
             if _can_render_as_bind(node_spec):
-                out_ref = node_spec.get("out")
+                out_ref = node_spec.get("_bind")
                 lhs = (
                     ", ".join(str(name) for name in out_ref)
                     if isinstance(out_ref, list)

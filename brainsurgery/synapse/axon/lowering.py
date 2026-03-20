@@ -281,9 +281,9 @@ def _to_synapse_op(
         if len(args) != 1:
             raise ValueError(f"{callee} activation expects exactly one positional argument")
         activation_op: dict[str, Any] = {
-            "op": "activation",
-            "in": args[0],
-            "out": out,
+            "_op": "activation",
+            "_args": args[0],
+            "_bind": out,
             "kind": callee,
         }
         for key, value in kwargs.items():
@@ -296,9 +296,9 @@ def _to_synapse_op(
         if len(args) != 1:
             raise ValueError("_act_* primitive requires exactly one positional argument")
         primitive_act: dict[str, Any] = {
-            "op": "activation",
-            "in": args[0],
-            "out": out,
+            "_op": "activation",
+            "_args": args[0],
+            "_bind": out,
             "kind": kind,
         }
         for key, value in kwargs.items():
@@ -328,20 +328,20 @@ def _to_synapse_op(
         return _to_synapse_op(primitive, args, kwargs, out)
 
     if callee == "split":
-        split_op: dict[str, Any] = {"op": "split", "out": out}
+        split_op: dict[str, Any] = {"_op": "split", "_bind": out}
         if args:
-            split_op["in"] = args[0] if len(args) == 1 else args
+            split_op["_args"] = args[0] if len(args) == 1 else args
         for key, value in kwargs.items():
             split_op[key] = value
         return split_op
 
     if "@" in callee:
         op_name, _ = callee.split("@", 1)
-        at_op: dict[str, Any] = {"op": op_name, "out": out}
+        at_op: dict[str, Any] = {"_op": op_name, "_bind": out}
         if op_name == "embed":
-            at_op["op"] = "embedding"
+            at_op["_op"] = "embedding"
         if args:
-            at_op["in"] = args[0] if len(args) == 1 else args
+            at_op["_args"] = args[0] if len(args) == 1 else args
         for key, value in kwargs.items():
             at_op[key] = value
         return at_op
@@ -349,17 +349,17 @@ def _to_synapse_op(
     if "::" in callee:
         ns, name = callee.split("::", 1)
         if ns == "act":
-            return {"op": "activation", "in": args[0], "out": out, "kind": name}
+            return {"_op": "activation", "_args": args[0], "_bind": out, "kind": name}
         if ns == "cache" and name == "update":
-            return {"op": "kv_cache_update", "in": args, "out": out}
+            return {"_op": "kv_cache_update", "_args": args, "_bind": out}
         if ns == "cache" and name == "seq_len":
-            return {"op": "kv_seq_len", "in": args[0], "out": out}
+            return {"_op": "kv_seq_len", "_args": args[0], "_bind": out}
         if ns == "cache" and name == "coalesce":
-            return {"op": "coalesce", "in": args, "out": out}
+            return {"_op": "coalesce", "_args": args, "_bind": out}
 
-    default_op: dict[str, Any] = {"op": callee, "out": out}
+    default_op: dict[str, Any] = {"_op": callee, "_bind": out}
     if args:
-        default_op["in"] = args[0] if len(args) == 1 else args
+        default_op["_args"] = args[0] if len(args) == 1 else args
     for key, value in kwargs.items():
         default_op[key] = value
     return default_op
@@ -1108,17 +1108,32 @@ def _lower_simple_call(
                     f"shape mismatch in call {callee!r} for param {param_name!r}: "
                     f"expected {expected_shape} from signature, got {arg_shape} from argument {token!r}"
                 )
-        in_map = {name: provided[name] for name in input_names if name in provided}
-
         out_values = [out] if isinstance(out, str) else list(out)
         if len(out_values) != len(output_names):
             raise ValueError(
                 f"block call {callee!r} expects {len(output_names)} outputs, got {len(out_values)}"
             )
-        out_map = {name: out_values[idx] for idx, name in enumerate(output_names)}
-
-        node_name = f"n_{ctx.fresh('use')}"
-        node_spec: dict[str, Any] = {"use": block_name, "in": in_map, "out": out_map}
+        positional_args: list[str] = []
+        extra_kwargs: dict[str, str] = {}
+        for input_name in input_names:
+            if input_name not in provided:
+                continue
+            value = provided[input_name]
+            if input_name in kwargs or input_name in path_bindings:
+                extra_kwargs[input_name] = value
+            elif len(positional_args) < len(args):
+                positional_args.append(value)
+            else:
+                extra_kwargs[input_name] = value
+        node_name = f"n_{ctx.fresh('call')}"
+        node_spec: dict[str, Any] = {"_op": "call", "_target": block_name}
+        if positional_args:
+            node_spec["_args"] = (
+                positional_args[0] if len(positional_args) == 1 else positional_args
+            )
+        node_spec["_bind"] = out_values[0] if len(out_values) == 1 else out_values
+        for key, value in extra_kwargs.items():
+            node_spec[key] = value
         nodes = _with_when([{node_name: node_spec}], effective_when)
         _record_last_dim_for_call(callee=block_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
         return [*pre_graph, *nodes]
@@ -1161,11 +1176,11 @@ def _lower_alias_or_const(
         and scalar == token
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
     ):
-        node = {"op": "_ir_alias", "in": token, "out": out}
+        node = {"_op": "_ir_alias", "_args": token, "_bind": out}
         if token in ctx.tensor_last_dim:
             ctx.tensor_last_dim[out] = ctx.tensor_last_dim[token]
     else:
-        node = {"op": "_ir_const", "value": scalar, "out": out}
+        node = {"_op": "_ir_const", "value": scalar, "_bind": out}
     return _with_when([{node_name: node}], when)
 
 
@@ -1923,7 +1938,7 @@ def _lower_statements(
                     repeat_name = f"{scope_prefix}.{repeat_name}"
             repeat_item: dict[str, Any] = {
                 repeat_name.split(".")[-1]: {
-                    "op": "repeat",
+                    "_op": "repeat",
                     "var": stmt.var,
                     "range": stmt.range_expr,
                     "body": body_graph,

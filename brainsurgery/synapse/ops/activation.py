@@ -22,9 +22,9 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("in"), env)
+    x = model._read_tensor_input(node_spec.get("_args"), env)
     kind = node_spec.get("kind", "gelu")
-    out = model._require_name(node_spec.get("out"), field="activation.out")
+    out = model._require_name(node_spec.get("_bind"), field="activation._bind")
     if kind == "gelu_new" or kind == "gelu_pytorch_tanh":
         env[out] = 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
     elif kind == "gelu":
@@ -60,8 +60,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     kind = node_spec.get("kind", "gelu")
     out_var = assign_out_var(out_name)
     if kind in {"gelu_new", "gelu_pytorch_tanh"}:

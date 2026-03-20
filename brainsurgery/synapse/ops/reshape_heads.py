@@ -19,7 +19,7 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    src = model._read_tensor_input(node_spec.get("in"), env)
+    src = model._read_tensor_input(node_spec.get("_args"), env)
     hidden = int(src.shape[-1])
     raw_heads = node_spec.get("heads")
     raw_head_dim = node_spec.get("head_dim")
@@ -42,7 +42,7 @@ def interpret(
     if hidden != heads * head_dim:
         raise ValueError("reshape_heads heads*head_dim must equal input width")
     bsz, seq_len, _ = src.shape
-    out = model._require_name(node_spec.get("out"), field="reshape_heads.out")
+    out = model._require_name(node_spec.get("_bind"), field="reshape_heads._bind")
     env[out] = src.view(bsz, seq_len, heads, head_dim).transpose(1, 2)
     return
 
@@ -67,8 +67,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     raw_heads = node_spec.get("heads")
     raw_head_dim = node_spec.get("head_dim")
     if raw_heads is None and raw_head_dim is None:

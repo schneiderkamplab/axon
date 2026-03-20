@@ -15,10 +15,10 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def _resolve_inputs_and_output(
     node_spec: dict[str, Any], *, strict_out: bool
 ) -> tuple[list[str], str]:
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 4 or not all(isinstance(name, str) for name in ins):
         raise ValueError("moe_scatter_add expects in=[accum,token_idx,updates,scores]")
-    out_raw = node_spec.get("out")
+    out_raw = node_spec.get("_bind")
     if not isinstance(out_raw, str):
         if strict_out:
             raise ValueError("moe_scatter_add.out must be a variable name")

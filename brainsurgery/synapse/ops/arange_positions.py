@@ -21,12 +21,12 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("in"), env)
+    x = model._read_tensor_input(node_spec.get("_args"), env)
     seq_len = x.shape[1]
     mask_ref = node_spec.get("attention_mask")
     mask_tensor = env.get(mask_ref) if isinstance(mask_ref, str) else None
     past = env.get("past_key_values")
-    out = model._require_name(node_spec.get("out"), field="arange_positions.out")
+    out = model._require_name(node_spec.get("_bind"), field="arange_positions._bind")
     if mask_tensor is not None:
         if not torch.is_tensor(mask_tensor):
             raise ValueError("arange_positions.attention_mask must resolve to tensor or null")
@@ -71,11 +71,11 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
+    src = read(str(node_spec.get("_args")))
     mask_name = node_spec.get("attention_mask")
     mask = env.get(mask_name) if isinstance(mask_name, str) and mask_name in env else None
     past_var = env.get("past_key_values")
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     if isinstance(mask, str):
         full_pos = emitter._fresh("full_pos")

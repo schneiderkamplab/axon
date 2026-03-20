@@ -21,8 +21,8 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("in"), env)
-    outs = node_spec.get("out")
+    x = model._read_tensor_input(node_spec.get("_args"), env)
+    outs = node_spec.get("_bind")
     if not isinstance(outs, list) or len(outs) != 2:
         raise ValueError("topk expects out=[values,indices]")
     k = int(model._eval_expr(node_spec.get("k"), env, symbols))
@@ -55,8 +55,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    outs = node_spec.get("out")
+    src = read(str(node_spec.get("_args")))
+    outs = node_spec.get("_bind")
     if not isinstance(outs, list) or len(outs) != 2:
         raise ValueError("topk expects out=[values,indices]")
     values_var = assign_out_var(str(outs[0]))

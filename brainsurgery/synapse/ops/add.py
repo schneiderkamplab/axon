@@ -19,10 +19,10 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    inputs = node_spec.get("in")
+    inputs = node_spec.get("_args")
     if not isinstance(inputs, list) or len(inputs) != 2:
         raise ValueError("add expects two inputs")
-    out = model._require_name(node_spec.get("out"), field="add.out")
+    out = model._require_name(node_spec.get("_bind"), field="add._bind")
     env[out] = env[inputs[0]] + env[inputs[1]]
     return
 
@@ -47,12 +47,12 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    inputs = node_spec.get("in")
+    inputs = node_spec.get("_args")
     if not isinstance(inputs, list) or len(inputs) != 2:
         raise ValueError("add expects two inputs")
     a = read(str(inputs[0]))
     b = read(str(inputs[1]))
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}{out_var} = {a} + {b}")
     return lines

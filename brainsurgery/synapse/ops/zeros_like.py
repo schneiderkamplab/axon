@@ -21,8 +21,8 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("in"), env)
-    out = model._require_name(node_spec.get("out"), field="zeros_like.out")
+    x = model._read_tensor_input(node_spec.get("_args"), env)
+    out = model._require_name(node_spec.get("_bind"), field="zeros_like._bind")
     env[out] = torch.zeros_like(x)
     return
 
@@ -47,8 +47,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}{out_var} = torch.zeros_like({src})")
     return lines

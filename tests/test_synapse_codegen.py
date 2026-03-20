@@ -174,7 +174,7 @@ def test_index_on_none_collection_is_none_safe() -> None:
         "model": {
             "symbols": {},
             "inputs": {"collection": {"shape": [], "optional": True}},
-            "graph": [{"at0": {"op": "index", "in": ["collection", 0], "out": "x0"}}],
+            "graph": [{"at0": {"_op": "index", "_args": ["collection", 0], "_bind": "x0"}}],
             "outputs": {"x0": "x0"},
         },
     }
@@ -195,24 +195,26 @@ def test_emit_repeat_block_single_output_loop_carry() -> None:
             "blocks": {
                 "step": {
                     "inputs": {"x": {"shape": []}, "one": {"shape": []}},
-                    "graph": [{"inc": {"op": "add", "in": ["x", "one"], "out": "y"}}],
+                    "graph": [{"inc": {"_op": "add", "_args": ["x", "one"], "_bind": "y"}}],
                     "outputs": {"y": "y"},
                 }
             },
             "graph": [
-                {"init": {"op": "add", "in": ["zero", "zero"], "out": "x"}},
-                {"one_make": {"op": "add", "in": ["zero", "one_seed"], "out": "one"}},
+                {"init": {"_op": "add", "_args": ["zero", "zero"], "_bind": "x"}},
+                {"one_make": {"_op": "add", "_args": ["zero", "one_seed"], "_bind": "one"}},
                 {
                     "loop": {
-                        "op": "repeat",
+                        "_op": "repeat",
                         "var": "i",
                         "range": "L",
                         "body": [
                             {
                                 "blk": {
-                                    "use": "step",
-                                    "in": {"x": "x", "one": "one"},
-                                    "out": {"y": "x"},
+                                    "_op": "call",
+                                    "_target": "step",
+                                    "_args": "x",
+                                    "one": "one",
+                                    "_bind": "x",
                                 }
                             }
                         ],
@@ -237,7 +239,7 @@ def test_generated_linear_handles_empty_batch() -> None:
         "model": {
             "symbols": {},
             "inputs": {"x": {}},
-            "graph": [{"n": {"op": "linear", "in": "x", "out": "y", "bias": False}}],
+            "graph": [{"n": {"_op": "linear", "_args": "x", "_bind": "y", "bias": False}}],
             "outputs": {"y": "y"},
         },
     }

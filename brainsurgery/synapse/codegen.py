@@ -55,6 +55,7 @@ class _Emitter:
         self.class_name = class_name
         self.spec = spec
         self.model = spec["model"]
+        self.blocks = self.model.get("blocks", {})
         self.symbols = symbols
         self._counter = 0
         self._active_env: dict[str, str] = {}
@@ -315,7 +316,7 @@ class _Emitter:
                 lines.append(f"{indent}if {cond}:")
                 inner_indent = indent + "    "
 
-            op = node_spec.get("op")
+            op = node_spec.get("_op")
             if op == "repeat":
                 var_name = node_spec.get("var")
                 if not isinstance(var_name, str):
@@ -350,7 +351,7 @@ class _Emitter:
                     env[var_name] = saved
                 continue
 
-            if "use" in node_spec:
+            if op == "call":
                 lines.extend(
                     self._compile_block_call(
                         node_spec=node_spec, env=env, scope_var=scope_var, indent=inner_indent
@@ -401,12 +402,14 @@ class _Emitter:
         return bool(op_module.uses_node_path(self, node_spec))
 
     def _node_output_names(self, node_spec: dict[str, Any]) -> list[str]:
-        if "use" in node_spec:
-            out_bindings = node_spec.get("out")
-            if isinstance(out_bindings, dict):
-                return [str(v) for v in out_bindings.values()]
+        if node_spec.get("_op") == "call":
+            bind_value = node_spec.get("_bind")
+            if isinstance(bind_value, str):
+                return [bind_value]
+            if isinstance(bind_value, list):
+                return [str(v) for v in bind_value]
             return []
-        out_value = node_spec.get("out")
+        out_value = node_spec.get("_bind")
         if isinstance(out_value, str):
             return [out_value]
         if isinstance(out_value, list):
@@ -416,26 +419,56 @@ class _Emitter:
     def _compile_block_call(
         self, *, node_spec: dict[str, Any], env: dict[str, str], scope_var: str, indent: str
     ) -> list[str]:
-        block_name = node_spec.get("use")
+        block_name = node_spec.get("_target")
         if not isinstance(block_name, str):
-            raise ValueError("use must be a string block name")
-
-        in_bindings = node_spec.get("in", {})
-        if not isinstance(in_bindings, dict):
-            raise ValueError("block use in must be mapping")
+            raise ValueError("call must provide string _target block name")
+        block_spec = self.blocks.get(block_name)
+        if not isinstance(block_spec, dict):
+            raise ValueError(f"Unknown block {block_name!r}")
+        block_inputs = block_spec.get("inputs", {})
+        if not isinstance(block_inputs, dict):
+            raise ValueError("block must define mapping inputs")
+        input_names = list(block_inputs.keys())
+        raw_args = node_spec.get("_args")
+        positional: list[Any]
+        if raw_args is None:
+            positional = []
+        elif isinstance(raw_args, list):
+            positional = list(raw_args)
+        else:
+            positional = [raw_args]
         arg_codes: list[str] = []
-        for block_input_name, src in in_bindings.items():
+        for idx, src in enumerate(positional):
+            if idx >= len(input_names):
+                raise ValueError(f"too many positional args for call {block_name!r}")
+            block_input_name = input_names[idx]
             if isinstance(src, str) and src in env:
                 arg_codes.append(f"{block_input_name}={env[src]}")
             else:
                 arg_codes.append(f"{block_input_name}={self._expr_code(src, env)}")
+        for key, value in node_spec.items():
+            if key.startswith("_") or key in {"when", "graph"}:
+                continue
+            if key not in block_inputs:
+                continue
+            if isinstance(value, str) and value in env:
+                arg_codes.append(f"{key}={env[value]}")
+            else:
+                arg_codes.append(f"{key}={self._expr_code(value, env)}")
 
-        out_bindings = node_spec.get("out", {})
-        if not isinstance(out_bindings, dict):
-            raise ValueError("block use out must be mapping")
+        block_outputs = block_spec.get("outputs", {})
+        if not isinstance(block_outputs, dict):
+            raise ValueError("block must define mapping outputs")
+        output_names = list(block_outputs.keys())
+        raw_bind = node_spec.get("_bind")
+        binds = raw_bind if isinstance(raw_bind, list) else [raw_bind]
+        if raw_bind is None or len(binds) != len(output_names):
+            raise ValueError(
+                f"call {block_name!r} bind arity mismatch: expected {len(output_names)}, got {len(binds)}"
+            )
 
         tmp_vars: list[str] = []
-        for block_out_name in out_bindings:
+        for block_out_name in output_names:
             var = self._fresh(self._py_name(block_out_name))
             tmp_vars.append(var)
 
@@ -448,7 +481,7 @@ class _Emitter:
             call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
         lines = [call_line]
-        for (block_out_name, dst_name), tmp in zip(out_bindings.items(), tmp_vars, strict=True):
+        for dst_name, tmp in zip(binds, tmp_vars, strict=True):
             existing = env.get(dst_name)
             dst_var = (
                 existing if isinstance(existing, str) else self._fresh(self._py_name(dst_name))
@@ -606,9 +639,7 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
     if not isinstance(ops, dict):
         raise ValueError("op map must contain mapping key 'ops'")
 
-    known_control_ops = {
-        "repeat",
-    }
+    known_control_ops = {"repeat", "call"}
     known_runtime_builtin_ops = set(OP_MODULES.keys())
 
     def _walk_graph(graph: list[Any]) -> None:
@@ -619,7 +650,7 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
             if not isinstance(node_spec, dict):
                 raise ValueError(f"Invalid node spec: {node_spec!r}")
 
-            op = node_spec.get("op")
+            op = node_spec.get("_op")
             if isinstance(op, str):
                 if (
                     op not in known_control_ops

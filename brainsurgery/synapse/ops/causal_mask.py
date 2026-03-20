@@ -21,14 +21,14 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    q = model._read_tensor_input(node_spec.get("in"), env)
+    q = model._read_tensor_input(node_spec.get("_args"), env)
     key_ref = node_spec.get("key")
     key_tensor = model._read_tensor_input(key_ref, env) if isinstance(key_ref, str) else q
     padding_ref = node_spec.get("padding_mask")
     padding_mask = env.get(padding_ref) if isinstance(padding_ref, str) else None
     if padding_mask is not None and not torch.is_tensor(padding_mask):
         raise ValueError("causal_mask.padding_mask must resolve to tensor or null")
-    out_name = model._require_name(node_spec.get("out"), field="causal_mask.out")
+    out_name = model._require_name(node_spec.get("_bind"), field="causal_mask._bind")
     window_expr = node_spec.get("window")
     if window_expr is None and padding_mask is None:
         env[out_name] = None
@@ -122,10 +122,10 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    q = read(str(node_spec.get("in")))
+    q = read(str(node_spec.get("_args")))
     k_name = node_spec.get("key")
     k = read(str(k_name)) if isinstance(k_name, str) else q
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     q_len = emitter._fresh("q_len")
     k_len = emitter._fresh("k_len")

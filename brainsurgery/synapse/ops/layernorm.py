@@ -31,11 +31,11 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     _validate_layernorm_keys(node_spec)
-    x = model._read_tensor_input(node_spec.get("in"), env)
+    x = model._read_tensor_input(node_spec.get("_args"), env)
     weight = model._state[model._join(node_path, "weight")]
     bias = model._state[model._join(node_path, "bias")]
     eps_value = model._eval_expr(node_spec.get("eps", 1e-5), env, symbols)
-    out = model._require_name(node_spec.get("out"), field="layernorm.out")
+    out = model._require_name(node_spec.get("_bind"), field="layernorm._bind")
     env[out] = F.layer_norm(x, (x.shape[-1],), weight=weight, bias=bias, eps=float(eps_value))
     return
 
@@ -58,8 +58,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     eps = emitter._expr_code(node_spec.get("eps", 1e-5), env)
     w = f"emitter._param(self._join_scope({node_path_var}, 'weight'))"

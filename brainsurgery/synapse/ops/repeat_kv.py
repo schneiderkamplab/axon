@@ -19,7 +19,7 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    src = model._read_tensor_input(node_spec.get("in"), env)
+    src = model._read_tensor_input(node_spec.get("_args"), env)
     repeats = node_spec.get("repeats")
     if repeats is None:
         heads = int(model._eval_expr(node_spec.get("heads"), env, symbols))
@@ -27,7 +27,7 @@ def interpret(
         n_rep = heads // kv_heads
     else:
         n_rep = int(model._eval_expr(repeats, env, symbols))
-    out = model._require_name(node_spec.get("out"), field="repeat_kv.out")
+    out = model._require_name(node_spec.get("_bind"), field="repeat_kv._bind")
     if n_rep == 1:
         env[out] = src
     else:
@@ -57,8 +57,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     repeats = node_spec.get("repeats")
     if repeats is None:

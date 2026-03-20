@@ -13,8 +13,8 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 
 
 def _resolve_inputs_and_outputs(node_spec: dict[str, Any]) -> tuple[list[str], list[str]]:
-    ins = node_spec.get("in")
-    outs = node_spec.get("out")
+    ins = node_spec.get("_args")
+    outs = node_spec.get("_bind")
     if not isinstance(ins, list) or len(ins) != 3 or not all(isinstance(name, str) for name in ins):
         raise ValueError(
             "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "

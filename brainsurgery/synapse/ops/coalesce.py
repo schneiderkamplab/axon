@@ -11,14 +11,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 
 
 def _resolve_outputs(node_spec: dict[str, Any]) -> list[str]:
-    outs = node_spec.get("out")
+    outs = node_spec.get("_bind")
     if not isinstance(outs, list) or len(outs) == 0:
         raise ValueError("coalesce requires non-empty list out")
     return [str(name) for name in outs]
 
 
 def _resolve_groups(node_spec: dict[str, Any], out_count: int) -> list[list[str]]:
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if isinstance(ins, list) and all(isinstance(x, str) for x in ins):
         values = [str(x) for x in ins]
         if len(values) % out_count != 0:

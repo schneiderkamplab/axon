@@ -19,10 +19,10 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("in"), env)
+    x = model._read_tensor_input(node_spec.get("_args"), env)
     bsz, heads, seq_len, head_dim = x.shape
     merged = x.transpose(1, 2).contiguous().view(bsz, seq_len, heads * head_dim)
-    out = model._require_name(node_spec.get("out"), field="merge_heads.out")
+    out = model._require_name(node_spec.get("_bind"), field="merge_heads._bind")
     env[out] = merged
     return
 
@@ -47,8 +47,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(
         f"{indent}{out_var} = {src}.transpose(1, 2).contiguous().view({src}.shape[0], {src}.shape[2], {src}.shape[1] * {src}.shape[3])"

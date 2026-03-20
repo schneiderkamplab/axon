@@ -21,7 +21,7 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 3:
         raise ValueError("attention expects [q, k, v]")
     q = env[ins[0]]
@@ -43,7 +43,7 @@ def interpret(
         is_causal=is_causal_flag,
         scale=scale_value,
     )
-    out_name = model._require_name(node_spec.get("out"), field="attention.out")
+    out_name = model._require_name(node_spec.get("_bind"), field="attention._bind")
     env[out_name] = attn_out
     return
 
@@ -68,13 +68,13 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 3:
         raise ValueError("attention expects 3 inputs")
     q = read(str(ins[0]))
     k = read(str(ins[1]))
     v = read(str(ins[2]))
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     mask_name = node_spec.get("mask")
     mask_expr = "None"

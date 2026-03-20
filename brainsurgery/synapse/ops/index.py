@@ -19,11 +19,11 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("index expects [collection, index]")
     collection = env.get(ins[0])
-    out_name = model._require_name(node_spec.get("out"), field="index.out")
+    out_name = model._require_name(node_spec.get("_bind"), field="index._bind")
     if collection is None:
         env[out_name] = None
         return
@@ -56,12 +56,12 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("index expects [collection,index]")
     coll = read(str(ins[0]))
     idx_expr = emitter._expr_code(ins[1], env)
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}{out_var} = None if {coll} is None else {coll}[int({idx_expr})]")
     return lines

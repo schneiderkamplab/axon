@@ -21,10 +21,10 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("in"), env)
+    x = model._read_tensor_input(node_spec.get("_args"), env)
     weight_path = model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
     weight = model._state[weight_path]
-    out = model._require_name(node_spec.get("out"), field="embedding.out")
+    out = model._require_name(node_spec.get("_bind"), field="embedding._bind")
     y = F.embedding(x, weight)
     if node_spec.get("scale") is not None:
         scale = float(model._eval_expr(node_spec.get("scale"), env, symbols))
@@ -53,8 +53,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     scale_expr = node_spec.get("scale")
     if scale_expr is None:

@@ -20,8 +20,8 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope, symbols
-    source = model._require_name(node_spec.get("in"), field="_ir_alias.in")
-    out_name = model._require_name(node_spec.get("out"), field="_ir_alias.out")
+    source = model._require_name(node_spec.get("_args"), field="_ir_alias._args")
+    out_name = model._require_name(node_spec.get("_bind"), field="_ir_alias._bind")
     env[out_name] = env[source]
     return
 
@@ -36,8 +36,8 @@ def compile(
     indent: str,
 ) -> list[str]:
     del node_path_var, scope_var
-    source = str(node_spec.get("in"))
-    out_name = str(node_spec.get("out"))
+    source = str(node_spec.get("_args"))
+    out_name = str(node_spec.get("_bind"))
     source_expr = emitter._read_env_var(env, source)
     out_var = emitter._assign_out_var(env, out_name)
     return [f"{indent}{out_var} = {source_expr}"]

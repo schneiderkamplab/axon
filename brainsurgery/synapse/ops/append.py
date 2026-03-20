@@ -19,12 +19,12 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("append expects [list_name, item_name]")
     base_list = list(env[ins[0]])
     base_list.append(env[ins[1]])
-    out_name = model._require_name(node_spec.get("out"), field="append.out")
+    out_name = model._require_name(node_spec.get("_bind"), field="append._bind")
     env[out_name] = base_list
     return
 
@@ -49,12 +49,12 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    ins = node_spec.get("in")
+    ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("append expects [list,item]")
     base = read(str(ins[0]))
     item = read(str(ins[1]))
-    out_name = str(node_spec.get("out"))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}{out_var} = list({base})")
     lines.append(f"{indent}{out_var}.append({item})")

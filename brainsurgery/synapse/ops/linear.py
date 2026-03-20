@@ -45,7 +45,7 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del scope, symbols
-    x = model._read_tensor_input(node_spec.get("in"), env)
+    x = model._read_tensor_input(node_spec.get("_args"), env)
     linear_weight_path = model._infer_param_path(
         node_spec, node_path=node_path, param_name="weight"
     )
@@ -57,7 +57,7 @@ def interpret(
         bias = model._state.get(bias_path)
 
     transpose = _resolve_transpose(node_spec)
-    out = model._require_name(node_spec.get("out"), field="linear.out")
+    out = model._require_name(node_spec.get("_bind"), field="linear._bind")
     if x.numel() == 0:
         out_dim = int(weight.shape[-1]) if transpose else int(weight.shape[0])
         env[out] = x.new_empty((*x.shape[:-1], out_dim))
@@ -90,8 +90,8 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("in")))
-    out_name = str(node_spec.get("out"))
+    src = read(str(node_spec.get("_args")))
+    out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     weight_expr = infer_param("weight")
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
