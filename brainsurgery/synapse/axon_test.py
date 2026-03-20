@@ -404,9 +404,9 @@ def run_axon_test(
         for idx, prompt in enumerate(prompts):
             print(f"Prompt[{idx}]: {prompt!r}")
             print("HF completion:")
-            print(tokenizer_obj.decode(hf_gen[idx].tolist(), skip_special_tokens=True))
+            print(tokenizer_obj.decode(hf_gen[idx].tolist(), skip_special_tokens=True)[:80])
             print("Axon-derived completion:")
-            print(tokenizer_obj.decode(syn_gen[idx].tolist(), skip_special_tokens=True))
+            print(tokenizer_obj.decode(syn_gen[idx].tolist(), skip_special_tokens=True)[:80])
             print()
         print(
             "Logits diff (raw) | mean/max/last_max/top1_eq:",

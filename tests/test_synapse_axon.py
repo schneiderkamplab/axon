@@ -1454,7 +1454,7 @@ def test_lower_pipeline_multi_output_stage_into_next_call_args() -> None:
 tiny :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
 tiny q k v bias = do
   ctx_heads <- reshape_heads_triplet(q, k, v, heads=12, head_dim=64) |>
-    attention(backend=sdpa, causal=true, causal_mask_buffer=bias)
+    attention(mask=bias)
   return ctx_heads
 """
     module = parse_axon_module(source)
@@ -1486,9 +1486,7 @@ tiny q k v bias = do
         "_op": "attention",
         "_args": ["pipe_1", "pipe_2", "pipe_3"],
         "_bind": "ctx_heads",
-        "backend": "sdpa",
-        "causal": True,
-        "causal_mask_buffer": "bias",
+        "mask": "bias",
     }
 
 
