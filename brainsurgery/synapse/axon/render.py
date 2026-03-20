@@ -97,11 +97,11 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
 
     kwargs: list[str] = []
     for key, value in node_spec.items():
-        if key in {"_op", "_args", "_bind", "_target", "params"}:
+        if key in {"_op", "_args", "_bind", "_target", "_params"}:
             continue
         kwargs.append(f"{key}={_format_scalar(value)}")
 
-    params = node_spec.get("params")
+    params = node_spec.get("_params")
     if isinstance(params, dict) and isinstance(params.get("weight"), str):
         weight = params["weight"]
         if weight.endswith(".weight"):

@@ -570,7 +570,15 @@ tiny input_ids = do
         return out
 
     ops = _collect_param_paths(graph)
-    assert ("model.embed_tokens", "embedding") in ops
+    assert not any(path == "model.embed_tokens" and op == "embedding" for path, op in ops)
+    embedding_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "embedding"
+    ]
+    assert len(embedding_nodes) == 1
+    assert embedding_nodes[0]["_params"]["weight"] == "model.embed_tokens.weight"
     assert ("model.lm_head", "linear") in ops
 
 
@@ -605,9 +613,65 @@ tiny input_ids = do
         return out
 
     ops = _collect_param_paths(graph)
-    assert ("model.embed_tokens", "embedding") in ops
+    assert not any(path == "model.embed_tokens" and op == "embedding" for path, op in ops)
+    embedding_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "embedding"
+    ]
+    assert len(embedding_nodes) == 1
+    assert embedding_nodes[0]["_params"]["weight"] == "model.embed_tokens.weight"
     assert ("lm_head", "linear") in ops
     assert ("model.lm_head", "linear") not in ops
+
+
+def test_embedding_at_path_uses_neutral_node_name_and_explicit_weight_param() -> None:
+    source = """
+gpt2 :: TokenIds[B,T] -> Tensor[B,T,D]
+gpt2 input_ids = do
+  tok <- embedding@wte input_ids dim=D
+  return tok
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    graph = spec["model"]["graph"]
+    assert isinstance(graph, list) and len(graph) == 1
+    node_name, node_spec = next(iter(graph[0].items()))
+    assert node_name.startswith("n_op_")
+    assert node_spec["_op"] == "embedding"
+    assert node_spec["_params"]["weight"] == "wte.weight"
+
+
+def test_embedding_paths_remain_distinct_for_wte_and_wpe() -> None:
+    source = """
+gpt2 :: TokenIds[B,T] -> Tensor[B,T,D]
+gpt2 input_ids = do
+  tok <- embedding@wte input_ids dim=D
+  pos <- embedding@wpe input_ids dim=D
+  return tok
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    weights = [node["_params"]["weight"] for node in node_specs if node.get("_op") == "embedding"]
+    assert weights == ["wte.weight", "wpe.weight"]
+
+
+def test_embedding_and_linear_can_share_wte_weight_path() -> None:
+    source = """
+gpt2 :: TokenIds[B,T] -> Tensor[B,T,V]
+gpt2 input_ids = do
+  h <- embedding@wte input_ids dim=D
+  logits <- linear@wte h
+  return logits
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "embedding"
+    assert node_specs[0]["_params"]["weight"] == "wte.weight"
+    assert node_specs[1]["_op"] == "linear"
 
 
 def test_parse_rejects_scope_statement_form() -> None:
@@ -1023,7 +1087,7 @@ emb ids = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "embedding"
-    assert node_specs[0]["embedding_dim"] == "D"
+    assert node_specs[0]["dim"] == "D"
 
 
 def test_add_unifies_symbolic_last_dim_for_following_ops() -> None:
@@ -1052,7 +1116,7 @@ emb ids = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "embedding"
-    assert node_specs[0]["embedding_dim"] == "D"
+    assert node_specs[0]["dim"] == "D"
 
 
 def test_embedding_rejects_embedding_dim_kwarg() -> None:
@@ -1390,7 +1454,7 @@ def test_synapse_to_axon_roundtrip_equivalence_for_subset() -> None:
                         "_op": "linear",
                         "_args": "x",
                         "_bind": "h",
-                        "params": {"weight": "proj.weight", "bias": "proj.bias"},
+                        "_params": {"weight": "proj.weight", "bias": "proj.bias"},
                     }
                 },
                 {

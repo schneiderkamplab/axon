@@ -20,8 +20,7 @@ def _tiny_linear_spec() -> dict[str, object]:
                         "_op": "embedding",
                         "_args": "input_ids",
                         "_bind": "x",
-                        "num_embeddings": "V",
-                        "embedding_dim": "D",
+                        "dim": "D",
                     }
                 },
                 {
@@ -218,8 +217,7 @@ model:
         _op: embedding
         _args: input_ids
         _bind: x
-        num_embeddings: V
-        embedding_dim: D
+        dim: D
     - lm_head:
         _op: linear
         _args: x

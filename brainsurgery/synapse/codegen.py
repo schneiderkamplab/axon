@@ -543,7 +543,7 @@ class _Emitter:
                 )
             base_expr = repr(param_base)
             return f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
-        explicit_params = node_spec.get("params")
+        explicit_params = node_spec.get("_params")
         if isinstance(explicit_params, dict) and isinstance(explicit_params.get(param_name), str):
             return repr(explicit_params[param_name])
         if isinstance(node_spec.get(param_name), str):

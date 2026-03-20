@@ -13,7 +13,7 @@ ops:
     stateful: true
     constructor:
       num_embeddings: required
-      embedding_dim: required
+      dim: required
       padding_idx: optional
       max_norm: optional
       norm_type: optional

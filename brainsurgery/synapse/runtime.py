@@ -397,7 +397,7 @@ class SynapseProgramModel(nn.Module):
             base = base_resolved if isinstance(base_resolved, str) else param_base
             scoped_base = self._join(self._scope_of(node_path), base)
             return f"{scoped_base}.{param_name}" if scoped_base else param_name
-        explicit_params = node_spec.get("params")
+        explicit_params = node_spec.get("_params")
         if isinstance(explicit_params, dict):
             explicit = explicit_params.get(param_name)
             if isinstance(explicit, str):

@@ -8,8 +8,8 @@ OP_NAME = "layernorm"
 
 
 def _validate_layernorm_keys(node_spec: dict[str, Any]) -> None:
-    if "params" in node_spec:
-        raise ValueError("layernorm does not support params overrides")
+    if "_params" in node_spec:
+        raise ValueError("layernorm does not support _params overrides")
     if "weight" in node_spec:
         raise ValueError("layernorm does not support explicit weight binding")
     if "bias" in node_spec:

@@ -735,7 +735,7 @@ def _record_last_dim_for_call(
             if first_dim is None and isinstance(first_in, str) and _is_name_token(first_in):
                 ctx.tensor_last_dim[first_in] = norm_dim
     elif op_name == "embedding":
-        last_dim = kwargs.get("embedding_dim")
+        last_dim = kwargs.get("dim")
     elif op_name == "linear":
         last_dim = kwargs.get("dim", first_dim)
 
@@ -759,8 +759,7 @@ def _normalize_embedding_kwargs(kwargs: dict[str, Any]) -> None:
     if invalid_embedding_kwargs:
         bad = ", ".join(invalid_embedding_kwargs)
         raise ValueError(f"embedding unsupported kwargs: {bad}; allowed: dim, scale")
-    if "dim" in kwargs:
-        kwargs["embedding_dim"] = kwargs.pop("dim")
+    # Keep Synapse/YAML key aligned with Axon surface naming (`dim`).
 
 
 def _normalize_linear_kwargs(kwargs: dict[str, Any]) -> None:
@@ -809,11 +808,11 @@ def _infer_linear_dim_from_output(
 def _infer_embedding_dim_from_output(
     op_name: str, out: str | list[str], kwargs: dict[str, Any], ctx: _LowerCtx
 ) -> None:
-    if op_name != "embedding" or "embedding_dim" in kwargs or not isinstance(out, str):
+    if op_name != "embedding" or "dim" in kwargs or not isinstance(out, str):
         return
     inferred = ctx.tensor_last_dim.get(out)
     if inferred is not None:
-        kwargs["embedding_dim"] = inferred
+        kwargs["dim"] = inferred
 
 
 def _normalize_split_kwargs(
@@ -939,10 +938,7 @@ def _normalize_call_kwargs(
 
 
 def _validate_normalized_kwargs(op_name: str, kwargs: dict[str, Any], args: list[str]) -> None:
-    validation_kwargs = dict(kwargs)
-    if op_name == "embedding" and "embedding_dim" in validation_kwargs:
-        validation_kwargs["dim"] = validation_kwargs.pop("embedding_dim")
-    _validate_op_signature(op_name, args, validation_kwargs)
+    _validate_op_signature(op_name, args, kwargs)
 
 
 def _lower_simple_call(
@@ -1147,6 +1143,17 @@ def _lower_simple_call(
             templated_node["param_base"] = param_path
             nodes = _with_when([{node_name: templated_node}], effective_when)
             _record_last_dim_for_call(callee=op_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
+            return [*pre_graph, *nodes]
+        if _canonical_op_name(callee) == "embedding":
+            # Keep parameter-path semantics while avoiding path-derived node keys
+            # (for example `embedding@wte` -> neutral `n_op_*` node with _params.weight='wte.weight').
+            if not param_path.strip():
+                raise ValueError(f"invalid @ path in Axon call: {expr!r}")
+            node_name = f"n_{ctx.fresh('op')}"
+            embedding_node = _to_synapse_op("embedding", args, kwargs, out)
+            embedding_node["_params"] = {"weight": f"{param_path}.weight"}
+            nodes = _with_when([{node_name: embedding_node}], effective_when)
+            _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
             return [*pre_graph, *nodes]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
