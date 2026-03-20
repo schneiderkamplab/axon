@@ -94,8 +94,7 @@ def _causal_mask_with_padding_spec() -> dict[str, object]:
                 {
                     "m": {
                         "_op": "causal_mask",
-                        "_args": "q",
-                        "key": "k",
+                        "_args": ["q", "k"],
                         "padding_mask": "padding_mask",
                         "window": 8,
                         "_bind": "mask",

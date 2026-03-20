@@ -21,9 +21,11 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    q = model._read_tensor_input(node_spec.get("_args"), env)
-    key_ref = node_spec.get("key")
-    key_tensor = model._read_tensor_input(key_ref, env) if isinstance(key_ref, str) else q
+    raw_args = node_spec.get("_args")
+    if not isinstance(raw_args, list) or len(raw_args) != 2:
+        raise ValueError("causal_mask expects exactly 2 positional args: query and key")
+    q = model._read_tensor_input(raw_args[0], env)
+    key_tensor = model._read_tensor_input(raw_args[1], env)
     padding_ref = node_spec.get("padding_mask")
     padding_mask = env.get(padding_ref) if isinstance(padding_ref, str) else None
     if padding_mask is not None and not torch.is_tensor(padding_mask):
@@ -122,9 +124,11 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    q = read(str(node_spec.get("_args")))
-    k_name = node_spec.get("key")
-    k = read(str(k_name)) if isinstance(k_name, str) else q
+    raw_args = node_spec.get("_args")
+    if not isinstance(raw_args, list) or len(raw_args) != 2:
+        raise ValueError("causal_mask expects exactly 2 positional args: query and key")
+    q = read(str(raw_args[0]))
+    k = read(str(raw_args[1]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     q_len = emitter._fresh("q_len")
