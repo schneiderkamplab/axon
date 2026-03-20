@@ -122,12 +122,16 @@ class _Emitter:
                 "                raise ValueError(f'Missing required input: {input_name}')",
                 "        return env",
                 "",
-                "    def _repeat_values(self, *, range_value: int, start_value: int):",
-                "        if not isinstance(range_value, int):",
-                "            raise ValueError(f'repeat range must resolve to int, got {range_value!r}')",
-                "        if not isinstance(start_value, int):",
-                "            raise ValueError(f'repeat start must resolve to int, got {start_value!r}')",
-                "        return range(start_value, start_value + range_value)",
+                "    def _for_values(self, *, from_value: int, to_value: int, step_value: int):",
+                "        if not isinstance(from_value, int):",
+                "            raise ValueError(f'for _from must resolve to int, got {from_value!r}')",
+                "        if not isinstance(to_value, int):",
+                "            raise ValueError(f'for _to must resolve to int, got {to_value!r}')",
+                "        if not isinstance(step_value, int):",
+                "            raise ValueError(f'for _step must resolve to int, got {step_value!r}')",
+                "        if step_value == 0:",
+                "            raise ValueError('for _step must be non-zero')",
+                "        return range(from_value, to_value, step_value)",
                 "",
             ]
         )
@@ -317,29 +321,35 @@ class _Emitter:
                 inner_indent = indent + "    "
 
             op = node_spec.get("_op")
-            if op == "repeat":
-                var_name = node_spec.get("var")
+            if op == "for":
+                scope_name = node_spec.get("_scope")
+                if not isinstance(scope_name, str) or not scope_name:
+                    raise ValueError("for requires string _scope")
+                var_name = node_spec.get("_var")
                 if not isinstance(var_name, str):
-                    raise ValueError("repeat requires string var")
-                range_code = self._expr_code(node_spec.get("range"), env)
-                start_code = self._expr_code(node_spec.get("start", 0), env)
+                    raise ValueError("for requires string _var")
+                to_code = self._expr_code(node_spec.get("_to"), env)
+                from_code = self._expr_code(node_spec.get("_from", 0), env)
+                step_code = self._expr_code(node_spec.get("_step", 1), env)
                 saved = env.get(var_name)
                 iter_value = self._fresh(self._py_name(var_name))
-                range_var = self._fresh("range")
-                start_var = self._fresh("start")
-                lines.append(f"{inner_indent}{range_var} = int({range_code})")
-                lines.append(f"{inner_indent}{start_var} = int({start_code})")
+                to_var = self._fresh("to")
+                from_var = self._fresh("from")
+                step_var = self._fresh("step")
+                lines.append(f"{inner_indent}{to_var} = int({to_code})")
+                lines.append(f"{inner_indent}{from_var} = int({from_code})")
+                lines.append(f"{inner_indent}{step_var} = int({step_code})")
                 lines.append(
-                    f"{inner_indent}for {iter_value} in self._repeat_values(range_value={range_var}, start_value={start_var}):"
+                    f"{inner_indent}for {iter_value} in self._for_values(from_value={from_var}, to_value={to_var}, step_value={step_var}):"
                 )
                 env[var_name] = iter_value
                 child_scope = self._fresh("scope")
                 lines.append(
-                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, f'{node_name}.{{{iter_value}}}')"
+                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, f'{scope_name}.{{{iter_value}}}')"
                 )
-                body = node_spec.get("body")
+                body = node_spec.get("_body")
                 if not isinstance(body, list):
-                    raise ValueError("repeat requires list body")
+                    raise ValueError("for requires list _body")
                 lines.extend(
                     self._compile_graph(
                         graph=body, env=env, scope_var=child_scope, indent=inner_indent + "    "
@@ -545,11 +555,12 @@ class _Emitter:
             return f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
         explicit_params = node_spec.get("_params")
         if isinstance(explicit_params, dict) and isinstance(explicit_params.get(param_name), str):
-            return repr(explicit_params[param_name])
+            scoped_explicit = f"self._join_scope(self._scope_of({node_path_var}), {explicit_params[param_name]!r})"
+            return scoped_explicit
         if isinstance(node_spec.get(param_name), str):
             candidate = node_spec[param_name]
             if "." in candidate:
-                return repr(candidate)
+                return f"self._join_scope(self._scope_of({node_path_var}), {candidate!r})"
         return f"self._join_scope({node_path_var}, {param_name!r})"
 
     def _read_env_var(self, env: dict[str, str], name: str) -> str:
@@ -639,7 +650,7 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
     if not isinstance(ops, dict):
         raise ValueError("op map must contain mapping key 'ops'")
 
-    known_control_ops = {"repeat", "call"}
+    known_control_ops = {"for", "call"}
     known_runtime_builtin_ops = set(OP_MODULES.keys())
 
     def _walk_graph(graph: list[Any]) -> None:
@@ -665,10 +676,10 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
                     raise ValueError("node 'graph' must be a list")
                 _walk_graph(nested)
 
-            if op == "repeat":
-                body = node_spec.get("body")
+            if op == "for":
+                body = node_spec.get("_body")
                 if not isinstance(body, list):
-                    raise ValueError("repeat node requires list 'body'")
+                    raise ValueError("for node requires list '_body'")
                 _walk_graph(body)
 
     model = spec.get("model")

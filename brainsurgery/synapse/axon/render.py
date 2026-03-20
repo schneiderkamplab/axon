@@ -184,16 +184,20 @@ def _render_module(
             node_spec = _resolve_value(node_spec, symbols)
 
             node_path = f"{scope}.{node_name}" if scope else str(node_name)
-            if node_spec.get("_op") == "repeat":
-                var = str(node_spec.get("var"))
-                range_expr = _format_scalar(node_spec.get("range"))
-                start_expr = _format_scalar(node_spec.get("start", 0))
-                end_expr = f"({start_expr}) + ({range_expr})"
-                body = node_spec.get("body")
+            if node_spec.get("_op") == "for":
+                scope_name = node_spec.get("_scope")
+                if not isinstance(scope_name, str) or not scope_name:
+                    raise ValueError("for node requires string _scope")
+                var = str(node_spec.get("_var"))
+                to_expr = _format_scalar(node_spec.get("_to"))
+                start_expr = _format_scalar(node_spec.get("_from", 0))
+                step_expr = _format_scalar(node_spec.get("_step", 1))
+                body = node_spec.get("_body")
                 if isinstance(body, list):
-                    repeat_name = node_path if scope else str(node_name)
+                    for_name = f"{scope}.{scope_name}" if scope else scope_name
+                    step_suffix = "" if step_expr == "1" else f" step={step_expr}"
                     lines.append(
-                        f"{indent}for@{repeat_name} {var} <- [{start_expr}..{end_expr}) do"
+                        f"{indent}for@{for_name} {var} <- [{start_expr}..{to_expr}){step_suffix} do"
                     )
                     render_graph(body, scope=node_path, indent=indent + "  ")
                     continue

@@ -115,7 +115,7 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
             "graph": [
                 {
                     "p": {
-                        "_op": "arange_positions",
+                        "_op": "position_ids",
                         "_args": "input_ids",
                         "attention_mask": "attention_mask",
                         "_bind": "pos",

@@ -26,8 +26,9 @@ class AxonReturn:
 class AxonRepeat:
     name: str | None
     var: str
-    range_expr: str
-    start_expr: str
+    to_expr: str
+    from_expr: str
+    step_expr: str
     body: tuple["AxonStatement", ...]
 
 

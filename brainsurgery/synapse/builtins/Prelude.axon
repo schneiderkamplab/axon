@@ -25,8 +25,8 @@ causal_mask = _causal_mask
 attention :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,HD]
 attention = _attention
 
-arange_positions :: TokenIds[B,T] -> Tensor[B,T]
-arange_positions = _arange_positions
+position_ids :: TokenIds[B,T] -> Tensor[B,T]
+position_ids = _position_ids
 
 apply_rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 apply_rope_pair = _apply_rope_pair

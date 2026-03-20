@@ -209,12 +209,16 @@ class SynapseProgramModel(nn.Module):
                 raise ValueError(f"Missing required input: {input_name}")
         return env
 
-    def _repeat_values(self, *, range_value: int, start_value: int) -> range:
-        if not isinstance(range_value, int):
-            raise ValueError(f"repeat range must resolve to int, got {range_value!r}")
-        if not isinstance(start_value, int):
-            raise ValueError(f"repeat start must resolve to int, got {start_value!r}")
-        return range(start_value, start_value + range_value)
+    def _for_values(self, *, from_value: int, to_value: int, step_value: int) -> range:
+        if not isinstance(from_value, int):
+            raise ValueError(f"for _from must resolve to int, got {from_value!r}")
+        if not isinstance(to_value, int):
+            raise ValueError(f"for _to must resolve to int, got {to_value!r}")
+        if not isinstance(step_value, int):
+            raise ValueError(f"for _step must resolve to int, got {step_value!r}")
+        if step_value == 0:
+            raise ValueError("for _step must be non-zero")
+        return range(from_value, to_value, step_value)
 
     def _run_graph(
         self,
@@ -240,21 +244,25 @@ class SynapseProgramModel(nn.Module):
                     continue
 
             op = node_spec.get("_op")
-            if op == "repeat":
-                range_value = self._eval_expr(node_spec.get("range"), env, symbols)
-                start_value = self._eval_expr(node_spec.get("start", 0), env, symbols)
-                var_name = node_spec.get("var")
+            if op == "for":
+                scope_name = node_spec.get("_scope")
+                if not isinstance(scope_name, str) or not scope_name:
+                    raise ValueError("for requires string '_scope'")
+                to_value = self._eval_expr(node_spec.get("_to"), env, symbols)
+                from_value = self._eval_expr(node_spec.get("_from", 0), env, symbols)
+                step_value = self._eval_expr(node_spec.get("_step", 1), env, symbols)
+                var_name = node_spec.get("_var")
                 if not isinstance(var_name, str):
-                    raise ValueError("repeat requires string 'var'")
-                body = node_spec.get("body")
+                    raise ValueError("for requires string '_var'")
+                body = node_spec.get("_body")
                 if not isinstance(body, list):
-                    raise ValueError("repeat requires list 'body'")
-                for iter_value in self._repeat_values(
-                    range_value=range_value, start_value=start_value
+                    raise ValueError("for requires list '_body'")
+                for iter_value in self._for_values(
+                    from_value=from_value, to_value=to_value, step_value=step_value
                 ):
                     env[var_name] = iter_value
-                    repeat_scope = self._join(scope, f"{node_name}.{iter_value}")
-                    self._run_graph(body, env, scope=repeat_scope, symbols=symbols, blocks=blocks)
+                    for_scope = self._join(scope, f"{scope_name}.{iter_value}")
+                    self._run_graph(body, env, scope=for_scope, symbols=symbols, blocks=blocks)
                 env.pop(var_name, None)
                 continue
 
@@ -401,11 +409,13 @@ class SynapseProgramModel(nn.Module):
         if isinstance(explicit_params, dict):
             explicit = explicit_params.get(param_name)
             if isinstance(explicit, str):
-                return explicit
+                scoped_explicit = self._join(self._scope_of(node_path), explicit)
+                return f"{scoped_explicit}" if scoped_explicit else explicit
         if param_name in node_spec and isinstance(node_spec[param_name], str):
             candidate = node_spec[param_name]
             if "." in candidate:
-                return candidate
+                scoped_candidate = self._join(self._scope_of(node_path), candidate)
+                return f"{scoped_candidate}" if scoped_candidate else candidate
         return f"{node_path}.{param_name}" if node_path else param_name
 
     def _resolve_output_ref(self, ref: Any, env: dict[str, Any]) -> Any:

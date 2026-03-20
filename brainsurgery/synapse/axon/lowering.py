@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,7 +33,7 @@ _OP_ARITY: dict[str, tuple[int, int]] = {
     "split": (1, 1),
     "apply_rope_pair": (2, 2),
     "repeat_kv": (1, 2),
-    "arange_positions": (1, 1),
+    "position_ids": (1, 1),
     "kv_cache_update": (3, 3),
     "coalesce": (2, 8),
     "topk": (1, 1),
@@ -69,7 +70,7 @@ _OP_ALLOWED_KWARGS: dict[str, set[str]] = {
     "split": {"dim", "parts", "sizes"},
     "apply_rope_pair": {"position_ids", "theta"},
     "repeat_kv": {"heads", "kv_heads", "repeats", "times", "dim"},
-    "arange_positions": {"attention_mask"},
+    "position_ids": {"attention_mask", "past_length"},
     "kv_cache_update": {"when"},
     "coalesce": set(),
     "topk": {"k", "dim", "largest", "sorted"},
@@ -112,7 +113,7 @@ _OP_KWARG_KINDS: dict[str, dict[str, str]] = {
         "times": "dim",
         "dim": "int",
     },
-    "arange_positions": {"attention_mask": "str"},
+    "position_ids": {"attention_mask": "str", "past_length": "dim"},
     "kv_cache_update": {},
     "coalesce": {},
     "topk": {"k": "dim", "dim": "int", "largest": "bool", "sorted": "bool"},
@@ -1144,15 +1145,18 @@ def _lower_simple_call(
             nodes = _with_when([{node_name: templated_node}], effective_when)
             _record_last_dim_for_call(callee=op_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
             return [*pre_graph, *nodes]
-        if _canonical_op_name(callee) == "embedding":
-            # Keep parameter-path semantics while avoiding path-derived node keys
-            # (for example `embedding@wte` -> neutral `n_op_*` node with _params.weight='wte.weight').
+        concrete_node = _to_synapse_op(op_name, args, kwargs, out)
+        try:
+            bound_params = _path_bound_param_names(concrete_node)
+        except ValueError:
+            bound_params = []
+        if bound_params:
             if not param_path.strip():
                 raise ValueError(f"invalid @ path in Axon call: {expr!r}")
             node_name = f"n_{ctx.fresh('op')}"
-            embedding_node = _to_synapse_op("embedding", args, kwargs, out)
-            embedding_node["_params"] = {"weight": f"{param_path}.weight"}
-            nodes = _with_when([{node_name: embedding_node}], effective_when)
+            params = {param_name: f"{param_path}.{param_name}" for param_name in bound_params}
+            concrete_node["_params"] = params
+            nodes = _with_when([{node_name: concrete_node}], effective_when)
             _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
             return [*pre_graph, *nodes]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
@@ -1934,28 +1938,26 @@ def _lower_statements(
                 returns=(),
                 ctx=ctx,
             )
-            repeat_name = (
-                stmt.name
-                if isinstance(stmt.name, str) and stmt.name
-                else f"n_{ctx.fresh('repeat')}"
-            )
+            node_name = f"n_{ctx.fresh('for')}"
+            base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else node_name
+            loop_scope = base_loop_scope
             if ctx.scope_stack:
                 scope_prefix = ".".join(part for part in ctx.scope_stack if part)
                 if scope_prefix:
-                    repeat_name = f"{scope_prefix}.{repeat_name}"
+                    loop_scope = f"{scope_prefix}.{base_loop_scope}"
             repeat_item: dict[str, Any] = {
-                repeat_name.split(".")[-1]: {
-                    "_op": "repeat",
-                    "var": stmt.var,
-                    "range": stmt.range_expr,
-                    "body": body_graph,
+                node_name: {
+                    "_op": "for",
+                    "_scope": loop_scope,
+                    "_var": stmt.var,
+                    "_to": stmt.to_expr,
+                    "_body": body_graph,
                 }
             }
-            if stmt.start_expr != "0":
-                repeat_item[repeat_name.split(".")[-1]]["start"] = stmt.start_expr
-            segments = [part for part in repeat_name.split(".") if part]
-            for segment in reversed(segments[:-1]):
-                repeat_item = {segment: {"graph": [repeat_item]}}
+            if stmt.from_expr != "0":
+                repeat_item[node_name]["_from"] = stmt.from_expr
+            if stmt.step_expr != "1":
+                repeat_item[node_name]["_step"] = stmt.step_expr
             graph.append(repeat_item)
             continue
 
@@ -2012,6 +2014,299 @@ def _lower_statements(
                 graph.extend(_lower_expr(value, output_name, ctx))
                 outputs[output_name] = output_name
             continue
+
+
+def _as_concrete_path(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if not token:
+        return None
+    try:
+        parsed = ast.literal_eval(token)
+    except Exception:
+        parsed = token
+    if isinstance(parsed, str) and parsed.strip():
+        return parsed.strip()
+    return None
+
+
+def _sanitize_path_suffix(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
+    return sanitized or "path"
+
+
+def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
+    op = node_spec.get("_op")
+    if op == "embedding":
+        return ["weight"]
+    if op == "linear":
+        names = ["weight"]
+        if bool(node_spec.get("bias", False)):
+            names.append("bias")
+        return names
+    if op == "rmsnorm":
+        return ["weight"]
+    if op == "layernorm":
+        return ["weight", "bias"]
+    raise ValueError(f"unsupported param_base resolution for op {op!r}")
+
+
+def _resolve_paths_at_lowering_time(
+    model: dict[str, Any], block_path_params: dict[str, tuple[str, ...]]
+) -> None:
+    blocks_raw = model.get("blocks")
+    if not isinstance(blocks_raw, dict) or not blocks_raw:
+        return
+
+    base_blocks: dict[str, dict[str, Any]] = {
+        name: copy.deepcopy(spec) for name, spec in blocks_raw.items() if isinstance(spec, dict)
+    }
+    all_blocks: dict[str, dict[str, Any]] = dict(base_blocks)
+    path_params_by_block: dict[str, tuple[str, ...]] = {
+        name: tuple(p for p in block_path_params.get(name, ()) if isinstance(p, str) and p)
+        for name in base_blocks
+    }
+    specialization_cache: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
+
+    def _to_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return list(value)
+        if value is None:
+            return []
+        return [value]
+
+    def _substitute_names(value: Any, mapping: dict[str, Any]) -> Any:
+        if isinstance(value, str):
+            return mapping.get(value, value)
+        if isinstance(value, list):
+            return [_substitute_names(item, mapping) for item in value]
+        if isinstance(value, dict):
+            return {k: _substitute_names(v, mapping) for k, v in value.items()}
+        return value
+
+    def _map_call_inputs_to_values(
+        *, call_spec: dict[str, Any], block_spec: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        inputs = block_spec.get("inputs")
+        if not isinstance(inputs, dict):
+            return None
+        ordered_inputs = list(inputs.keys())
+        positional = _to_list(call_spec.get("_args"))
+        kwargs = {
+            key: value
+            for key, value in call_spec.items()
+            if isinstance(key, str) and not key.startswith("_")
+        }
+        env: dict[str, Any] = {}
+        for idx, name in enumerate(ordered_inputs):
+            if idx < len(positional):
+                env[name] = positional[idx]
+                continue
+            if name in kwargs:
+                env[name] = kwargs[name]
+                continue
+            return None
+        return env
+
+    def _bind_map_for_inline(*, template_bind: Any, call_bind: Any) -> dict[str, Any] | None:
+        template = _to_list(template_bind)
+        target = _to_list(call_bind)
+        if len(template) != len(target):
+            return None
+        return {
+            str(src): dst
+            for src, dst in zip(template, target, strict=False)
+            if isinstance(src, str)
+        }
+
+    def _inline_simple_call_if_possible(
+        *, call_spec: dict[str, Any], target: str, concrete_paths: dict[str, str]
+    ) -> dict[str, Any] | None:
+        block_spec = base_blocks.get(target)
+        if not isinstance(block_spec, dict):
+            return None
+        graph = block_spec.get("graph")
+        if not isinstance(graph, list) or len(graph) != 1:
+            return None
+        node_item = graph[0]
+        if not isinstance(node_item, dict) or len(node_item) != 1:
+            return None
+        _, template_spec = next(iter(node_item.items()))
+        if not isinstance(template_spec, dict):
+            return None
+        template_op = template_spec.get("_op")
+        if not isinstance(template_op, str) or template_op in {"call", "for"}:
+            return None
+
+        input_values = _map_call_inputs_to_values(call_spec=call_spec, block_spec=block_spec)
+        if input_values is None:
+            return None
+        input_values.update(concrete_paths)
+
+        bind_map = _bind_map_for_inline(
+            template_bind=template_spec.get("_bind"),
+            call_bind=call_spec.get("_bind"),
+        )
+        if bind_map is None:
+            return None
+        input_values.update(bind_map)
+
+        inlined = copy.deepcopy(template_spec)
+        inlined = _substitute_names(inlined, input_values)
+
+        param_base = inlined.get("param_base")
+        if isinstance(param_base, str):
+            explicit_params = inlined.get("_params")
+            params = dict(explicit_params) if isinstance(explicit_params, dict) else {}
+            for param_name in _path_bound_param_names(inlined):
+                params.setdefault(param_name, f"{param_base}.{param_name}")
+            inlined["_params"] = params
+            inlined.pop("param_base", None)
+
+        return inlined
+
+    def ensure_specialized_block(block_name: str, path_bindings: dict[str, str]) -> str:
+        cache_key = (block_name, tuple(sorted(path_bindings.items())))
+        cached = specialization_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        base_spec = base_blocks.get(block_name)
+        if base_spec is None:
+            return block_name
+        specialized = copy.deepcopy(base_spec)
+        inputs = specialized.get("inputs")
+        if isinstance(inputs, dict):
+            for path_name in path_bindings:
+                inputs.pop(path_name, None)
+        parts = [block_name]
+        for key in sorted(path_bindings):
+            parts.append(f"{key}_{_sanitize_path_suffix(path_bindings[key])}")
+        base_name = "__".join(parts)
+        candidate = base_name
+        idx = 2
+        while candidate in all_blocks:
+            candidate = f"{base_name}_{idx}"
+            idx += 1
+        rewrite_graph(
+            specialized.get("graph"),
+            inherited_path_bindings=path_bindings,
+        )
+        all_blocks[candidate] = specialized
+        path_params_by_block[candidate] = ()
+        specialization_cache[cache_key] = candidate
+        return candidate
+
+    def rewrite_graph(graph: Any, *, inherited_path_bindings: dict[str, str]) -> None:
+        if not isinstance(graph, list):
+            return
+        for item in graph:
+            if not isinstance(item, dict) or len(item) != 1:
+                continue
+            _, node_spec = next(iter(item.items()))
+            if not isinstance(node_spec, dict):
+                continue
+
+            param_base = node_spec.get("param_base")
+            if isinstance(param_base, str) and param_base in inherited_path_bindings:
+                base_path = inherited_path_bindings[param_base]
+                explicit_params = node_spec.get("_params")
+                params: dict[str, str]
+                if isinstance(explicit_params, dict):
+                    params = dict(explicit_params)
+                else:
+                    params = {}
+                for param_name in _path_bound_param_names(node_spec):
+                    params.setdefault(param_name, f"{base_path}.{param_name}")
+                node_spec["_params"] = params
+                node_spec.pop("param_base", None)
+
+            if node_spec.get("_op") == "call":
+                target = node_spec.get("_target")
+                if isinstance(target, str):
+                    required_path_params = path_params_by_block.get(target, ())
+                    if required_path_params:
+                        concrete: dict[str, str] = {}
+                        for path_name in required_path_params:
+                            concrete_value = _as_concrete_path(node_spec.get(path_name))
+                            if concrete_value is None:
+                                concrete = {}
+                                break
+                            concrete[path_name] = concrete_value
+                        if concrete:
+                            inlined = _inline_simple_call_if_possible(
+                                call_spec=node_spec,
+                                target=target,
+                                concrete_paths=concrete,
+                            )
+                            if inlined is not None:
+                                node_spec.clear()
+                                node_spec.update(inlined)
+                                target = None
+                                required_path_params = ()
+                                continue
+                            specialized_name = ensure_specialized_block(target, concrete)
+                            node_spec["_target"] = specialized_name
+                            for path_name in required_path_params:
+                                node_spec.pop(path_name, None)
+
+            nested = node_spec.get("graph")
+            if isinstance(nested, list):
+                rewrite_graph(nested, inherited_path_bindings=inherited_path_bindings)
+            body = node_spec.get("_body")
+            if isinstance(body, list):
+                rewrite_graph(body, inherited_path_bindings=inherited_path_bindings)
+
+    rewrite_graph(model.get("graph"), inherited_path_bindings={})
+    for block_spec in list(all_blocks.values()):
+        rewrite_graph(block_spec.get("graph"), inherited_path_bindings={})
+
+    reachable: set[str] = set()
+
+    def collect_called_blocks(graph: Any) -> list[str]:
+        called: list[str] = []
+        if not isinstance(graph, list):
+            return called
+        for item in graph:
+            if not isinstance(item, dict) or len(item) != 1:
+                continue
+            _, node_spec = next(iter(item.items()))
+            if not isinstance(node_spec, dict):
+                continue
+            if node_spec.get("_op") == "call" and isinstance(node_spec.get("_target"), str):
+                called.append(node_spec["_target"])
+            nested = node_spec.get("graph")
+            if isinstance(nested, list):
+                called.extend(collect_called_blocks(nested))
+            body = node_spec.get("_body")
+            if isinstance(body, list):
+                called.extend(collect_called_blocks(body))
+        return called
+
+    worklist = collect_called_blocks(model.get("graph"))
+    while worklist:
+        target = worklist.pop()
+        if target in reachable:
+            continue
+        if target not in all_blocks:
+            continue
+        block_spec = all_blocks[target]
+        reachable.add(target)
+        worklist.extend(collect_called_blocks(block_spec.get("graph")))
+
+    for block_name in sorted(reachable):
+        block_spec = all_blocks[block_name]
+        for item in block_spec.get("graph", []):
+            if not isinstance(item, dict) or len(item) != 1:
+                continue
+            _, node_spec = next(iter(item.items()))
+            if isinstance(node_spec, dict) and "param_base" in node_spec:
+                raise ValueError(f"unresolved param_base in reachable block {block_name!r}")
+
+    if reachable:
+        model["blocks"] = {name: all_blocks[name] for name in all_blocks if name in reachable}
+    else:
+        model.pop("blocks", None)
 
 
 def lower_axon_program_to_synapse_spec(
@@ -2122,6 +2417,8 @@ def lower_axon_program_to_synapse_spec(
         }
     if blocks:
         spec["model"]["blocks"] = blocks
+
+    _resolve_paths_at_lowering_time(spec["model"], block_path_params)
 
     return spec
 

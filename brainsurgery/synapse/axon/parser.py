@@ -19,7 +19,7 @@ _SIG_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*::\s*(.+
 _DEF_DO_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*?)\s*=\s*do\s*$")
 _DEF_EXPR_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*?)\s*=\s*(.+?)\s*$")
 _FOR_AT_RANGE_RE = re.compile(
-    r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])\s+do\s*$"
+    r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])(?:\s+step\s*=\s*(.+?))?\s+do\s*$"
 )
 _SCOPE_RE = re.compile(r"^scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
 _BIND_SCOPE_RE = re.compile(r"^(.+?)<-\s*scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
@@ -519,9 +519,7 @@ def _parse_statements(
 
             start_expr = start_raw if start_delim == "[" else f"({start_raw}) + 1"
             end_exclusive = f"({end_raw}) + 1" if end_delim == "]" else end_raw
-            range_expr = (
-                end_exclusive if start_expr == "0" else f"({end_exclusive}) - ({start_expr})"
-            )
+            step_expr = for_at_match.group(7).strip() if for_at_match.group(7) else "1"
             if i + 1 >= len(lines):
                 raise ValueError("for@ requires indented body")
             next_indent, _ = lines[i + 1]
@@ -532,8 +530,9 @@ def _parse_statements(
                 AxonRepeat(
                     name=repeat_name,
                     var=var,
-                    range_expr=range_expr,
-                    start_expr=start_expr,
+                    to_expr=end_exclusive,
+                    from_expr=start_expr,
+                    step_expr=step_expr,
                     body=tuple(body),
                 )
             )

@@ -439,10 +439,15 @@ main x = do
     spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "call"
-    assert node_specs[0]["_target"] == "expert_ffn"
-    assert node_specs[0]["gate"] == "'mlp.gate_proj'"
-    assert node_specs[0]["up"] == "'mlp.up_proj'"
-    assert node_specs[0]["down"] == "'mlp.down_proj'"
+    assert node_specs[0]["_target"].startswith("expert_ffn__")
+    assert "gate" not in node_specs[0]
+    assert "up" not in node_specs[0]
+    assert "down" not in node_specs[0]
+    specialized_block_name = node_specs[0]["_target"]
+    specialized_nodes = _node_specs(spec["model"]["blocks"][specialized_block_name]["graph"])
+    assert specialized_nodes[0]["_params"]["weight"] == "mlp.gate_proj.weight"
+    assert specialized_nodes[1]["_params"]["weight"] == "mlp.up_proj.weight"
+    assert specialized_nodes[3]["_params"]["weight"] == "mlp.down_proj.weight"
 
 
 def test_top_level_constant_stays_symbol_with_expression_module_definition() -> None:
@@ -579,7 +584,14 @@ tiny input_ids = do
     ]
     assert len(embedding_nodes) == 1
     assert embedding_nodes[0]["_params"]["weight"] == "model.embed_tokens.weight"
-    assert ("model.lm_head", "linear") in ops
+    linear_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "linear"
+    ]
+    assert len(linear_nodes) == 1
+    assert linear_nodes[0]["_params"]["weight"] == "model.lm_head.weight"
 
 
 def test_double_at_path_is_absolute_inside_scope_bind() -> None:
@@ -622,8 +634,14 @@ tiny input_ids = do
     ]
     assert len(embedding_nodes) == 1
     assert embedding_nodes[0]["_params"]["weight"] == "model.embed_tokens.weight"
-    assert ("lm_head", "linear") in ops
-    assert ("model.lm_head", "linear") not in ops
+    linear_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "linear"
+    ]
+    assert len(linear_nodes) == 1
+    assert linear_nodes[0]["_params"]["weight"] == "lm_head.weight"
 
 
 def test_embedding_at_path_uses_neutral_node_name_and_explicit_weight_param() -> None:
@@ -698,10 +716,16 @@ tiny x = do
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
     model = spec["model"]
-    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
-    assert repeat_node["_op"] == "repeat"
-    assert repeat_node["var"] == "i"
-    assert repeat_node["range"] == "(3) + 1"
+    repeat_node = next(
+        node_spec
+        for item in model["graph"]
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    )
+    assert repeat_node["_op"] == "for"
+    assert repeat_node["_scope"] == "model.layers"
+    assert repeat_node["_var"] == "i"
+    assert repeat_node["_to"] == "(3) + 1"
 
 
 def test_parse_for_at_range_loop_sugar_with_nonzero_start() -> None:
@@ -715,11 +739,17 @@ tiny x = do
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
     model = spec["model"]
-    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
-    assert repeat_node["_op"] == "repeat"
-    assert repeat_node["var"] == "i"
-    assert repeat_node["start"] == "1"
-    assert repeat_node["range"] == "((4) + 1) - (1)"
+    repeat_node = next(
+        node_spec
+        for item in model["graph"]
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    )
+    assert repeat_node["_op"] == "for"
+    assert repeat_node["_scope"] == "model.layers"
+    assert repeat_node["_var"] == "i"
+    assert repeat_node["_from"] == "1"
+    assert repeat_node["_to"] == "(4) + 1"
 
 
 def test_parse_for_at_range_loop_sugar_half_open_with_paren() -> None:
@@ -733,11 +763,17 @@ tiny x = do
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
     model = spec["model"]
-    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
-    assert repeat_node["_op"] == "repeat"
-    assert repeat_node["var"] == "i"
-    assert repeat_node["start"] == "1"
-    assert repeat_node["range"] == "(4) - (1)"
+    repeat_node = next(
+        node_spec
+        for item in model["graph"]
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    )
+    assert repeat_node["_op"] == "for"
+    assert repeat_node["_scope"] == "model.layers"
+    assert repeat_node["_var"] == "i"
+    assert repeat_node["_from"] == "1"
+    assert repeat_node["_to"] == "4"
 
 
 def test_parse_for_at_range_loop_sugar_left_open_right_closed() -> None:
@@ -751,11 +787,42 @@ tiny x = do
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
     model = spec["model"]
-    repeat_node = model["graph"][0]["model"]["graph"][0]["layers"]
-    assert repeat_node["_op"] == "repeat"
-    assert repeat_node["var"] == "i"
-    assert repeat_node["start"] == "(0) + 1"
-    assert repeat_node["range"] == "((4) + 1) - ((0) + 1)"
+    repeat_node = next(
+        node_spec
+        for item in model["graph"]
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    )
+    assert repeat_node["_op"] == "for"
+    assert repeat_node["_scope"] == "model.layers"
+    assert repeat_node["_var"] == "i"
+    assert repeat_node["_from"] == "(0) + 1"
+    assert repeat_node["_to"] == "(4) + 1"
+
+
+def test_parse_for_at_range_loop_sugar_with_step() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  for@model.layers i <- [1..8) step=2 do
+    y <- add(x, x)
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    model = spec["model"]
+    repeat_node = next(
+        node_spec
+        for item in model["graph"]
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    )
+    assert repeat_node["_op"] == "for"
+    assert repeat_node["_scope"] == "model.layers"
+    assert repeat_node["_var"] == "i"
+    assert repeat_node["_from"] == "1"
+    assert repeat_node["_to"] == "8"
+    assert repeat_node["_step"] == "2"
 
 
 def test_parse_top_level_haskell_constants_across_modules() -> None:
@@ -1159,12 +1226,10 @@ blk x = do
     modules = parse_axon_program(source)
     spec = lower_axon_program_to_synapse_spec(modules)
     model_nodes = _node_specs(spec["model"]["graph"])
-    assert model_nodes[0]["_op"] == "call"
-    assert model_nodes[0]["_target"] == "lin_bt"
-    assert model_nodes[0]["path"] == "'attn.c_proj'"
-    block_nodes = _node_specs(spec["model"]["blocks"]["lin_bt"]["graph"])
-    assert block_nodes[0]["_op"] == "linear"
-    assert block_nodes[0]["param_base"] == "path"
+    assert model_nodes[0]["_op"] == "linear"
+    assert "param_base" not in model_nodes[0]
+    assert model_nodes[0]["_params"]["weight"] == "attn.c_proj.weight"
+    assert model_nodes[0]["_params"]["bias"] == "attn.c_proj.bias"
 
 
 def test_path_parameter_annotation_rejects_non_path_type() -> None:
@@ -1280,11 +1345,11 @@ tiny x = do
     assert len(node_specs) == 2
     assert node_specs[0]["_op"] == "layernorm"
     assert node_specs[0]["_bind"] == "pipe_1"
-    assert "graph" in node_specs[1]
-    c_attn = node_specs[1]["graph"][0]["c_attn"]
-    assert c_attn["_op"] == "linear"
-    assert c_attn["_args"] == "pipe_1"
-    assert c_attn["_bind"] == "qkv"
+    assert node_specs[1]["_op"] == "linear"
+    assert node_specs[1]["_args"] == "pipe_1"
+    assert node_specs[1]["_bind"] == "qkv"
+    assert node_specs[1]["_params"]["weight"] == "attn.c_attn.weight"
+    assert node_specs[1]["_params"]["bias"] == "attn.c_attn.bias"
 
 
 def test_lower_pipeline_axon_to_synapse_spec() -> None:
@@ -1306,6 +1371,7 @@ tiny x = do
         "_op": "linear",
         "_args": "x",
         "_bind": "pipe_1",
+        "_params": {"weight": "proj.weight"},
     }
     assert node_specs[1] == {
         "_op": "activation",
@@ -1331,12 +1397,14 @@ tiny x wte = do
         "_bind": "pipe_1",
         "dim": 768,
         "eps": "1e-05",
+        "_params": {"weight": "ln_f.weight", "bias": "ln_f.bias"},
     }
     assert node_specs[1] == {
         "_op": "linear",
         "_args": "pipe_1",
         "_bind": "out_0",
         "dim": 50257,
+        "_params": {"weight": "wte.weight"},
     }
     assert spec["model"]["outputs"] == {"out_0": "out_0"}
 
@@ -1355,6 +1423,7 @@ tiny x = do
         "_op": "linear",
         "_args": "x",
         "_bind": "bind_1",
+        "_params": {"weight": "p1.weight"},
     }
     assert node_specs[1] == {
         "_op": "activation",
@@ -1492,10 +1561,11 @@ def test_synapse_to_axon_roundtrip_with_meta_and_control_nodes() -> None:
             "graph": [
                 {
                     "n1": {
-                        "_op": "repeat",
-                        "var": "i",
-                        "range": "L",
-                        "body": [{"a": {"_op": "add", "_args": ["x", "x"], "_bind": "x"}}],
+                        "_op": "for",
+                        "_scope": "n1",
+                        "_var": "i",
+                        "_to": "L",
+                        "_body": [{"a": {"_op": "add", "_args": ["x", "x"], "_bind": "x"}}],
                     }
                 },
                 {"n2": {"_op": "call", "_target": "block", "_args": "x", "_bind": "x"}},
@@ -1558,10 +1628,11 @@ def test_synapse_to_axon_readable_blocks_lower_back_via_program() -> None:
             "graph": [
                 {
                     "loop": {
-                        "_op": "repeat",
-                        "var": "i",
-                        "range": 2,
-                        "body": [
+                        "_op": "for",
+                        "_scope": "loop",
+                        "_var": "i",
+                        "_to": 2,
+                        "_body": [
                             {"u": {"_op": "call", "_target": "blk", "_args": "x", "_bind": "x"}}
                         ],
                     }
@@ -1576,4 +1647,4 @@ def test_synapse_to_axon_readable_blocks_lower_back_via_program() -> None:
     assert spec2["model"]["outputs"] == {"x": "x"}
     assert "blocks" in spec2["model"]
     assert "blk" in spec2["model"]["blocks"]
-    assert "for@loop i <- [0..(0) + (2)) do" in axon
+    assert "for@loop i <- [0..2) do" in axon

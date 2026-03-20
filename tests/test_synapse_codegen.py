@@ -204,10 +204,11 @@ def test_emit_repeat_block_single_output_loop_carry() -> None:
                 {"one_make": {"_op": "add", "_args": ["zero", "one_seed"], "_bind": "one"}},
                 {
                     "loop": {
-                        "_op": "repeat",
-                        "var": "i",
-                        "range": "L",
-                        "body": [
+                        "_op": "for",
+                        "_scope": "loop",
+                        "_var": "i",
+                        "_to": "L",
+                        "_body": [
                             {
                                 "blk": {
                                     "_op": "call",
@@ -228,6 +229,55 @@ def test_emit_repeat_block_single_output_loop_carry() -> None:
     namespace: dict[str, object] = {}
     exec(source, namespace)  # noqa: S102 - generated test code
     model = namespace["LoopModel"]()
+    out = model(zero=torch.tensor(0.0), one_seed=torch.tensor(1.0))
+    assert torch.is_tensor(out["result"])
+    assert float(out["result"]) == 3.0
+
+
+def test_emit_for_block_with_step_single_output_loop_carry() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"zero": {"shape": []}, "one_seed": {"shape": []}},
+            "blocks": {
+                "step": {
+                    "inputs": {"x": {"shape": []}, "one": {"shape": []}},
+                    "graph": [{"inc": {"_op": "add", "_args": ["x", "one"], "_bind": "y"}}],
+                    "outputs": {"y": "y"},
+                }
+            },
+            "graph": [
+                {"init": {"_op": "add", "_args": ["zero", "zero"], "_bind": "x"}},
+                {"one_make": {"_op": "add", "_args": ["zero", "one_seed"], "_bind": "one"}},
+                {
+                    "loop": {
+                        "_op": "for",
+                        "_scope": "loop",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 6,
+                        "_step": 2,
+                        "_body": [
+                            {
+                                "blk": {
+                                    "_op": "call",
+                                    "_target": "step",
+                                    "_args": "x",
+                                    "one": "one",
+                                    "_bind": "x",
+                                }
+                            }
+                        ],
+                    }
+                },
+            ],
+            "outputs": {"result": "x"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="LoopStepModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["LoopStepModel"]()
     out = model(zero=torch.tensor(0.0), one_seed=torch.tensor(1.0))
     assert torch.is_tensor(out["result"])
     assert float(out["result"]) == 3.0

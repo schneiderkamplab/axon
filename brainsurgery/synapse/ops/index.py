@@ -27,11 +27,7 @@ def interpret(
     if collection is None:
         env[out_name] = None
         return
-    idx = (
-        int(model._eval_expr(ins[1], env, symbols))
-        if not isinstance(ins[1], str)
-        else int(env[ins[1]])
-    )
+    idx = int(model._eval_expr(ins[1], env, symbols))
     env[out_name] = collection[idx]
     return
 
