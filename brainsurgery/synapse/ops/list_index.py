@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "index"
+OP_NAME = "list_index"
+LOWERING_ARITY = (2, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -21,9 +25,9 @@ def interpret(
 ) -> None:
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
-        raise ValueError("index expects [collection, index]")
+        raise ValueError("list_index expects [collection, index]")
     collection = env.get(ins[0])
-    out_name = model._require_name(node_spec.get("_bind"), field="index._bind")
+    out_name = model._require_name(node_spec.get("_bind"), field="list_index._bind")
     if collection is None:
         env[out_name] = None
         return
@@ -54,7 +58,7 @@ def compile(
 
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
-        raise ValueError("index expects [collection,index]")
+        raise ValueError("list_index expects [collection,index]")
     coll = read(str(ins[0]))
     idx_expr = emitter._expr_code(ins[1], env)
     out_name = str(node_spec.get("_bind"))
@@ -63,4 +67,13 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

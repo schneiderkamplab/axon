@@ -1,14 +1,7 @@
 import List
 
-update :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (?Tensor[B,H,T,D], ?Tensor[B,H,T,D], ?Cache)
-update past k v = do
-  k_all, v_all, present <- _cache_update past k v
-  return k_all, v_all, present
-
-coalesce :: ?Tensor[B,H,T,D] -> ?Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (Tensor[B,H,T,D], Tensor[B,H,T,D])
-coalesce k_all v_all k v = do
-  k_ctx, v_ctx <- _cache_coalesce k_all v_all k v
-  return k_ctx, v_ctx
+update :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
+update past k v use_cache = _cache_update past k v use_cache
 
 seq_len :: ?Tensor[B,H,T,D] -> I
 seq_len k = _cache_seq_len k

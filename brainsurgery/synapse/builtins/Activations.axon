@@ -1,17 +1,17 @@
 gelu :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu = _act_gelu
+gelu = _activations_gelu
 
 gelu_new :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu_new = _act_gelu_new
+gelu_new = _activations_gelu_new
 
 gelu_pytorch_tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu_pytorch_tanh = _act_gelu_pytorch_tanh
+gelu_pytorch_tanh = _activations_gelu_pytorch_tanh
 
 relu :: Tensor[B,T,D] -> Tensor[B,T,D]
-relu = _act_relu
+relu = _activations_relu
 
 silu :: Tensor[B,T,D] -> Tensor[B,T,D]
-silu = _act_silu
+silu = _activations_silu
 
 swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
-swiglu = _act_swiglu
+swiglu = _activations_swiglu

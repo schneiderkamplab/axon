@@ -6,6 +6,10 @@ import torch
 from torch.nn import functional as F
 
 OP_NAME = "linear"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "transpose", "bias"}
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "dim", "bias": "bool", "transpose": "bool"}
 
 
 def _validate_linear_keys(node_spec: dict[str, Any]) -> None:
@@ -32,6 +36,58 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     has_explicit_weight = isinstance(explicit_weight, str) and "." in explicit_weight
     if not has_bias and has_explicit_weight:
         return False
+    return True
+
+
+def lowering_normalize_kwargs(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> None:
+    del args
+    if "weight_layout" in kwargs:
+        raise ValueError("linear does not support weight_layout; use transpose=true/false")
+    if "tie_weight" in kwargs:
+        raise ValueError("linear does not support tie_weight; use linear@<path>")
+    if "out_features" in kwargs:
+        raise ValueError("linear does not support out_features; use dim")
+    if "out_dim" in kwargs:
+        raise ValueError("linear does not support out_dim; use dim")
+    if "dim" not in kwargs and isinstance(out, str):
+        inferred = ctx.tensor_last_dim.get(out)
+        if inferred is not None:
+            kwargs["dim"] = inferred
+    if "transpose" not in kwargs:
+        return
+    raw_transpose = kwargs["transpose"]
+    if isinstance(raw_transpose, bool):
+        return
+    if isinstance(raw_transpose, str) and raw_transpose.lower() in {"true", "false"}:
+        kwargs["transpose"] = raw_transpose.lower() == "true"
+        return
+    raise ValueError("linear transpose must be true/false")
+
+
+def lowering_infer_metadata(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> bool:
+    if not isinstance(out, str):
+        return False
+    first_in = args[0].strip() if args else None
+    first_dim = (
+        ctx.tensor_last_dim.get(first_in)
+        if isinstance(first_in, str) and first_in.isidentifier()
+        else None
+    )
+    last_dim = kwargs.get("dim", first_dim)
+    if last_dim is not None:
+        ctx.tensor_last_dim[out] = last_dim
     return True
 
 
@@ -120,4 +176,15 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_normalize_kwargs",
+    "lowering_infer_metadata",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

@@ -6,11 +6,31 @@ import torch
 from torch.nn import functional as F
 
 OP_NAME = "softmax"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = {"dtype", "dim"}
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "int", "dtype": "str"}
+_SUPPORTED_DTYPES: set[str] = {"float32", "float16", "bfloat16"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, ctx
+    if not isinstance(out, str):
+        raise ValueError("softmax requires a single scalar output binding")
+    dtype_name = kwargs.get("dtype")
+    if dtype_name is not None:
+        if not isinstance(dtype_name, str):
+            raise ValueError("softmax dtype must be a string when provided")
+        if dtype_name not in _SUPPORTED_DTYPES:
+            supported = ", ".join(sorted(_SUPPORTED_DTYPES))
+            raise ValueError(f"Unsupported softmax dtype: {dtype_name} (supported: {supported})")
 
 
 def interpret(
@@ -36,7 +56,7 @@ def interpret(
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
         }
-        if dtype_name not in dtype_map:
+        if dtype_name not in _SUPPORTED_DTYPES:
             raise ValueError(f"Unsupported softmax dtype: {dtype_name}")
         env[out] = F.softmax(x, dim=dim, dtype=dtype_map[dtype_name])
     return
@@ -77,7 +97,7 @@ def compile(
             "float16": "torch.float16",
             "bfloat16": "torch.bfloat16",
         }
-        if dtype_name not in dtype_map:
+        if dtype_name not in _SUPPORTED_DTYPES:
             raise ValueError(f"Unsupported softmax dtype: {dtype_name}")
         lines.append(
             f"{indent}{out_var} = F.softmax({src}, dim=int({dim}), dtype={dtype_map[dtype_name]})"
@@ -85,4 +105,14 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_validate_signature",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

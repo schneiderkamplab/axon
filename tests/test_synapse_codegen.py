@@ -174,7 +174,7 @@ def test_index_on_none_collection_is_none_safe() -> None:
         "model": {
             "symbols": {},
             "inputs": {"collection": {"shape": [], "optional": True}},
-            "graph": [{"at0": {"_op": "index", "_args": ["collection", 0], "_bind": "x0"}}],
+            "graph": [{"at0": {"_op": "list_index", "_args": ["collection", 0], "_bind": "x0"}}],
             "outputs": {"x0": "x0"},
         },
     }

@@ -5,11 +5,23 @@ from typing import Any
 import torch
 
 OP_NAME = "zeros_like"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, str):
+        raise ValueError("zeros_like requires a single scalar output binding")
 
 
 def interpret(
@@ -54,4 +66,14 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_validate_signature",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

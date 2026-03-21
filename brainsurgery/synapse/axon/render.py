@@ -115,15 +115,15 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
         and not isinstance(node_spec.get("weight"), str)
     ):
         callee = f"{op}@{node_path}"
+    elif op.startswith("activations_"):
+        callee = f"_activations_{op[len('activations_') :]}"
     elif op == "activation" and isinstance(node_spec.get("kind"), str):
-        callee = f"act::{node_spec['kind']}"
+        callee = f"_activations_{node_spec['kind']}"
         kwargs = [item for item in kwargs if not item.startswith("kind=")]
-    elif op == "kv_cache_update":
-        callee = "cache::update"
-    elif op == "kv_seq_len":
-        callee = "cache::seq_len"
-    elif op == "coalesce":
-        callee = "cache::coalesce"
+    elif op == "cache_update":
+        callee = "_cache_update"
+    elif op == "cache_seq_len":
+        callee = "_cache_seq_len"
     elif op == "split":
         callee = "split"
     else:

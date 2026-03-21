@@ -5,6 +5,10 @@ from typing import Any
 from torch.nn import functional as F
 
 OP_NAME = "attention"
+LOWERING_ARITY = (3, 3)
+LOWERING_ALLOWED_KWARGS: set[str] = {"scale", "mask", "causal"}
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {"causal": "bool", "mask": "str", "scale": "number"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -92,4 +96,13 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

@@ -73,7 +73,76 @@ OP_MODULES: dict[str, Any] = _load_discovered_op_modules()
 
 
 def get_op_module(op_name: str) -> Any | None:
-    return OP_MODULES.get(op_name)
+    module = OP_MODULES.get(op_name)
+    if module is not None:
+        return module
+    if op_name.startswith("activations_"):
+        return OP_MODULES.get("activation")
+    return None
 
 
-__all__ = ["OP_MODULES", "get_op_module"]
+def get_op_lowering_signature(op_name: str) -> dict[str, Any] | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    signature: dict[str, Any] = {}
+    if hasattr(module, "LOWERING_ARITY"):
+        signature["arity"] = getattr(module, "LOWERING_ARITY")
+    if hasattr(module, "LOWERING_ALLOWED_KWARGS"):
+        signature["allowed_kwargs"] = getattr(module, "LOWERING_ALLOWED_KWARGS")
+    if hasattr(module, "LOWERING_REQUIRED_KWARGS"):
+        signature["required_kwargs"] = getattr(module, "LOWERING_REQUIRED_KWARGS")
+    if hasattr(module, "LOWERING_KWARG_KINDS"):
+        signature["kwarg_kinds"] = getattr(module, "LOWERING_KWARG_KINDS")
+    return signature or None
+
+
+def get_op_lowering_normalizer(op_name: str) -> Any | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    normalize = getattr(module, "lowering_normalize_kwargs", None)
+    if callable(normalize):
+        return normalize
+    return None
+
+
+def get_op_lowering_infer_metadata(op_name: str) -> Any | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    infer = getattr(module, "lowering_infer_metadata", None)
+    if callable(infer):
+        return infer
+    return None
+
+
+def get_op_lowering_known_output_arity(op_name: str) -> Any | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    arity = getattr(module, "lowering_known_output_arity", None)
+    if callable(arity):
+        return arity
+    return None
+
+
+def get_op_lowering_validator(op_name: str) -> Any | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    validate = getattr(module, "lowering_validate_signature", None)
+    if callable(validate):
+        return validate
+    return None
+
+
+__all__ = [
+    "OP_MODULES",
+    "get_op_module",
+    "get_op_lowering_signature",
+    "get_op_lowering_normalizer",
+    "get_op_lowering_infer_metadata",
+    "get_op_lowering_known_output_arity",
+    "get_op_lowering_validator",
+]

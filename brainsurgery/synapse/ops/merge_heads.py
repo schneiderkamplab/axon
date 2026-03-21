@@ -3,11 +3,33 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "merge_heads"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_infer_metadata(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> bool:
+    del kwargs
+    if not isinstance(out, str):
+        return False
+    first_in = args[0].strip() if args else None
+    if isinstance(first_in, str) and first_in.isidentifier():
+        first_dim = ctx.tensor_last_dim.get(first_in)
+        if first_dim is not None:
+            ctx.tensor_last_dim[out] = first_dim
+    return True
 
 
 def interpret(
@@ -56,4 +78,14 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_infer_metadata",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

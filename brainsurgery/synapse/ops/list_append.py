@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "append"
+OP_NAME = "list_append"
+LOWERING_ARITY = (2, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = {"when"}
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -21,10 +25,10 @@ def interpret(
 ) -> None:
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
-        raise ValueError("append expects [list_name, item_name]")
+        raise ValueError("list_append expects [list_name, item_name]")
     base_list = list(env[ins[0]])
     base_list.append(env[ins[1]])
-    out_name = model._require_name(node_spec.get("_bind"), field="append._bind")
+    out_name = model._require_name(node_spec.get("_bind"), field="list_append._bind")
     env[out_name] = base_list
     return
 
@@ -51,7 +55,7 @@ def compile(
 
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
-        raise ValueError("append expects [list,item]")
+        raise ValueError("list_append expects [list,item]")
     base = read(str(ins[0]))
     item = read(str(ins[1]))
     out_name = str(node_spec.get("_bind"))
@@ -61,4 +65,13 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

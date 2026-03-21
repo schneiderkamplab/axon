@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .call_parser import split_top_level as _split_top_level_shared
 from .types import (
     AxonBind,
     AxonModule,
@@ -64,45 +65,11 @@ def _normalized_source_lines(source: str) -> list[str]:
 
 
 def _split_top_level_csv(text: str) -> list[str]:
-    parts: list[str] = []
-    depth = 0
-    start = 0
-    for idx, ch in enumerate(text):
-        if ch in "([":
-            depth += 1
-        elif ch in ")]":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            parts.append(text[start:idx].strip())
-            start = idx + 1
-    tail = text[start:].strip()
-    if tail:
-        parts.append(tail)
-    return parts
+    return _split_top_level_shared(text, ",")
 
 
 def _split_top_level(text: str, sep: str) -> list[str]:
-    parts: list[str] = []
-    depth = 0
-    start = 0
-    i = 0
-    seplen = len(sep)
-    while i < len(text):
-        ch = text[i]
-        if ch in "([":
-            depth += 1
-        elif ch in ")]":
-            depth -= 1
-        if depth == 0 and text.startswith(sep, i):
-            parts.append(text[start:i].strip())
-            i += seplen
-            start = i
-            continue
-        i += 1
-    tail = text[start:].strip()
-    if tail:
-        parts.append(tail)
-    return parts
+    return _split_top_level_shared(text, sep)
 
 
 def _parse_params(raw: str) -> tuple[AxonParam, ...]:

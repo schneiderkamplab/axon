@@ -2,12 +2,68 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "repeat_kv"
+OP_NAME = "repeat"
+LOWERING_ARITY = (1, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = {"heads", "kv_heads", "repeats", "times", "dim"}
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "heads": "dim",
+    "kv_heads": "dim",
+    "repeats": "dim",
+    "times": "dim",
+    "dim": "int",
+}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_normalize_kwargs(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> None:
+    if "times" in kwargs and "repeats" not in kwargs:
+        kwargs["repeats"] = kwargs.pop("times")
+    if len(args) >= 2 and "repeats" not in kwargs:
+        kwargs["repeats"] = args[1]
+        del args[1:]
+    dim = kwargs.pop("dim", 1)
+    if dim != 1:
+        raise ValueError("repeat currently supports only dim=1 (head axis)")
+    if "repeats" in kwargs:
+        return
+    src_name = args[0].strip()
+    if not src_name.isidentifier():
+        return
+    if "kv_heads" not in kwargs:
+        inferred_kv_heads = ctx.tensor_heads.get(src_name)
+        if inferred_kv_heads is not None:
+            kwargs["kv_heads"] = inferred_kv_heads
+    if "heads" not in kwargs and isinstance(out, str):
+        inferred_heads = ctx.tensor_heads.get(out)
+        if inferred_heads is not None:
+            kwargs["heads"] = inferred_heads
+
+
+def lowering_infer_metadata(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> bool:
+    del args
+    if not isinstance(out, str):
+        return False
+    heads = kwargs.get("heads")
+    if heads is not None:
+        ctx.tensor_heads[out] = heads
+    return True
 
 
 def interpret(
@@ -27,7 +83,7 @@ def interpret(
         n_rep = heads // kv_heads
     else:
         n_rep = int(model._eval_expr(repeats, env, symbols))
-    out = model._require_name(node_spec.get("_bind"), field="repeat_kv._bind")
+    out = model._require_name(node_spec.get("_bind"), field="repeat._bind")
     if n_rep == 1:
         env[out] = src
     else:
@@ -78,4 +134,15 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "OP_NAME",
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "lowering_normalize_kwargs",
+    "lowering_infer_metadata",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

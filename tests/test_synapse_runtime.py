@@ -39,7 +39,7 @@ def _tiny_linear_spec() -> dict[str, object]:
     }
 
 
-def _reshape_triplet_lowered_spec(
+def _reshape_three_heads_spec(
     *, heads: int | None = None, head_dim: int | None = None
 ) -> dict[str, object]:
     q_node: dict[str, object] = {"_op": "reshape_heads", "_args": "q", "_bind": "qh"}
@@ -125,26 +125,7 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
     }
 
 
-def _coalesce_spec() -> dict[str, object]:
-    return {
-        "synapse": 1,
-        "model": {
-            "inputs": {"a": {}, "b": {}, "c": {}, "d": {}},
-            "graph": [
-                {
-                    "n": {
-                        "_op": "coalesce",
-                        "_args": ["a", "b", "c", "d"],
-                        "_bind": ["o1", "o2"],
-                    }
-                }
-            ],
-            "outputs": {"o1": "o1", "o2": "o2"},
-        },
-    }
-
-
-def _moe_select_tokens_spec(*, expert: object = 1) -> dict[str, object]:
+def _moe_select_spec(*, expert: object = 1) -> dict[str, object]:
     return {
         "synapse": 1,
         "model": {
@@ -152,7 +133,7 @@ def _moe_select_tokens_spec(*, expert: object = 1) -> dict[str, object]:
             "graph": [
                 {
                     "sel": {
-                        "_op": "moe_select_tokens",
+                        "_op": "moe_select",
                         "_args": ["x", "scores", "idx"],
                         "_bind": ["x_sel", "token_idx", "topk_pos", "sel_scores"],
                         "expert": expert,
@@ -233,8 +214,8 @@ model:
     assert logits_yaml.shape == (2, 3, 8)
 
 
-def test_runtime_reshape_heads_triplet_lowering_equivalent_infers_head_dim_from_heads() -> None:
-    spec = _reshape_triplet_lowered_spec(heads=12)
+def test_runtime_three_reshape_heads_infers_head_dim_from_heads() -> None:
+    spec = _reshape_three_heads_spec(heads=12)
     model = SynapseProgramModel.from_spec(spec)
     q = torch.randn(2, 5, 768)
     out = model(q=q, k=q, v=q)
@@ -243,8 +224,8 @@ def test_runtime_reshape_heads_triplet_lowering_equivalent_infers_head_dim_from_
     assert out["vh"].shape == (2, 12, 5, 64)
 
 
-def test_runtime_reshape_heads_triplet_lowering_equivalent_infers_heads_from_head_dim() -> None:
-    spec = _reshape_triplet_lowered_spec(head_dim=64)
+def test_runtime_three_reshape_heads_infers_heads_from_head_dim() -> None:
+    spec = _reshape_three_heads_spec(head_dim=64)
     model = SynapseProgramModel.from_spec(spec)
     q = torch.randn(2, 5, 768)
     out = model(q=q, k=q, v=q)
@@ -253,8 +234,8 @@ def test_runtime_reshape_heads_triplet_lowering_equivalent_infers_heads_from_hea
     assert out["vh"].shape == (2, 12, 5, 64)
 
 
-def test_runtime_reshape_heads_triplet_lowering_equivalent_requires_heads_or_head_dim() -> None:
-    spec = _reshape_triplet_lowered_spec()
+def test_runtime_three_reshape_heads_requires_heads_or_head_dim() -> None:
+    spec = _reshape_three_heads_spec()
     model = SynapseProgramModel.from_spec(spec)
     q = torch.randn(2, 5, 768)
     with pytest.raises(ValueError, match="requires heads or head_dim"):
@@ -313,28 +294,8 @@ def test_runtime_arange_positions_uses_attention_mask_for_left_padding() -> None
     assert torch.equal(pos[1], torch.tensor([0, 0, 0, 1], dtype=torch.long))
 
 
-def test_runtime_coalesce_uses_grouped_fallback() -> None:
-    spec = _coalesce_spec()
-    model = SynapseProgramModel.from_spec(spec)
-    out = model(a=None, b=torch.tensor(2), c=torch.tensor(3), d=None)
-    assert torch.equal(out["o1"], torch.tensor(3))
-    assert torch.equal(out["o2"], torch.tensor(2))
-
-
-def test_runtime_coalesce_raises_for_missing_candidate() -> None:
-    spec = _coalesce_spec()
-    graph = spec["model"]["graph"]
-    assert isinstance(graph, list)
-    node = graph[0]["n"]
-    assert isinstance(node, dict)
-    node["_args"] = ["a", "b", "missing", "d"]
-    model = SynapseProgramModel.from_spec(spec)
-    with pytest.raises(ValueError, match="coalesce candidate 'missing' missing in env"):
-        model(a=None, b=torch.tensor(2), c=None, d=None)
-
-
-def test_runtime_moe_select_tokens_selects_routed_rows() -> None:
-    spec = _moe_select_tokens_spec(expert=1)
+def test_runtime_moe_select_selects_routed_rows() -> None:
+    spec = _moe_select_spec(expert=1)
     model = SynapseProgramModel.from_spec(spec)
     x = torch.tensor([[[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]])
     scores = torch.tensor([[[0.7, 0.3], [0.2, 0.8], [0.6, 0.4]]])
@@ -347,8 +308,8 @@ def test_runtime_moe_select_tokens_selects_routed_rows() -> None:
     assert torch.allclose(out["sel_scores"], torch.tensor([0.7, 0.8, 0.6], dtype=torch.float32))
 
 
-def test_runtime_moe_select_tokens_allows_empty_selection() -> None:
-    spec = _moe_select_tokens_spec(expert=9)
+def test_runtime_moe_select_allows_empty_selection() -> None:
+    spec = _moe_select_spec(expert=9)
     model = SynapseProgramModel.from_spec(spec)
     x = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
     scores = torch.tensor([[[0.6, 0.4], [0.2, 0.8]]])
@@ -361,38 +322,36 @@ def test_runtime_moe_select_tokens_allows_empty_selection() -> None:
     assert out["sel_scores"].numel() == 0
 
 
-def test_runtime_moe_select_tokens_validates_flattened_token_alignment() -> None:
-    spec = _moe_select_tokens_spec(expert=1)
+def test_runtime_moe_select_validates_flattened_token_alignment() -> None:
+    spec = _moe_select_spec(expert=1)
     model = SynapseProgramModel.from_spec(spec)
     x = torch.randn(1, 3, 4)
     scores = torch.randn(1, 2, 2)
     idx = torch.tensor([[[1, 0], [0, 1]]], dtype=torch.long)
     with pytest.raises(
         ValueError,
-        match="moe_select_tokens hidden and topk tensors must align on flattened token count",
+        match="moe_select hidden and topk tensors must align on flattened token count",
     ):
         model(x=x, scores=scores, idx=idx)
 
 
-def test_runtime_moe_select_tokens_validates_index_dtype() -> None:
-    spec = _moe_select_tokens_spec(expert=1)
+def test_runtime_moe_select_validates_index_dtype() -> None:
+    spec = _moe_select_spec(expert=1)
     model = SynapseProgramModel.from_spec(spec)
     x = torch.randn(1, 2, 4)
     scores = torch.randn(1, 2, 2)
     idx = torch.randn(1, 2, 2)
-    with pytest.raises(
-        ValueError, match=r"moe_select_tokens topk_indices must be an integer tensor"
-    ):
+    with pytest.raises(ValueError, match=r"moe_select topk_indices must be an integer tensor"):
         model(x=x, scores=scores, idx=idx)
 
 
-def test_runtime_moe_select_tokens_requires_integral_expert() -> None:
-    spec = _moe_select_tokens_spec(expert=1.5)
+def test_runtime_moe_select_requires_integral_expert() -> None:
+    spec = _moe_select_spec(expert=1.5)
     model = SynapseProgramModel.from_spec(spec)
     x = torch.randn(1, 2, 4)
     scores = torch.randn(1, 2, 2)
     idx = torch.tensor([[[1, 0], [0, 1]]], dtype=torch.long)
-    with pytest.raises(ValueError, match=r"moe_select_tokens expert must evaluate to an integer"):
+    with pytest.raises(ValueError, match=r"moe_select expert must evaluate to an integer"):
         model(x=x, scores=scores, idx=idx)
 
 

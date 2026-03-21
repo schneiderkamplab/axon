@@ -3,11 +3,33 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "reshape_heads"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = {"heads", "head_dim"}
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {"heads": "dim", "head_dim": "dim"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_infer_metadata(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> bool:
+    if not isinstance(out, str):
+        return False
+    head_dim = kwargs.get("head_dim")
+    if head_dim is not None:
+        ctx.tensor_last_dim[out] = head_dim
+    heads = kwargs.get("heads")
+    if heads is not None:
+        ctx.tensor_heads[out] = heads
+    return True
 
 
 def interpret(
@@ -112,4 +134,14 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_infer_metadata",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

@@ -4,7 +4,11 @@ from typing import Any
 
 import torch
 
-OP_NAME = "moe_select_tokens"
+OP_NAME = "moe_select"
+LOWERING_ARITY = (3, 3)
+LOWERING_ALLOWED_KWARGS: set[str] = {"expert"}
+LOWERING_REQUIRED_KWARGS: set[str] = {"expert"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {"expert": "dim"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -12,12 +16,28 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     return False
 
 
+def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int:
+    del kwargs
+    return 4
+
+
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, list) or len(out) != 4:
+        raise ValueError(
+            "moe_select requires exactly four outputs: "
+            "selected_hidden, token_idx, topk_pos, selected_scores"
+        )
+
+
 def _resolve_inputs_and_outputs(node_spec: dict[str, Any]) -> tuple[list[str], list[str]]:
     ins = node_spec.get("_args")
     outs = node_spec.get("_bind")
     if not isinstance(ins, list) or len(ins) != 3 or not all(isinstance(name, str) for name in ins):
         raise ValueError(
-            "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
+            "moe_select expects in=[hidden,topk_scores,topk_indices], "
             "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
         )
     if (
@@ -26,7 +46,7 @@ def _resolve_inputs_and_outputs(node_spec: dict[str, Any]) -> tuple[list[str], l
         or not all(isinstance(name, str) for name in outs)
     ):
         raise ValueError(
-            "moe_select_tokens expects in=[hidden,topk_scores,topk_indices], "
+            "moe_select expects in=[hidden,topk_scores,topk_indices], "
             "out=[selected_hidden,token_idx,topk_pos,selected_scores]"
         )
     return [str(name) for name in ins], [str(name) for name in outs]
@@ -37,9 +57,7 @@ def _resolve_expert(
 ) -> int:
     expert_raw = model._eval_expr(node_spec.get("expert"), env, symbols)
     if not isinstance(expert_raw, int) or isinstance(expert_raw, bool):
-        raise ValueError(
-            f"moe_select_tokens expert must evaluate to an integer, got {expert_raw!r}"
-        )
+        raise ValueError(f"moe_select expert must evaluate to an integer, got {expert_raw!r}")
     return expert_raw
 
 
@@ -49,22 +67,20 @@ def _flatten_routing_inputs(
     topk_indices: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if hidden.ndim < 2:
-        raise ValueError("moe_select_tokens hidden must be at least rank-2")
+        raise ValueError("moe_select hidden must be at least rank-2")
     if topk_scores.ndim < 2 or topk_indices.ndim < 2:
-        raise ValueError("moe_select_tokens topk_scores/topk_indices must be at least rank-2")
+        raise ValueError("moe_select topk_scores/topk_indices must be at least rank-2")
     if topk_scores.shape != topk_indices.shape:
-        raise ValueError("moe_select_tokens topk_scores and topk_indices must have the same shape")
+        raise ValueError("moe_select topk_scores and topk_indices must have the same shape")
     if topk_indices.dtype.is_floating_point or topk_indices.dtype.is_complex:
         raise ValueError(
-            f"moe_select_tokens topk_indices must be an integer tensor, got {topk_indices.dtype}"
+            f"moe_select topk_indices must be an integer tensor, got {topk_indices.dtype}"
         )
     hidden_flat = hidden.reshape(-1, hidden.shape[-1])
     topk_scores_flat = topk_scores.reshape(-1, topk_scores.shape[-1])
     topk_indices_flat = topk_indices.reshape(-1, topk_indices.shape[-1])
     if hidden_flat.shape[0] != topk_scores_flat.shape[0]:
-        raise ValueError(
-            "moe_select_tokens hidden and topk tensors must align on flattened token count"
-        )
+        raise ValueError("moe_select hidden and topk tensors must align on flattened token count")
     return hidden_flat, topk_scores_flat, topk_indices_flat
 
 
@@ -144,4 +160,15 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_known_output_arity",
+    "lowering_validate_signature",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

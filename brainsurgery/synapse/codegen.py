@@ -663,9 +663,11 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
 
             op = node_spec.get("_op")
             if isinstance(op, str):
+                is_dynamic_activation = op.startswith("activations_")
                 if (
                     op not in known_control_ops
                     and op not in known_runtime_builtin_ops
+                    and not is_dynamic_activation
                     and op not in ops
                 ):
                     raise ValueError(f"Unsupported op in spec: {op!r}")

@@ -3,11 +3,71 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "mul"
+LOWERING_ARITY = (2, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _normalize_dim_token(value: Any) -> Any:
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return value
+
+
+def _dims_compatible(left: Any, right: Any) -> bool:
+    return _normalize_dim_token(left) == _normalize_dim_token(right)
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, str):
+        raise ValueError("mul requires a single scalar output binding")
+
+
+def lowering_infer_metadata(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> bool:
+    del kwargs
+    if not isinstance(out, str):
+        return False
+    first_in = args[0].strip() if args else None
+    second_in = args[1].strip() if len(args) > 1 else None
+    first_dim = (
+        ctx.tensor_last_dim.get(first_in)
+        if isinstance(first_in, str) and first_in.isidentifier()
+        else None
+    )
+    second_dim = (
+        ctx.tensor_last_dim.get(second_in)
+        if isinstance(second_in, str) and second_in.isidentifier()
+        else None
+    )
+    if (
+        first_dim is not None
+        and second_dim is not None
+        and not _dims_compatible(first_dim, second_dim)
+    ):
+        raise ValueError(f"mul requires matching last-dim; got {first_dim!r} and {second_dim!r}")
+    unified = first_dim if first_dim is not None else second_dim
+    if unified is not None:
+        if isinstance(first_in, str) and first_in.isidentifier() and first_dim is None:
+            ctx.tensor_last_dim[first_in] = unified
+        if isinstance(second_in, str) and second_in.isidentifier() and second_dim is None:
+            ctx.tensor_last_dim[second_in] = unified
+        ctx.tensor_last_dim[out] = unified
+    return True
 
 
 def interpret(
@@ -58,4 +118,15 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "lowering_validate_signature",
+    "lowering_infer_metadata",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "init_list"
+OP_NAME = "list_init"
+LOWERING_ARITY = (0, 0)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -19,7 +23,7 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    out_name = model._require_name(node_spec.get("_bind"), field="init_list._bind")
+    out_name = model._require_name(node_spec.get("_bind"), field="list_init._bind")
     env[out_name] = []
     return
 
@@ -50,4 +54,13 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

@@ -69,6 +69,7 @@ ignore = ["E501"]
 [tool.mypy]
 python_version = "3.12"
 files = ["brainsurgery"]
+exclude = "^(tests/|examples/|test_.*\\.py$|axon\\.py$)"
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true

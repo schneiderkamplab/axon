@@ -5,11 +5,33 @@ from typing import Any
 import torch
 
 OP_NAME = "topk"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = {"k", "dim", "largest", "sorted"}
+LOWERING_REQUIRED_KWARGS: set[str] = {"k"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "k": "dim",
+    "dim": "int",
+    "largest": "bool",
+    "sorted": "bool",
+}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
+
+
+def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int:
+    del kwargs
+    return 2
+
+
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, list) or len(out) != 2:
+        raise ValueError("topk requires exactly two outputs: values, indices")
 
 
 def interpret(
@@ -71,4 +93,15 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "OP_NAME",
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "lowering_known_output_arity",
+    "lowering_validate_signature",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]

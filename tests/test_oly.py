@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from brainsurgery.cli.oly import _parse_oly_line, _Parser
 from brainsurgery.cli.parse import _parse_transform_block

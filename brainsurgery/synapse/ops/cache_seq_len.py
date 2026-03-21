@@ -4,7 +4,11 @@ from typing import Any
 
 import torch
 
-OP_NAME = "kv_seq_len"
+OP_NAME = "cache_seq_len"
+LOWERING_ARITY = (1, 1)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -22,15 +26,15 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     ref = node_spec.get("_args")
-    out_name = model._require_name(node_spec.get("_bind"), field="kv_seq_len._bind")
+    out_name = model._require_name(node_spec.get("_bind"), field="cache_seq_len._bind")
     if not isinstance(ref, str):
-        raise ValueError("kv_seq_len.in must be a string")
+        raise ValueError("cache_seq_len.in must be a string")
     value = env.get(ref)
     if value is None:
         env[out_name] = 0
         return
     if not isinstance(value, tuple) or len(value) < 1 or not torch.is_tensor(value[0]):
-        raise ValueError("kv_seq_len expects kv tuple (k, v)")
+        raise ValueError("cache_seq_len expects kv tuple (k, v)")
     env[out_name] = int(value[0].shape[-2])
     return
 
@@ -57,7 +61,7 @@ def compile(
 
     ref = node_spec.get("_args")
     if not isinstance(ref, str):
-        raise ValueError("kv_seq_len.in must be string")
+        raise ValueError("cache_seq_len.in must be string")
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     src = read(ref)
@@ -68,4 +72,13 @@ def compile(
     return lines
 
 
-__all__ = ["OP_NAME", "interpret", "compile", "uses_node_path"]
+__all__ = [
+    "LOWERING_ARITY",
+    "LOWERING_ALLOWED_KWARGS",
+    "LOWERING_REQUIRED_KWARGS",
+    "LOWERING_KWARG_KINDS",
+    "OP_NAME",
+    "interpret",
+    "compile",
+    "uses_node_path",
+]
