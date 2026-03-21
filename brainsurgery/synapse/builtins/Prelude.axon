@@ -28,8 +28,8 @@ attention = _attention
 position_ids :: TokenIds[B,T] -> ?Tensor[B,T] -> Tensor[B,T]
 position_ids = _position_ids
 
-apply_rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
-apply_rope_pair = _apply_rope_pair
+rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+rope_pair = _rope_pair
 
 repeat :: Tensor[B,KVH,T,HD] -> I -> ?I -> Tensor[B,H,T,HD]
 repeat = _repeat
