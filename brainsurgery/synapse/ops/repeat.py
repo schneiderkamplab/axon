@@ -4,13 +4,10 @@ from typing import Any
 
 OP_NAME = "repeat"
 LOWERING_ARITY = (1, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"heads", "kv_heads", "repeats", "times", "dim"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"repeats", "dim"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
-    "heads": "dim",
-    "kv_heads": "dim",
     "repeats": "dim",
-    "times": "dim",
     "dim": "int",
 }
 
@@ -27,8 +24,6 @@ def lowering_normalize_kwargs(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> None:
-    if "times" in kwargs and "repeats" not in kwargs:
-        kwargs["repeats"] = kwargs.pop("times")
     if len(args) >= 2 and "repeats" not in kwargs:
         kwargs["repeats"] = args[1]
         del args[1:]
@@ -38,16 +33,13 @@ def lowering_normalize_kwargs(
     if "repeats" in kwargs:
         return
     src_name = args[0].strip()
-    if not src_name.isidentifier():
-        return
-    if "kv_heads" not in kwargs:
-        inferred_kv_heads = ctx.tensor_heads.get(src_name)
-        if inferred_kv_heads is not None:
-            kwargs["kv_heads"] = inferred_kv_heads
-    if "heads" not in kwargs and isinstance(out, str):
-        inferred_heads = ctx.tensor_heads.get(out)
-        if inferred_heads is not None:
-            kwargs["heads"] = inferred_heads
+    if not src_name.isidentifier() or not isinstance(out, str):
+        raise ValueError("repeat requires repeats (positional or keyword)")
+    kv_heads = ctx.tensor_heads.get(src_name)
+    heads = ctx.tensor_heads.get(out)
+    if kv_heads is None or heads is None:
+        raise ValueError("repeat requires repeats (positional or keyword)")
+    kwargs["repeats"] = f"({heads} // {kv_heads})"
 
 
 def lowering_infer_metadata(
@@ -57,12 +49,15 @@ def lowering_infer_metadata(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> bool:
-    del args
+    del kwargs
     if not isinstance(out, str):
         return False
-    heads = kwargs.get("heads")
-    if heads is not None:
-        ctx.tensor_heads[out] = heads
+    src_name: str | None = None
+    # Preserve known heads metadata through repeat.
+    if args:
+        src_name = args[0].strip()
+    if isinstance(src_name, str) and src_name.isidentifier() and src_name in ctx.tensor_heads:
+        ctx.tensor_heads[out] = ctx.tensor_heads[src_name]
     return True
 
 
@@ -78,11 +73,8 @@ def interpret(
     src = model._read_tensor_input(node_spec.get("_args"), env)
     repeats = node_spec.get("repeats")
     if repeats is None:
-        heads = int(model._eval_expr(node_spec.get("heads"), env, symbols))
-        kv_heads = int(model._eval_expr(node_spec.get("kv_heads"), env, symbols))
-        n_rep = heads // kv_heads
-    else:
-        n_rep = int(model._eval_expr(repeats, env, symbols))
+        raise ValueError("repeat requires repeats")
+    n_rep = int(model._eval_expr(repeats, env, symbols))
     out = model._require_name(node_spec.get("_bind"), field="repeat._bind")
     if n_rep == 1:
         env[out] = src
@@ -107,9 +99,6 @@ def compile(
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
 
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
-
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
@@ -118,11 +107,8 @@ def compile(
     out_var = assign_out_var(out_name)
     repeats = node_spec.get("repeats")
     if repeats is None:
-        heads = emitter._expr_code(node_spec.get("heads"), env)
-        kv_heads = emitter._expr_code(node_spec.get("kv_heads"), env)
-        repeats_code = f"(int({heads}) // int({kv_heads}))"
-    else:
-        repeats_code = emitter._expr_code(repeats, env)
+        raise ValueError("repeat requires repeats")
+    repeats_code = emitter._expr_code(repeats, env)
     n_rep = emitter._fresh("n_rep")
     lines.append(f"{indent}{n_rep} = int({repeats_code})")
     lines.append(f"{indent}if {n_rep} == 1:")

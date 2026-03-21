@@ -46,11 +46,9 @@ def interpret(
 ) -> None:
     x = model._read_tensor_input(node_spec.get("_args"), env)
     op_name = node_spec.get("_op")
-    kind = node_spec.get("kind")
-    if isinstance(op_name, str) and op_name.startswith("activations_"):
-        kind = op_name[len("activations_") :]
-    if not isinstance(kind, str) or not kind:
-        kind = "gelu"
+    if not isinstance(op_name, str) or not op_name.startswith("activations_"):
+        raise ValueError("legacy activation node name; use _op: activations_<kind>")
+    kind = op_name[len("activations_") :]
     out = model._require_name(node_spec.get("_bind"), field="activation._bind")
     if kind == "gelu_new" or kind == "gelu_pytorch_tanh":
         env[out] = 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
@@ -81,20 +79,15 @@ def compile(
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
 
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
-
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
     src = read(str(node_spec.get("_args")))
     out_name = str(node_spec.get("_bind"))
     op_name = node_spec.get("_op")
-    kind = node_spec.get("kind")
-    if isinstance(op_name, str) and op_name.startswith("activations_"):
-        kind = op_name[len("activations_") :]
-    if not isinstance(kind, str) or not kind:
-        kind = "gelu"
+    if not isinstance(op_name, str) or not op_name.startswith("activations_"):
+        raise ValueError("legacy activation node name; use _op: activations_<kind>")
+    kind = op_name[len("activations_") :]
     out_var = assign_out_var(out_name)
     if kind in {"gelu_new", "gelu_pytorch_tanh"}:
         lines.append(

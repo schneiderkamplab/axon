@@ -1258,7 +1258,7 @@ blk x = do
     assert node_specs[1]["dim"] == 16
 
 
-def test_infer_repeat_heads_and_kv_heads_from_typed_shapes() -> None:
+def test_infer_repeat_repeats_from_typed_shapes() -> None:
     source = """
 rk :: Tensor[B,Kh,T,Hd] -> Tensor[B,H,T,Hd]
 rk k = do
@@ -1269,8 +1269,7 @@ rk k = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "repeat"
-    assert node_specs[0]["kv_heads"] == "Kh"
-    assert node_specs[0]["heads"] == "H"
+    assert node_specs[0]["repeats"] == "(H // Kh)"
 
 
 def test_parse_axon_ignores_haskell_style_comments() -> None:
