@@ -32,7 +32,10 @@ def interpret(
         env[out_name] = None
         return
     idx = int(model._eval_expr(ins[1], env, symbols))
-    env[out_name] = collection[idx]
+    try:
+        env[out_name] = collection[idx]
+    except (IndexError, KeyError, TypeError):
+        env[out_name] = None
     return
 
 
@@ -63,7 +66,13 @@ def compile(
     idx_expr = emitter._expr_code(ins[1], env)
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    lines.append(f"{indent}{out_var} = None if {coll} is None else {coll}[int({idx_expr})]")
+    lines.append(f"{indent}if {coll} is None:")
+    lines.append(f"{indent}    {out_var} = None")
+    lines.append(f"{indent}else:")
+    lines.append(f"{indent}    try:")
+    lines.append(f"{indent}        {out_var} = {coll}[int({idx_expr})]")
+    lines.append(f"{indent}    except (IndexError, KeyError, TypeError):")
+    lines.append(f"{indent}        {out_var} = None")
     return lines
 
 

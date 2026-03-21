@@ -243,6 +243,7 @@ class _LowerCtx:
     prelude_aliases: dict[str, tuple[str, int]] = field(default_factory=dict)
     primitive_aliases: dict[str, tuple[str, int]] = field(default_factory=dict)
     current_module: str | None = None
+    param_names: set[str] = field(default_factory=set)
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
@@ -864,9 +865,24 @@ def _lower_expr(
     if _looks_like_call(expr):
         return _lower_simple_call(expr, out, ctx, when=when)
 
+    def _expr_is_tensorish(candidate: str) -> bool:
+        token = candidate.strip()
+        if _looks_like_call(token):
+            return True
+        if _is_name_token(token):
+            return (
+                token in ctx.param_names
+                or token in ctx.tensor_shape
+                or token in ctx.tensor_last_dim
+                or token in ctx.tensor_heads
+            )
+        return False
+
     plus = _split_binary(expr, "+")
     if plus is not None:
         left_expr, right_expr = plus
+        if not (_expr_is_tensorish(left_expr) or _expr_is_tensorish(right_expr)):
+            return _lower_alias_or_const(expr, out, ctx, when=when)
         add_graph: list[dict[str, Any]] = []
         left_ref = left_expr.strip() if _is_name_token(left_expr) else ctx.fresh("bin")
         right_ref = right_expr.strip() if _is_name_token(right_expr) else ctx.fresh("bin")
@@ -880,6 +896,8 @@ def _lower_expr(
     mul = _split_binary(expr, "*")
     if mul is not None:
         left_expr, right_expr = mul
+        if not (_expr_is_tensorish(left_expr) or _expr_is_tensorish(right_expr)):
+            return _lower_alias_or_const(expr, out, ctx, when=when)
         left_ref = left_expr.strip() if _is_name_token(left_expr) else ctx.fresh("bin")
         right_ref = right_expr.strip() if _is_name_token(right_expr) else ctx.fresh("bin")
         mul_graph: list[dict[str, Any]] = []
@@ -1096,6 +1114,7 @@ def _new_lower_ctx(
         prelude_aliases=dict(prelude_aliases or {}),
         primitive_aliases=dict(primitive_aliases or {}),
         current_module=module.name,
+        param_names={param.name for param in module.params},
     )
 
 

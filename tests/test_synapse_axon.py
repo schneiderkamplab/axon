@@ -170,7 +170,7 @@ import Cache
 
 main :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> ?Cache
 main past k v use_cache = do
-  k_ctx, v_ctx, present <- Cache.update past k v use_cache
+  k_ctx, v_ctx, present <- Cache.update past k v
   cache <- Cache.init
   cache <- use_cache ? Cache.append cache present : cache
   return cache
@@ -378,7 +378,7 @@ import Cache
 
 main :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
 main past k v use_cache = do
-  k_ctx, v_ctx, present <- Cache.update past k v use_cache
+  k_ctx, v_ctx, present <- Cache.update past k v
   return k_ctx, v_ctx, present
 """.strip()
         + "\n",
@@ -1417,7 +1417,7 @@ def test_lower_ternary_to_when_guards() -> None:
     source = """
 tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
 tiny x use_cache = do
-  k, v <- use_cache ? _cache_update(past, k0, v0, use_cache) : k0, v0
+  k, v <- use_cache ? _cache_update(past, k0, v0) : k0, v0
   return k, v
 """
     module = parse_axon_module(source)
@@ -1433,13 +1433,13 @@ def test_lower_if_then_else_matches_ternary_lowering() -> None:
     ternary_source = """
 tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
 tiny x use_cache = do
-  k, v <- use_cache ? _cache_update(past, k0, v0, use_cache) : k0, v0
+  k, v <- use_cache ? _cache_update(past, k0, v0) : k0, v0
   return k, v
 """
     if_source = """
 tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
 tiny x use_cache = do
-  k, v <- if use_cache then _cache_update(past, k0, v0, use_cache) else k0, v0
+  k, v <- if use_cache then _cache_update(past, k0, v0) else k0, v0
   return k, v
 """
 

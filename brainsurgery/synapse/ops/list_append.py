@@ -26,9 +26,13 @@ def interpret(
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("list_append expects [list_name, item_name]")
-    base_list = list(env[ins[0]])
-    base_list.append(env[ins[1]])
+    base_value = env.get(ins[0])
     out_name = model._require_name(node_spec.get("_bind"), field="list_append._bind")
+    if base_value is None:
+        env[out_name] = None
+        return
+    base_list = list(base_value)
+    base_list.append(env[ins[1]])
     env[out_name] = base_list
     return
 
@@ -60,8 +64,11 @@ def compile(
     item = read(str(ins[1]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    lines.append(f"{indent}{out_var} = list({base})")
-    lines.append(f"{indent}{out_var}.append({item})")
+    lines.append(f"{indent}if {base} is None:")
+    lines.append(f"{indent}    {out_var} = None")
+    lines.append(f"{indent}else:")
+    lines.append(f"{indent}    {out_var} = list({base})")
+    lines.append(f"{indent}    {out_var}.append({item})")
     return lines
 
 

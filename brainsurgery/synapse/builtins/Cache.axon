@@ -1,7 +1,7 @@
 import List
 
-update :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
-update past k v use_cache = _cache_update past k v use_cache
+update :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
+update past k v = _cache_update past k v
 
 seq_len :: ?Tensor[B,H,T,D] -> I
 seq_len k = _cache_seq_len k
@@ -12,7 +12,7 @@ init = List.init
 index :: ?Cache -> I -> ?CacheLayer
 index = List.index
 
-append :: Cache -> CacheLayer -> Cache
+append :: ?Cache -> CacheLayer -> ?Cache
 append = List.append
 
 past_length :: ?Cache -> I

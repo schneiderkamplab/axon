@@ -37,7 +37,7 @@ def interpret(
         mask = env.get(mask_name)
     scale_expr = node_spec.get("scale")
     scale_value = None if scale_expr is None else float(model._eval_expr(scale_expr, env, symbols))
-    is_causal_flag = bool(node_spec.get("causal", False)) and q.shape[2] > 1 and mask is None
+    is_causal_flag = bool(node_spec.get("causal", True)) and q.shape[2] > 1 and mask is None
     attn_out = F.scaled_dot_product_attention(
         q,
         k_tensor,
@@ -84,7 +84,7 @@ def compile(
     mask_expr = "None"
     if isinstance(mask_name, str) and mask_name in env:
         mask_expr = env[mask_name]
-    if bool(node_spec.get("causal", False)):
+    if bool(node_spec.get("causal", True)):
         is_causal = f"({q}.shape[-2] > 1 and {mask_expr} is None)"
     else:
         is_causal = "False"

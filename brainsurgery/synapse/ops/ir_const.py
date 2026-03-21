@@ -23,9 +23,13 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    del node_path, scope, symbols
+    del node_path, scope
     out_name = model._require_name(node_spec.get("_bind"), field="_ir_const._bind")
-    env[out_name] = node_spec.get("value")
+    value = node_spec.get("value")
+    if isinstance(value, str):
+        env[out_name] = model._eval_expr(value, env, symbols)
+    else:
+        env[out_name] = value
     return
 
 
@@ -41,7 +45,11 @@ def compile(
     del node_path_var, scope_var
     out_name = str(node_spec.get("_bind"))
     out_var = emitter._assign_out_var(env, out_name)
-    value_code = repr(node_spec.get("value"))
+    value = node_spec.get("value")
+    if isinstance(value, str):
+        value_code = emitter._expr_code(value, env)
+    else:
+        value_code = repr(value)
     return [f"{indent}{out_var} = {value_code}"]
 
 

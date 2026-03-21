@@ -234,7 +234,26 @@ class _Emitter:
         return lines
 
     def _render_generate(self) -> list[str]:
-        return [
+        inputs = self.model.get("inputs", {})
+        if not isinstance(inputs, dict):
+            raise ValueError("model.inputs must be mapping")
+        outputs = self.model.get("outputs", {})
+        if not isinstance(outputs, dict):
+            raise ValueError("model.outputs must be mapping")
+
+        past_input_name: str | None = None
+        for candidate in ("past_key_values", "past_kv", "past"):
+            if candidate in inputs:
+                past_input_name = candidate
+                break
+        use_cache_name = "use_cache" if "use_cache" in inputs else None
+        cache_output_names = [
+            name
+            for name in ("past_key_values", "present_key_values", "new_kv", "past_kv")
+            if name in outputs
+        ]
+
+        lines = [
             "    def generate(self, input_ids: torch.Tensor, *, eos_token_id: int, max_len: int, attention_mask: torch.Tensor | None = None, attn_mask: torch.Tensor | None = None) -> torch.Tensor:",
             "        if input_ids.ndim != 2:",
             "            raise ValueError('input_ids must be rank-2 [batch, seq]')",
@@ -258,7 +277,7 @@ class _Emitter:
             "        if mask is not None:",
             "            generated_mask = mask.new_zeros((batch, max_len))",
             "            generated_mask[:, :start_len] = mask",
-            "        past_key_values = None",
+            "        cache_state = None",
             "        finished = torch.zeros(batch, dtype=torch.bool, device=input_ids.device)",
             "        cur_len = start_len",
             "        was_training = self.training",
@@ -266,32 +285,48 @@ class _Emitter:
             "        try:",
             "            with torch.inference_mode():",
             "                while cur_len < max_len and not torch.all(finished):",
-            "                    step_input = generated[:, :cur_len] if past_key_values is None else generated[:, cur_len - 1:cur_len]",
-            "                    if generated_mask is None:",
-            "                        model_out = self.forward(step_input, past_key_values=past_key_values, use_cache=True)",
-            "                    else:",
-            "                        model_out = self.forward(step_input, attention_mask=generated_mask[:, :cur_len], attn_mask=generated_mask[:, :cur_len], past_key_values=past_key_values, use_cache=True)",
-            "                    if isinstance(model_out, dict):",
-            "                        logits = model_out['logits']",
-            "                        if 'past_key_values' in model_out:",
-            "                            past_key_values = model_out['past_key_values']",
-            "                        elif 'present_key_values' in model_out:",
-            "                            past_key_values = model_out['present_key_values']",
-            "                    else:",
-            "                        logits = model_out",
-            "                    next_token = torch.argmax(logits[:, -1, :], dim=-1)",
-            "                    next_token = torch.where(finished, torch.full_like(next_token, eos_token_id), next_token)",
-            "                    generated[:, cur_len] = next_token",
-            "                    finished = torch.logical_or(finished, next_token == eos_token_id)",
+            "                    step_input = generated[:, :cur_len] if cache_state is None else generated[:, cur_len - 1:cur_len]",
+            "                    call_kwargs: dict[str, Any] = {}",
             "                    if generated_mask is not None:",
-            "                        generated_mask[:, cur_len] = 1",
-            "                    cur_len += 1",
-            "        finally:",
-            "            if was_training:",
-            "                self.train()",
-            "        return generated[:, :cur_len]",
-            "",
+            "                        call_kwargs['attention_mask'] = generated_mask[:, :cur_len]",
+            "                        call_kwargs['attn_mask'] = generated_mask[:, :cur_len]",
         ]
+        if past_input_name is not None:
+            lines.append(f"                    call_kwargs[{past_input_name!r}] = cache_state")
+        if use_cache_name is not None:
+            lines.append(f"                    call_kwargs[{use_cache_name!r}] = True")
+        lines.extend(
+            [
+                "                    model_out = self.forward(step_input, **call_kwargs)",
+                "                    if isinstance(model_out, dict):",
+                "                        logits = model_out['logits']",
+            ]
+        )
+        for idx, out_name in enumerate(cache_output_names):
+            if idx == 0:
+                lines.append(f"                        if {out_name!r} in model_out:")
+            else:
+                lines.append(f"                        elif {out_name!r} in model_out:")
+            lines.append(f"                            cache_state = model_out[{out_name!r}]")
+        lines.extend(
+            [
+                "                    else:",
+                "                        logits = model_out",
+                "                    next_token = torch.argmax(logits[:, -1, :], dim=-1)",
+                "                    next_token = torch.where(finished, torch.full_like(next_token, eos_token_id), next_token)",
+                "                    generated[:, cur_len] = next_token",
+                "                    finished = torch.logical_or(finished, next_token == eos_token_id)",
+                "                    if generated_mask is not None:",
+                "                        generated_mask[:, cur_len] = 1",
+                "                    cur_len += 1",
+                "        finally:",
+                "            if was_training:",
+                "                self.train()",
+                "        return generated[:, :cur_len]",
+                "",
+            ]
+        )
+        return lines
 
     def _compile_graph(
         self, *, graph: list[Any], env: dict[str, str], scope_var: str, indent: str

@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 OP_NAME = "cache_update"
-LOWERING_ARITY = (4, 4)
+LOWERING_ARITY = (3, 3)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -32,17 +32,11 @@ def interpret(
 ) -> None:
     ins = node_spec.get("_args")
     outs = node_spec.get("_bind")
-    if not isinstance(ins, list) or len(ins) != 4 or not isinstance(outs, list) or len(outs) != 3:
-        raise ValueError("cache_update expects in=[past,k,v,use_cache], out=[k_ctx,v_ctx,present]")
+    if not isinstance(ins, list) or len(ins) != 3 or not isinstance(outs, list) or len(outs) != 3:
+        raise ValueError("cache_update expects in=[past,k,v], out=[k_ctx,v_ctx,present]")
     past = env.get(ins[0])
     k_new = env[ins[1]]
     v_new = env[ins[2]]
-    use_cache = bool(model._eval_expr(ins[3], env, symbols))
-    if not use_cache:
-        env[outs[0]] = k_new
-        env[outs[1]] = v_new
-        env[outs[2]] = None
-        return
     if past is None:
         k_all = k_new
         v_all = v_new
@@ -78,27 +72,21 @@ def compile(
 
     ins = node_spec.get("_args")
     outs = node_spec.get("_bind")
-    if not isinstance(ins, list) or len(ins) != 4 or not isinstance(outs, list) or len(outs) != 3:
-        raise ValueError("cache_update expects in=[past,k,v,use_cache], out=[k_ctx,v_ctx,present]")
+    if not isinstance(ins, list) or len(ins) != 3 or not isinstance(outs, list) or len(outs) != 3:
+        raise ValueError("cache_update expects in=[past,k,v], out=[k_ctx,v_ctx,present]")
     past = read(str(ins[0])) if str(ins[0]) in env else "None"
     k_new = read(str(ins[1]))
     v_new = read(str(ins[2]))
-    use_cache = emitter._expr_code(ins[3], env)
     k_ctx = assign_out_var(str(outs[0]))
     v_ctx = assign_out_var(str(outs[1]))
     present = assign_out_var(str(outs[2]))
-    lines.append(f"{indent}if not ({use_cache}):")
+    lines.append(f"{indent}if {past} is None:")
     lines.append(f"{indent}    {k_ctx} = {k_new}")
     lines.append(f"{indent}    {v_ctx} = {v_new}")
-    lines.append(f"{indent}    {present} = None")
     lines.append(f"{indent}else:")
-    lines.append(f"{indent}    if {past} is None:")
-    lines.append(f"{indent}        {k_ctx} = {k_new}")
-    lines.append(f"{indent}        {v_ctx} = {v_new}")
-    lines.append(f"{indent}    else:")
-    lines.append(f"{indent}        {k_ctx} = torch.cat([{past}[0], {k_new}], dim=-2)")
-    lines.append(f"{indent}        {v_ctx} = torch.cat([{past}[1], {v_new}], dim=-2)")
-    lines.append(f"{indent}    {present} = ({k_ctx}, {v_ctx})")
+    lines.append(f"{indent}    {k_ctx} = torch.cat([{past}[0], {k_new}], dim=-2)")
+    lines.append(f"{indent}    {v_ctx} = torch.cat([{past}[1], {v_new}], dim=-2)")
+    lines.append(f"{indent}{present} = ({k_ctx}, {v_ctx})")
     return lines
 
 
