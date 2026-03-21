@@ -13,6 +13,9 @@ rmsnorm@path = _rmsnorm@path
 split :: Tensor[B,T,D] -> Tensor[B,T,D]
 split = _split
 
+split_qkv_heads :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+split_qkv_heads = _split_qkv_heads
+
 reshape_heads :: Tensor[B,T,D] -> Tensor[B,H,T,HD]
 reshape_heads = _reshape_heads
 
@@ -30,6 +33,9 @@ position_ids = _position_ids
 
 rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 rope_pair = _rope_pair
+
+linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
+linear_position_bias = _linear_position_bias
 
 repeat :: Tensor[B,KVH,T,HD] -> I -> ?I -> Tensor[B,H,T,HD]
 repeat = _repeat

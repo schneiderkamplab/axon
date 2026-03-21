@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
 
 OP_NAME = "rope_pair"
 LOWERING_ARITY = (2, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"position_ids", "theta"}
+LOWERING_ALLOWED_KWARGS: set[str] = {
+    "position_ids",
+    "theta",
+    "scale_factor",
+    "low_freq_factor",
+    "high_freq_factor",
+    "original_context",
+}
 LOWERING_REQUIRED_KWARGS: set[str] = {"position_ids"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {"position_ids": "str", "theta": "number"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "position_ids": "str",
+    "theta": "number",
+    "scale_factor": "number",
+    "low_freq_factor": "number",
+    "high_freq_factor": "number",
+    "original_context": "dim",
+}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -19,6 +34,36 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int:
     del kwargs
     return 2
+
+
+def _apply_frequency_scaling(
+    *,
+    inv_freq: torch.Tensor,
+    scale_factor: float,
+    low_freq_factor: float,
+    high_freq_factor: float,
+    original_context: int,
+) -> torch.Tensor:
+    if scale_factor <= 0.0:
+        raise ValueError("rope_pair.scale_factor must be > 0")
+    if low_freq_factor <= 0.0:
+        raise ValueError("rope_pair.low_freq_factor must be > 0")
+    if high_freq_factor <= low_freq_factor:
+        raise ValueError("rope_pair.high_freq_factor must be > low_freq_factor")
+    if original_context <= 0:
+        raise ValueError("rope_pair.original_context must be > 0")
+
+    low_freq_wavelen = float(original_context) / low_freq_factor
+    high_freq_wavelen = float(original_context) / high_freq_factor
+    wavelen = (2.0 * math.pi) / inv_freq
+
+    inv_scaled = torch.where(wavelen > low_freq_wavelen, inv_freq / scale_factor, inv_freq)
+    smooth = (float(original_context) / wavelen - low_freq_factor) / (
+        high_freq_factor - low_freq_factor
+    )
+    smoothed = (1.0 - smooth) * (inv_scaled / scale_factor) + smooth * inv_scaled
+    is_medium = (~(wavelen < high_freq_wavelen)) & (~(wavelen > low_freq_wavelen))
+    return torch.where(is_medium, smoothed, inv_scaled)
 
 
 def interpret(
@@ -67,6 +112,17 @@ def interpret(
     inv_freq = 1.0 / (
         theta ** (torch.arange(0, half, device=q.device, dtype=q.dtype) / float(half))
     )
+    if all(
+        key in node_spec
+        for key in ("scale_factor", "low_freq_factor", "high_freq_factor", "original_context")
+    ):
+        inv_freq = _apply_frequency_scaling(
+            inv_freq=inv_freq,
+            scale_factor=float(model._eval_expr(node_spec["scale_factor"], env, symbols)),
+            low_freq_factor=float(model._eval_expr(node_spec["low_freq_factor"], env, symbols)),
+            high_freq_factor=float(model._eval_expr(node_spec["high_freq_factor"], env, symbols)),
+            original_context=int(model._eval_expr(node_spec["original_context"], env, symbols)),
+        )
     pos = pos_ids.to(device=q.device, dtype=q.dtype)
     ang = pos.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
     cos = torch.cos(ang).unsqueeze(1)
@@ -104,6 +160,10 @@ def compile(
     q_out = assign_out_var(str(outs[0]))
     k_out = assign_out_var(str(outs[1]))
     theta = emitter._expr_code(node_spec.get("theta", 10000.0), env)
+    scale_factor = emitter._expr_code(node_spec.get("scale_factor"), env)
+    low_freq_factor = emitter._expr_code(node_spec.get("low_freq_factor"), env)
+    high_freq_factor = emitter._expr_code(node_spec.get("high_freq_factor"), env)
+    original_context = emitter._expr_code(node_spec.get("original_context"), env)
     pos_name = node_spec.get("position_ids")
     if not isinstance(pos_name, str) or pos_name not in env:
         raise ValueError("rope_pair.position_ids must reference an input tensor name")
@@ -140,6 +200,47 @@ def compile(
     lines.append(
         f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype={q}.dtype) / float({half})))"
     )
+    if all(
+        key in node_spec
+        for key in ("scale_factor", "low_freq_factor", "high_freq_factor", "original_context")
+    ):
+        low_freq_wavelen = emitter._fresh("low_freq_wavelen")
+        high_freq_wavelen = emitter._fresh("high_freq_wavelen")
+        wavelen = emitter._fresh("wavelen")
+        inv_scaled = emitter._fresh("inv_scaled")
+        smooth = emitter._fresh("smooth")
+        smoothed = emitter._fresh("smoothed")
+        is_medium = emitter._fresh("is_medium")
+        lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
+        lines.append(f"{indent}if float({low_freq_factor}) <= 0.0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.low_freq_factor must be > 0')")
+        lines.append(f"{indent}if float({high_freq_factor}) <= float({low_freq_factor}):")
+        lines.append(
+            f"{indent}    raise ValueError('rope_pair.high_freq_factor must be > low_freq_factor')"
+        )
+        lines.append(f"{indent}if int({original_context}) <= 0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.original_context must be > 0')")
+        lines.append(
+            f"{indent}{low_freq_wavelen} = float({original_context}) / float({low_freq_factor})"
+        )
+        lines.append(
+            f"{indent}{high_freq_wavelen} = float({original_context}) / float({high_freq_factor})"
+        )
+        lines.append(f"{indent}{wavelen} = (2.0 * torch.pi) / {inv_freq}")
+        lines.append(
+            f"{indent}{inv_scaled} = torch.where({wavelen} > {low_freq_wavelen}, {inv_freq} / float({scale_factor}), {inv_freq})"
+        )
+        lines.append(
+            f"{indent}{smooth} = (float({original_context}) / {wavelen} - float({low_freq_factor})) / (float({high_freq_factor}) - float({low_freq_factor}))"
+        )
+        lines.append(
+            f"{indent}{smoothed} = (1.0 - {smooth}) * ({inv_scaled} / float({scale_factor})) + {smooth} * {inv_scaled}"
+        )
+        lines.append(
+            f"{indent}{is_medium} = (~({wavelen} < {high_freq_wavelen})) & (~({wavelen} > {low_freq_wavelen}))"
+        )
+        lines.append(f"{indent}{inv_freq} = torch.where({is_medium}, {smoothed}, {inv_scaled})")
     lines.append(f"{indent}if {pos_ids} is None:")
     lines.append(f"{indent}    raise ValueError('rope_pair.position_ids must not be null')")
     lines.append(f"{indent}if {pos_ids}.ndim != 2:")
