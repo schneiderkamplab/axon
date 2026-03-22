@@ -286,11 +286,7 @@ def run_axon_test(
         attention_mask = inputs.get("attention_mask")
         if attention_mask is not None:
             hf_inputs["attention_mask"] = attention_mask
-        use_mask_for_syn = bool(attention_mask is not None)
-        if use_mask_for_syn and len(prompts) == 1:
-            # Single unpadded prompt does not need an explicit mask on the Synapse side.
-            # Keeping it unset avoids extra per-step mask materialization in KV decode.
-            use_mask_for_syn = bool((attention_mask == 0).any())
+        use_mask_for_syn = bool(attention_mask is not None and syn_mask_key is not None)
 
         def _run_hf_generate(model: Any = hf) -> torch.Tensor:
             return model.generate(

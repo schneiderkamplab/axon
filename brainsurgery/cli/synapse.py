@@ -260,4 +260,79 @@ def axon_test(
         raise typer.BadParameter(str(exc)) from exc
 
 
-__all__ = ["app", "emit_generic", "axon_to_synapse", "synapse_to_axon", "axon_test"]
+@app.command("axon-test-matrix")
+def axon_test_matrix(
+    examples_dir: Path = typer.Option(
+        Path("examples"),
+        "--examples-dir",
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Directory with Axon files (default: examples).",
+    ),
+    models_dir: Path = typer.Option(
+        Path("models"),
+        "--models-dir",
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Directory with model directories (default: models).",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    dtype: str = typer.Option(
+        "float32",
+        "--dtype",
+        help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
+    ),
+    max_len: int = typer.Option(
+        32,
+        "--max-len",
+        help="Total sequence length target for generation.",
+    ),
+    text: list[str] = typer.Option(
+        [],
+        "--text",
+        help="Prompt text to complete. Repeat --text for batched prompts.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Show per-run output from synapse axon-test.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Only resolve and print matching pairs; do not run tests.",
+    ),
+) -> None:
+    """Run synapse axon-test across matching examples/*.axon and models/* directories."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_test_matrix")
+    try:
+        exit_code = run_fn(
+            examples_dir=examples_dir,
+            models_dir=models_dir,
+            device=device,
+            dtype=dtype,
+            max_len=max_len,
+            text=text or None,
+            verbose=verbose,
+            dry_run=dry_run,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raise typer.Exit(code=int(exit_code))
+
+
+__all__ = [
+    "app",
+    "emit_generic",
+    "axon_to_synapse",
+    "synapse_to_axon",
+    "axon_test",
+    "axon_test_matrix",
+]

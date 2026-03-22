@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from tqdm import tqdm
+
+from .axon_test import run_axon_test
+
+
+@dataclass(frozen=True)
+class _Pair:
+    axon_path: Path
+    model_dir: Path
+
+
+@dataclass(frozen=True)
+class _SummaryRow:
+    axon_file: str
+    model_dir: str
+    runtime_ratio: str
+    max_logit_diff: str
+    top1_eq: str
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run brainsurgery synapse axon-test across matching examples/*.axon and models/* dirs."
+        )
+    )
+    parser.add_argument(
+        "--examples-dir",
+        type=Path,
+        default=Path("examples"),
+        help="Directory with Axon files (default: examples).",
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=Path("models"),
+        help="Directory with model directories (default: models).",
+    )
+    parser.add_argument("--device", default="cpu", help="Device passed to axon-test.")
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        choices=["float32", "bfloat16", "float16"],
+        help="Floating point dtype passed to axon-test.",
+    )
+    parser.add_argument(
+        "--max-len",
+        type=int,
+        default=32,
+        help="Total sequence length target for generation.",
+    )
+    parser.add_argument(
+        "--text",
+        action="append",
+        default=None,
+        help="Prompt text. Repeat to pass multiple prompts.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show per-run output from synapse axon-test.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only resolve and print matching pairs; do not run tests.",
+    )
+    return parser.parse_args()
+
+
+def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
+    if not examples_dir.is_dir():
+        raise FileNotFoundError(f"Examples directory not found: {examples_dir}")
+    if not models_dir.is_dir():
+        raise FileNotFoundError(f"Models directory not found: {models_dir}")
+
+    model_dirs = sorted(path for path in models_dir.iterdir() if path.is_dir())
+    model_by_name = {path.name: path for path in model_dirs}
+
+    pairs: list[_Pair] = []
+    for axon_path in sorted(examples_dir.glob("*.axon")):
+        stem = axon_path.stem
+        if stem == "flexolmo":
+            continue
+
+        model_dir = model_by_name.get(stem)
+        if model_dir is None:
+            parts = stem.split("_")
+            for cut in range(len(parts) - 1, 0, -1):
+                candidate = "_".join(parts[:cut])
+                model_dir = model_by_name.get(candidate)
+                if model_dir is not None:
+                    break
+
+        if model_dir is not None:
+            pairs.append(_Pair(axon_path=axon_path, model_dir=model_dir))
+
+    return pairs
+
+
+def _format_table(rows: list[_SummaryRow]) -> str:
+    headers = [
+        "axon_file",
+        "model_dir",
+        "AxonDerived runtime/HF runtime",
+        "max logit diff",
+        "top1_eq",
+    ]
+
+    body = [
+        [
+            row.axon_file,
+            row.model_dir,
+            row.runtime_ratio,
+            row.max_logit_diff,
+            row.top1_eq,
+        ]
+        for row in rows
+    ]
+
+    widths = [len(header) for header in headers]
+    for line in body:
+        for idx, cell in enumerate(line):
+            widths[idx] = max(widths[idx], len(cell))
+
+    def _fmt(line: list[str]) -> str:
+        return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(line))
+
+    divider = "-+-".join("-" * width for width in widths)
+    out_lines = [_fmt(headers), divider]
+    out_lines.extend(_fmt(line) for line in body)
+    return "\n".join(out_lines)
+
+
+def _run_pair(
+    pair: _Pair,
+    *,
+    device: str,
+    dtype: str,
+    max_len: int,
+    text: list[str],
+    verbose: bool,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "axon_file": pair.axon_path,
+        "weights": pair.model_dir,
+        "hf_model_dir": pair.model_dir,
+        "device": device,
+        "dtype": dtype,
+        "max_len": max_len,
+        "text": text,
+    }
+
+    if verbose:
+        print(f"Running: {kwargs}")
+        return run_axon_test(**kwargs)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        return run_axon_test(**kwargs)
+
+
+def run_axon_test_matrix(
+    *,
+    examples_dir: Path = Path("examples"),
+    models_dir: Path = Path("models"),
+    device: str = "cpu",
+    dtype: str = "float32",
+    max_len: int = 32,
+    text: list[str] | None = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+) -> int:
+    prompts = text if text else ["The future of AI is"]
+    pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())
+    if not pairs:
+        print("No matching .axon/model directory pairs found.")
+        return 1
+
+    if dry_run:
+        dry_rows = [
+            _SummaryRow(
+                axon_file=pair.axon_path.name,
+                model_dir=str(pair.model_dir),
+                runtime_ratio="DRY-RUN",
+                max_logit_diff="DRY-RUN",
+                top1_eq="DRY-RUN",
+            )
+            for pair in pairs
+        ]
+        print(_format_table(dry_rows))
+        return 0
+
+    rows: list[_SummaryRow] = []
+    passed = 0
+    failed = 0
+
+    progress = tqdm(total=len(pairs), desc="synapse axon-test", unit="pair")
+    for pair in pairs:
+        progress.set_postfix_str(pair.axon_path.name)
+        try:
+            result = _run_pair(
+                pair,
+                device=device,
+                dtype=dtype,
+                max_len=max_len,
+                text=prompts,
+                verbose=verbose,
+            )
+            rows.append(
+                _SummaryRow(
+                    axon_file=pair.axon_path.name,
+                    model_dir=str(pair.model_dir),
+                    runtime_ratio=f"{result['speed_ratio_axon_over_hf']:.3f}",
+                    max_logit_diff=f"{result['max_diff']:.6g}",
+                    top1_eq=str(bool(result["top1_eq"])),
+                )
+            )
+            passed += 1
+        except Exception as exc:
+            rows.append(
+                _SummaryRow(
+                    axon_file=pair.axon_path.name,
+                    model_dir=str(pair.model_dir),
+                    runtime_ratio="ERROR",
+                    max_logit_diff="ERROR",
+                    top1_eq=f"ERROR: {type(exc).__name__}: {exc}",
+                )
+            )
+            failed += 1
+        finally:
+            progress.update(1)
+            progress.set_postfix_str(f"passed={passed} failed={failed}")
+
+    progress.close()
+
+    print()
+    print(_format_table(rows))
+    print()
+    print(f"Total: {len(pairs)} | Passed: {passed} | Failed: {failed}")
+    return 0 if failed == 0 else 2
+
+
+def main() -> int:
+    args = _parse_args()
+    return run_axon_test_matrix(
+        examples_dir=args.examples_dir,
+        models_dir=args.models_dir,
+        device=args.device,
+        dtype=args.dtype,
+        max_len=args.max_len,
+        text=args.text,
+        verbose=args.verbose,
+        dry_run=args.dry_run,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["main", "run_axon_test_matrix"]
