@@ -10,6 +10,9 @@ gelu_pytorch_tanh = _activations_gelu_pytorch_tanh
 relu :: Tensor[B,T,D] -> Tensor[B,T,D]
 relu = _activations_relu
 
+sigmoid :: Tensor[B,T,D] -> Tensor[B,T,D]
+sigmoid = _activations_sigmoid
+
 silu :: Tensor[B,T,D] -> Tensor[B,T,D]
 silu = _activations_silu
 

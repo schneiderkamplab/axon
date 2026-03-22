@@ -10,6 +10,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
+from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
 
 
@@ -62,7 +63,9 @@ class SynapseProgramModel(nn.Module):
         return cls(spec={str(key): value for key, value in data.items()}, state_dict=state_dict)
 
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
-        self._state = dict(state_dict)
+        loaded = dict(state_dict)
+        materialize_mxfp4_aliases(loaded)
+        self._state = loaded
 
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:
         spec = self.spec

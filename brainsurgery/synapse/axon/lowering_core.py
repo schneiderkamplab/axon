@@ -66,6 +66,7 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "gelu_new": ("_activations_gelu_new", 0),
     "gelu_pytorch_tanh": ("_activations_gelu_pytorch_tanh", 0),
     "relu": ("_activations_relu", 0),
+    "sigmoid": ("_activations_sigmoid", 0),
     "silu": ("_activations_silu", 0),
     "swiglu": ("_activations_swiglu", 0),
 }

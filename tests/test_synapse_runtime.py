@@ -169,6 +169,112 @@ def _moe_scatter_add_spec() -> dict[str, object]:
     }
 
 
+def _attention_with_sink_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "v": {}, "sink": {}},
+            "graph": [
+                {
+                    "attn": {
+                        "_op": "attention",
+                        "_args": ["q", "k", "v"],
+                        "_bind": "out",
+                        "sink": "sink",
+                    }
+                }
+            ],
+            "outputs": {"out": "out"},
+        },
+    }
+
+
+def _linear_expert_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "n": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "bias": True,
+                        "expert": 1,
+                        "transpose": True,
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+
+
+def _split_interleave_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "s": {
+                        "_op": "split",
+                        "_args": "x",
+                        "_bind": ["even", "odd"],
+                        "parts": 2,
+                        "interleave": True,
+                    }
+                }
+            ],
+            "outputs": {"even": "even", "odd": "odd"},
+        },
+    }
+
+
+def _clamp_sigmoid_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {"c": {"_op": "clamp", "_args": "x", "_bind": "xc", "min": -1.0, "max": 1.0}},
+                {"s": {"_op": "activations_sigmoid", "_args": "xc", "_bind": "y"}},
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+
+
+def _mxfp4_linear_state_dict() -> dict[str, torch.Tensor]:
+    blocks = torch.tensor(
+        [
+            [
+                [[0x00, 0x00]],
+                [[0x00, 0x00]],
+            ],
+            [
+                [[0x21, 0x43]],
+                [[0x65, 0x87]],
+            ],
+        ],
+        dtype=torch.uint8,
+    )
+    scales = torch.full((2, 2, 1), 127, dtype=torch.uint8)
+    bias = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.25, -0.75],
+        ],
+        dtype=torch.float32,
+    )
+    return {
+        "n_blocks": blocks,
+        "n_scales": scales,
+        "n_bias": bias,
+    }
+
+
 def test_runtime_from_spec_and_from_yaml(tmp_path: Path) -> None:
     spec = _tiny_linear_spec()
     model = SynapseProgramModel.from_spec(spec)
@@ -302,10 +408,10 @@ def test_runtime_moe_select_selects_routed_rows() -> None:
     idx = torch.tensor([[[1, 0], [2, 1], [1, 2]]], dtype=torch.long)
 
     out = model(x=x, scores=scores, idx=idx)
-    assert torch.equal(out["token_idx"], torch.tensor([0, 1, 2], dtype=torch.long))
-    assert torch.equal(out["topk_pos"], torch.tensor([0, 1, 0], dtype=torch.long))
-    assert torch.equal(out["x_sel"], torch.tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))
-    assert torch.allclose(out["sel_scores"], torch.tensor([0.7, 0.8, 0.6], dtype=torch.float32))
+    assert torch.equal(out["token_idx"], torch.tensor([0, 2, 1], dtype=torch.long))
+    assert torch.equal(out["topk_pos"], torch.tensor([0, 0, 1], dtype=torch.long))
+    assert torch.equal(out["x_sel"], torch.tensor([[10.0, 11.0], [30.0, 31.0], [20.0, 21.0]]))
+    assert torch.allclose(out["sel_scores"], torch.tensor([0.7, 0.6, 0.8], dtype=torch.float32))
 
 
 def test_runtime_moe_select_allows_empty_selection() -> None:
@@ -479,3 +585,43 @@ def test_runtime_linear_handles_empty_batch_without_kernel_work() -> None:
     x = torch.empty((0, 4), dtype=torch.float32)
     out = model(x=x)
     assert out["y"].shape == (0, 8)
+
+
+def test_runtime_attention_supports_sink_logits_path() -> None:
+    spec = _attention_with_sink_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    q = torch.randn(1, 2, 3, 4)
+    k = torch.randn(1, 2, 3, 4)
+    v = torch.randn(1, 2, 3, 4)
+    sink = torch.randn(2)
+    out = model(q=q, k=k, v=v, sink=sink)
+    assert out["out"].shape == (1, 2, 3, 4)
+    assert torch.isfinite(out["out"]).all()
+
+
+def test_runtime_linear_expert_materializes_mxfp4_aliases() -> None:
+    spec = _linear_expert_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors(_mxfp4_linear_state_dict())
+    x = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
+    out = model(x=x)
+    expected = torch.tensor([[15.25, 28.25]], dtype=torch.float32)
+    assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
+
+
+def test_runtime_split_supports_interleave_mode() -> None:
+    spec = _split_interleave_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=torch.float32)
+    out = model(x=x)
+    assert torch.equal(out["even"], torch.tensor([[0.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["odd"], torch.tensor([[1.0, 3.0]], dtype=torch.float32))
+
+
+def test_runtime_clamp_and_sigmoid_ops() -> None:
+    spec = _clamp_sigmoid_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.tensor([[-2.0, 0.0, 2.0]], dtype=torch.float32)
+    out = model(x=x)
+    expected = torch.sigmoid(torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32))
+    assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)

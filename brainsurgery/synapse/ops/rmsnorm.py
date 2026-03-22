@@ -133,6 +133,10 @@ def compile(
         if cast_float
         else f"emitter._param({infer_param('weight')})"
     )
+    cast_ref = src
+    if cast_float and out_var == src:
+        cast_ref = emitter._fresh("rms_src")
+        lines.append(f"{indent}{cast_ref} = {src}")
     lines.append(
         f"{indent}{tmp} = {x_norm_src} * torch.rsqrt(torch.mean({x_norm_src} * {x_norm_src}, dim=-1, keepdim=True) + float({eps}))"
     )
@@ -141,7 +145,7 @@ def compile(
     else:
         lines.append(f"{indent}{out_var} = {tmp} * {w_src}")
     if cast_float:
-        lines.append(f"{indent}{out_var} = {out_var}.type_as({src})")
+        lines.append(f"{indent}{out_var} = {out_var}.type_as({cast_ref})")
     return lines
 
 

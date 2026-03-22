@@ -6,9 +6,9 @@ import torch
 
 OP_NAME = "moe_scatter_add"
 LOWERING_ARITY = (4, 4)
-LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_ALLOWED_KWARGS: set[str] = {"accum_dtype"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {}
+LOWERING_KWARG_KINDS: dict[str, Any] = {"accum_dtype": "str"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -71,6 +71,20 @@ def _validate_scatter_inputs(
         )
 
 
+def _resolve_accum_dtype(node_spec: dict[str, Any]) -> torch.dtype | None:
+    raw = node_spec.get("accum_dtype")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("moe_scatter_add accum_dtype must be a string when provided")
+    text = raw.strip().lower()
+    if text == "":
+        return None
+    if text == "float32":
+        return torch.float32
+    raise ValueError(f"moe_scatter_add unsupported accum_dtype: {raw!r}")
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -90,8 +104,15 @@ def interpret(
         env[out] = accum
         return
     accum_flat = accum.reshape(-1, accum.shape[-1])
-    weighted = updates * scores.unsqueeze(-1).to(updates.dtype)
-    accum_flat.index_add_(0, token_idx, weighted.to(accum_flat.dtype))
+    accum_dtype = _resolve_accum_dtype(node_spec)
+    if accum_dtype is None:
+        weighted = updates * scores.unsqueeze(-1)
+        accum_flat.index_add_(0, token_idx, weighted.to(accum_flat.dtype))
+    else:
+        acc_work = accum_flat.to(dtype=accum_dtype)
+        weighted = updates.to(dtype=accum_dtype) * scores.to(dtype=accum_dtype).unsqueeze(-1)
+        acc_work.index_add_(0, token_idx, weighted)
+        accum_flat.copy_(acc_work.to(dtype=accum_flat.dtype))
     env[out] = accum
     return
 
@@ -119,11 +140,21 @@ def compile(
     updates = read(ins[2])
     scores = read(ins[3])
     out_var = assign_out_var(out_name)
+    accum_dtype = _resolve_accum_dtype(node_spec)
     lines.append(f"{indent}{out_var} = {accum}")
     lines.append(f"{indent}if {token_idx}.numel() != 0:")
-    lines.append(f"{indent}    _acc = {out_var}.reshape(-1, {out_var}.shape[-1])")
-    lines.append(f"{indent}    _upd = {updates} * {scores}.unsqueeze(-1).to({updates}.dtype)")
-    lines.append(f"{indent}    _acc.index_add_(0, {token_idx}, _upd.to(_acc.dtype))")
+    lines.append(f"{indent}    _acc_base = {out_var}.reshape(-1, {out_var}.shape[-1])")
+    if accum_dtype is None:
+        lines.append(f"{indent}    _acc = _acc_base")
+        lines.append(f"{indent}    _upd = {updates} * {scores}.unsqueeze(-1)")
+        lines.append(f"{indent}    _acc.index_add_(0, {token_idx}, _upd.to(_acc.dtype))")
+    else:
+        lines.append(f"{indent}    _acc = _acc_base.to(torch.float32)")
+        lines.append(
+            f"{indent}    _upd = {updates}.to(torch.float32) * {scores}.to(torch.float32).unsqueeze(-1)"
+        )
+        lines.append(f"{indent}    _acc.index_add_(0, {token_idx}, _upd)")
+        lines.append(f"{indent}    _acc_base.copy_(_acc.to(_acc_base.dtype))")
     return lines
 
 

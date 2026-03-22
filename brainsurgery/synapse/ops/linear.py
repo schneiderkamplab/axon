@@ -7,9 +7,23 @@ from torch.nn import functional as F
 
 OP_NAME = "linear"
 LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "transpose", "bias"}
+LOWERING_ALLOWED_KWARGS: set[str] = {
+    "dim",
+    "transpose",
+    "bias",
+    "expert",
+    "weight",
+    "bias_path",
+}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "dim", "bias": "bool", "transpose": "bool"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "dim": "dim",
+    "bias": "bool",
+    "transpose": "bool",
+    "expert": "dim",
+    "weight": "str",
+    "bias_path": "str",
+}
 
 
 def _validate_linear_keys(node_spec: dict[str, Any]) -> None:
@@ -100,17 +114,33 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    del scope, symbols
+    del scope
     x = model._read_tensor_input(node_spec.get("_args"), env)
     linear_weight_path = model._infer_param_path(
         node_spec, node_path=node_path, param_name="weight"
     )
     weight = model._state[linear_weight_path]
+    expert_expr = node_spec.get("expert")
+    if expert_expr is not None:
+        expert_idx = int(model._eval_expr(expert_expr, env, symbols))
+        if weight.ndim < 2:
+            raise ValueError("linear expert selection requires at least rank-2 weight tensor")
+        if expert_idx < 0 or expert_idx >= int(weight.shape[0]):
+            raise ValueError(
+                f"linear expert index out of range: {expert_idx} for shape {tuple(weight.shape)}"
+            )
+        weight = weight[expert_idx]
 
     bias = None
     if node_spec.get("bias", False):
-        bias_path = model._infer_param_path(node_spec, node_path=node_path, param_name="bias")
+        bias_path = model._infer_param_path(
+            node_spec,
+            node_path=node_path,
+            param_name=("bias_path" if isinstance(node_spec.get("bias_path"), str) else "bias"),
+        )
         bias = model._state.get(bias_path)
+        if bias is not None and expert_expr is not None and bias.ndim >= 2:
+            bias = bias[expert_idx]
 
     transpose = _resolve_transpose(node_spec)
     out = model._require_name(node_spec.get("_bind"), field="linear._bind")
@@ -151,13 +181,24 @@ def compile(
     out_var = assign_out_var(out_name)
     weight_expr = infer_param("weight")
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
-    bias_expr = f"self._state.get({infer_param('bias')})" if has_bias else "None"
+    bias_expr = "None"
+    if has_bias:
+        bias_param = "bias_path" if isinstance(node_spec.get("bias_path"), str) else "bias"
+        bias_expr = f"self._state.get({infer_param(bias_param)})"
+    expert_expr = node_spec.get("expert")
+    expert_code = emitter._expr_code(expert_expr, env) if expert_expr is not None else None
     transpose = _resolve_transpose(node_spec)
-    out_dim_expr = (
-        f"self._param({weight_expr}).shape[-1]"
-        if transpose
-        else f"self._param({weight_expr}).shape[0]"
-    )
+    selected_weight = f"self._param({weight_expr})"
+    selected_bias = bias_expr
+    if expert_code is not None:
+        selected_weight = f"{selected_weight}[int({expert_code})]"
+        if has_bias:
+            selected_bias = (
+                f"(({bias_expr})[int({expert_code})] "
+                f"if ({bias_expr}) is not None and ({bias_expr}).ndim >= 2 "
+                f"else ({bias_expr}))"
+            )
+    out_dim_expr = f"{selected_weight}.shape[-1]" if transpose else f"{selected_weight}.shape[0]"
 
     lines.append(f"{indent}if {src}.numel() == 0:")
     lines.append(
@@ -165,13 +206,11 @@ def compile(
     )
     lines.append(f"{indent}else:")
     if transpose:
-        lines.append(f"{indent}    {out_var} = torch.matmul({src}, self._param({weight_expr}))")
-        lines.append(f"{indent}    if {bias_expr} is not None:")
-        lines.append(f"{indent}        {out_var} = {out_var} + {bias_expr}")
+        lines.append(f"{indent}    {out_var} = torch.matmul({src}, {selected_weight})")
+        lines.append(f"{indent}    if {selected_bias} is not None:")
+        lines.append(f"{indent}        {out_var} = {out_var} + {selected_bias}")
     else:
-        lines.append(
-            f"{indent}    {out_var} = F.linear({src}, self._param({weight_expr}), {bias_expr})"
-        )
+        lines.append(f"{indent}    {out_var} = F.linear({src}, {selected_weight}, {selected_bias})")
 
     return lines
 

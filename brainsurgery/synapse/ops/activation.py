@@ -60,6 +60,8 @@ def interpret(
         env[out] = F.silu(x)
     elif kind == "swiglu":
         env[out] = F.silu(x) * x
+    elif kind == "sigmoid":
+        env[out] = torch.sigmoid(x)
     else:
         raise ValueError(f"Unsupported activation kind: {kind}")
     return
@@ -101,6 +103,8 @@ def compile(
         lines.append(f"{indent}{out_var} = F.silu({src})")
     elif kind == "swiglu":
         lines.append(f"{indent}{out_var} = F.silu({src}) * {src}")
+    elif kind == "sigmoid":
+        lines.append(f"{indent}{out_var} = torch.sigmoid({src})")
     else:
         raise ValueError(f"Unsupported activation kind: {kind}")
     return lines

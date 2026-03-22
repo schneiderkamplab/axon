@@ -300,3 +300,106 @@ def test_generated_linear_handles_empty_batch() -> None:
     model.load_state_dict_tensors({"n.weight": torch.randn(8, 4)})
     out = model(x=torch.empty((0, 4), dtype=torch.float32))
     assert out["y"].shape == (0, 8)
+
+
+def test_generated_linear_expert_materializes_mxfp4_aliases() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "n": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "bias": True,
+                        "expert": 1,
+                        "transpose": True,
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="LinearExpertMXFP4Model")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["LinearExpertMXFP4Model"]()
+    model.load_state_dict_tensors(
+        {
+            "n_blocks": torch.tensor(
+                [
+                    [
+                        [[0x00, 0x00]],
+                        [[0x00, 0x00]],
+                    ],
+                    [
+                        [[0x21, 0x43]],
+                        [[0x65, 0x87]],
+                    ],
+                ],
+                dtype=torch.uint8,
+            ),
+            "n_scales": torch.full((2, 2, 1), 127, dtype=torch.uint8),
+            "n_bias": torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [0.25, -0.75],
+                ],
+                dtype=torch.float32,
+            ),
+        }
+    )
+    out = model(x=torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32))
+    expected = torch.tensor([[15.25, 28.25]], dtype=torch.float32)
+    assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
+
+
+def test_generated_split_interleave_mode() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "s": {
+                        "_op": "split",
+                        "_args": "x",
+                        "_bind": ["even", "odd"],
+                        "parts": 2,
+                        "interleave": True,
+                    }
+                }
+            ],
+            "outputs": {"even": "even", "odd": "odd"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="SplitInterleaveModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["SplitInterleaveModel"]()
+    out = model(x=torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=torch.float32))
+    assert torch.equal(out["even"], torch.tensor([[0.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["odd"], torch.tensor([[1.0, 3.0]], dtype=torch.float32))
+
+
+def test_generated_clamp_and_sigmoid_ops() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {"c": {"_op": "clamp", "_args": "x", "_bind": "xc", "min": -1.0, "max": 1.0}},
+                {"s": {"_op": "activations_sigmoid", "_args": "xc", "_bind": "y"}},
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ClampSigmoidModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ClampSigmoidModel"]()
+    out = model(x=torch.tensor([[-2.0, 0.0, 2.0]], dtype=torch.float32))
+    expected = torch.sigmoid(torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32))
+    assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)

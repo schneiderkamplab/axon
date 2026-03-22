@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from .codegen import emit_model_code_from_synapse_spec
+from .mxfp4 import materialize_mxfp4_aliases
 
 
 def _resolve_device(requested: str) -> torch.device:
@@ -86,6 +87,7 @@ def _load_state_dict(
             else:
                 tensor = tensor.to(device=device)
             out[key] = tensor
+    materialize_mxfp4_aliases(out, dtype=dtype)
     return out
 
 
@@ -191,6 +193,18 @@ def _normalize_texts(text: str | Sequence[str]) -> list[str]:
     return out
 
 
+def _extract_hidden_tensor(value: Any) -> torch.Tensor:
+    if torch.is_tensor(value):
+        return value
+    if isinstance(value, tuple) and value and torch.is_tensor(value[0]):
+        return value[0]
+    raise ValueError(f"Unable to extract hidden tensor from type: {type(value).__name__}")
+
+
+def _to_cpu_float(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.detach().to(dtype=torch.float32, device="cpu")
+
+
 def run_axon_test(
     *,
     axon_file: Path,
@@ -203,6 +217,7 @@ def run_axon_test(
     class_name: str = "AxonGeneratedModel",
     main_module: str | None = None,
     dtype: str = "float32",
+    trace_layers: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
@@ -307,8 +322,36 @@ def run_axon_test(
             pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
             pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)
             hf_forward_inputs["position_ids"] = pos_ids
+        hf_layer_inputs: dict[int, torch.Tensor] = {}
+        hf_layer_outputs: dict[int, torch.Tensor] = {}
+        hf_hook_handles: list[Any] = []
+        if trace_layers:
+            hf_layers = getattr(getattr(hf, "model", None), "layers", None)
+            if hf_layers is not None:
+                for idx, layer in enumerate(hf_layers):
+
+                    def _hf_pre_hook(
+                        module: Any, args: tuple[Any, ...], *, _idx: int = idx
+                    ) -> None:
+                        del module
+                        if not args:
+                            return
+                        hidden = _extract_hidden_tensor(args[0])
+                        hf_layer_inputs[_idx] = _to_cpu_float(hidden)
+
+                    def _hf_post_hook(
+                        module: Any, args: tuple[Any, ...], out: Any, *, _idx: int = idx
+                    ) -> None:
+                        del module, args
+                        hidden = _extract_hidden_tensor(out)
+                        hf_layer_outputs[_idx] = _to_cpu_float(hidden)
+
+                    hf_hook_handles.append(layer.register_forward_pre_hook(_hf_pre_hook))
+                    hf_hook_handles.append(layer.register_forward_hook(_hf_post_hook))
         with torch.no_grad():
             hf_logits = hf(**hf_forward_inputs, use_cache=False).logits
+        for handle in hf_hook_handles:
+            handle.remove()
 
         del hf
         _cleanup(resolved_device)
@@ -336,8 +379,34 @@ def run_axon_test(
         syn_inputs: dict[str, Any] = {"input_ids": input_ids}
         if use_mask_for_syn and attention_mask is not None and syn_mask_key is not None:
             syn_inputs[syn_mask_key] = attention_mask
+        syn_layer_inputs: dict[int, torch.Tensor] = {}
+        syn_layer_outputs: dict[int, torch.Tensor] = {}
+        original_block_call = getattr(syn, "_block_gpt_oss_block", None)
+        if trace_layers and callable(original_block_call):
+
+            def _syn_block_wrapper(
+                *, x: Any, i: Any, pos_ids: Any, attn_mask: Any, past_kv: Any, scope: str
+            ) -> Any:
+                layer_idx = int(i)
+                if torch.is_tensor(x):
+                    syn_layer_inputs[layer_idx] = _to_cpu_float(x)
+                out = original_block_call(
+                    x=x,
+                    i=i,
+                    pos_ids=pos_ids,
+                    attn_mask=attn_mask,
+                    past_kv=past_kv,
+                    scope=scope,
+                )
+                if isinstance(out, tuple) and out and torch.is_tensor(out[0]):
+                    syn_layer_outputs[layer_idx] = _to_cpu_float(out[0])
+                return out
+
+            setattr(syn, "_block_gpt_oss_block", _syn_block_wrapper)
         with torch.no_grad():
             syn_logits = _extract_logits(syn(**syn_inputs))
+        if trace_layers and callable(original_block_call):
+            setattr(syn, "_block_gpt_oss_block", original_block_call)
 
         gen_hf = int(hf_gen.shape[1] - input_ids.shape[1])
         gen_syn = int(syn_gen.shape[1] - input_ids.shape[1])
@@ -377,6 +446,38 @@ def run_axon_test(
             hf_last = hf_logits[b_idx, lengths]
             masked_last_max_diff = float((syn_last.float() - hf_last.float()).abs().max())
             masked_top1_eq = bool((syn_last.argmax(-1) == hf_last.argmax(-1)).all())
+
+        layer_diffs: list[dict[str, float | int]] = []
+        if trace_layers and hf_layer_outputs and syn_layer_outputs:
+            common_layers = sorted(set(hf_layer_outputs) & set(syn_layer_outputs))
+            for layer_idx in common_layers:
+                hf_out = hf_layer_outputs[layer_idx]
+                syn_out = syn_layer_outputs[layer_idx]
+                if hf_out.shape != syn_out.shape:
+                    continue
+                out_diff = (syn_out - hf_out).abs()
+                out_mean = float(out_diff.mean())
+                out_max = float(out_diff.max())
+                out_last_max = float(out_diff[:, -1, :].max()) if out_diff.ndim >= 3 else out_max
+                in_mean = float("nan")
+                in_max = float("nan")
+                if layer_idx in hf_layer_inputs and layer_idx in syn_layer_inputs:
+                    hf_in = hf_layer_inputs[layer_idx]
+                    syn_in = syn_layer_inputs[layer_idx]
+                    if hf_in.shape == syn_in.shape:
+                        in_diff = (syn_in - hf_in).abs()
+                        in_mean = float(in_diff.mean())
+                        in_max = float(in_diff.max())
+                layer_diffs.append(
+                    {
+                        "layer": int(layer_idx),
+                        "in_mean": in_mean,
+                        "in_max": in_max,
+                        "out_mean": out_mean,
+                        "out_max": out_max,
+                        "out_last_max": out_last_max,
+                    }
+                )
 
         if len(safetensors_files) == 1:
             safetensors_desc = str(safetensors_files[0])
@@ -423,6 +524,26 @@ def run_axon_test(
                 masked_last_max_diff,
                 masked_top1_eq,
             )
+        if trace_layers and layer_diffs:
+            print()
+            print("Layer diffs (HF vs Axon) | layer in_mean in_max out_mean out_max out_last_max")
+            for row in layer_diffs:
+                print(
+                    int(row["layer"]),
+                    row["in_mean"],
+                    row["in_max"],
+                    row["out_mean"],
+                    row["out_max"],
+                    row["out_last_max"],
+                )
+            first_large = next((row for row in layer_diffs if float(row["out_mean"]) > 0.05), None)
+            if first_large is not None:
+                print(
+                    "First large layer diff (out_mean > 0.05):",
+                    int(first_large["layer"]),
+                    first_large["out_mean"],
+                    first_large["out_max"],
+                )
 
         result = {
             "hf_time": hf_time,
@@ -436,6 +557,7 @@ def run_axon_test(
             "masked_max_diff": masked_max_diff,
             "masked_last_max_diff": masked_last_max_diff,
             "masked_top1_eq": masked_top1_eq,
+            "layer_diffs": layer_diffs if trace_layers else None,
             "prompts": prompts,
             "generated_hf": hf_gen,
             "generated_axon": syn_gen,
