@@ -13,9 +13,16 @@ from .axon import (
     parse_axon_program_from_path,
     synapse_spec_to_axon_module_text,
 )
-from .axon_test import run_axon_test
 from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
 from .runtime import SynapseProgramModel
+
+
+def run_axon_test(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .axon_test import run_axon_test as _run_axon_test
+
+    return _run_axon_test(*args, **kwargs)
+
 
 __all__ = [
     "AxonBind",
