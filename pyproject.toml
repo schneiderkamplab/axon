@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "brainsurgery"
-version = "0.2.11"
+version = "0.2.12"
 authors = [
   { name = "Peter Schneider-Kamp" }
 ]
 
 description = "swiss army knife of scripts for performing brain surgery on artificial brains."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -25,11 +25,12 @@ dependencies = [
     'rich',
     'safetensors',
     'torch',
+    'tqdm',
     'typer'
 ]
 
 [project.optional-dependencies]
-dev = ["build", "mypy", "pre-commit", "pytest", "ruff", "twine"]
+dev = ["build", "mltiming", "mypy", "pre-commit", "pytest", "ruff", "transformers", "twine"]
 
 [project.urls]
 "Homepage" = "https://github.com/schneiderkamplab/brainsurgery"
