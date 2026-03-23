@@ -13,6 +13,9 @@ from tests.synapse_test_utils import (
     extract_logits,
     load_yaml_mapping,
 )
+from tests.test_flags import LONG_TEST_ENV, run_long_tests_enabled
+
+_RUN_LONG = run_long_tests_enabled()
 
 
 def _build_runtime_model_from_spec(
@@ -40,6 +43,7 @@ def _load_olmoe_state_dict_from_safetensors(
     return state_dict
 
 
+@pytest.mark.skipif(not _RUN_LONG, reason=f"set {LONG_TEST_ENV}=1 to enable long tests")
 def test_generated_olmoe_matches_hf(repo_root: Path, olmoe_local_path: Path) -> None:
     transformers = pytest.importorskip("transformers")
     device = torch.device("cpu")

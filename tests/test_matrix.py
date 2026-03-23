@@ -8,6 +8,7 @@ import pytest
 
 from brainsurgery.synapse import run_axon_test
 from tests.model_downloads import MATRIX_AXON_TO_MODEL_DIR
+from tests.test_flags import LONG_TEST_ENV, run_long_tests_enabled
 
 
 def _matrix_pairs(repo_root: Path) -> list[tuple[Path, Path]]:
@@ -21,12 +22,17 @@ def _matrix_pairs(repo_root: Path) -> list[tuple[Path, Path]]:
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PAIRS = _matrix_pairs(_REPO_ROOT)
+_RUN_MATRIX = run_long_tests_enabled()
 
 
 @pytest.mark.parametrize(
     ("axon_path", "model_dir"),
     _PAIRS,
     ids=[f"{axon.name}__{model.name}" for axon, model in _PAIRS],
+)
+@pytest.mark.skipif(
+    not _RUN_MATRIX,
+    reason=f"set {LONG_TEST_ENV}=1 to enable matrix perf-style tests",
 )
 def test_axon_matrix_quality(
     axon_path: Path,
