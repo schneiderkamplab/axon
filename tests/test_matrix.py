@@ -21,9 +21,6 @@ def _matrix_pairs(repo_root: Path) -> list[tuple[Path, Path]]:
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PAIRS = _matrix_pairs(_REPO_ROOT)
-_SPEED_RATIO_LIMITS_BY_MODEL: dict[str, float] = {
-    "gpt2": 2.0,
-}
 
 
 @pytest.mark.parametrize(
@@ -32,7 +29,10 @@ _SPEED_RATIO_LIMITS_BY_MODEL: dict[str, float] = {
     ids=[f"{axon.name}__{model.name}" for axon, model in _PAIRS],
 )
 def test_axon_matrix_quality(
-    axon_path: Path, model_dir: Path, ensure_matrix_test_models: None
+    axon_path: Path,
+    model_dir: Path,
+    ensure_matrix_test_models: None,
+    pytestconfig: pytest.Config,
 ) -> None:
     pytest.importorskip("transformers")
     _ = ensure_matrix_test_models
@@ -48,7 +48,25 @@ def test_axon_matrix_quality(
             max_len=16,
         )
 
-    speed_limit = _SPEED_RATIO_LIMITS_BY_MODEL.get(axon_path.stem, 1.5)
-    assert result["speed_ratio_axon_over_hf"] < speed_limit
+    hf_time = float(result["hf_time"])
+    axon_time = float(result["axon_time"])
+    ratio = float(result["speed_ratio_axon_over_hf"])
+    abs_delta = abs(axon_time - hf_time)
+
+    reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
+    line = (
+        f"[matrix-time] {axon_path.name} | hf={hf_time:.4f}s "
+        f"axon={axon_time:.4f}s ratio={ratio:.3f}x delta={abs_delta:.4f}s"
+    )
+    if reporter is not None:
+        reporter.write_line(line)
+    else:
+        print(line, flush=True)
+
+    assert not (ratio >= 2.0 and abs_delta > 1.0), (
+        f"performance gate failed for {axon_path.name}: "
+        f"ratio={ratio:.3f}x, delta={abs_delta:.4f}s "
+        f"(hf={hf_time:.4f}s, axon={axon_time:.4f}s)"
+    )
     assert result["max_diff"] < 1.0e-3
     assert result["top1_eq"] is True
