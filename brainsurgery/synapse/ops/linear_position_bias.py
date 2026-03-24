@@ -17,6 +17,33 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     return False
 
 
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, str):
+        raise ValueError("linear_position_bias requires a single scalar output binding")
+
+
+def lowering_infer_metadata(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> bool:
+    if not isinstance(out, str) or not args:
+        return False
+    source_name = str(args[0]).strip()
+    source_shape = ctx.tensor_shape.get(source_name)
+    if isinstance(source_shape, tuple) and len(source_shape) == 2:
+        seq = source_shape[-1]
+        heads = kwargs.get("heads", "heads")
+        ctx.tensor_shape[out] = (source_shape[0], heads, 1, seq)
+        ctx.tensor_last_dim[out] = seq
+        return True
+    if source_name in ctx.tensor_last_dim:
+        ctx.tensor_last_dim[out] = ctx.tensor_last_dim[source_name]
+        return True
+    return False
+
+
 def _build_slopes(*, num_heads: int, device: torch.device) -> torch.Tensor:
     closest_power_of_2 = 2 ** math.floor(math.log2(num_heads))
     base = torch.tensor(
@@ -131,6 +158,8 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
+    "lowering_validate_signature",
+    "lowering_infer_metadata",
     "interpret",
     "compile",
     "uses_node_path",

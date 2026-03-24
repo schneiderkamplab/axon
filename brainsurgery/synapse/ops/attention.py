@@ -17,6 +17,28 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     return False
 
 
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if isinstance(out, list):
+        raise ValueError("attention requires a single scalar output binding")
+
+
+def lowering_infer_metadata(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> bool:
+    del kwargs
+    if isinstance(out, list) or not args:
+        return False
+    source_name = str(args[0]).strip()
+    if source_name in ctx.tensor_last_dim:
+        ctx.tensor_last_dim[out] = ctx.tensor_last_dim[source_name]
+    if source_name in ctx.tensor_shape:
+        ctx.tensor_shape[out] = ctx.tensor_shape[source_name]
+    return True
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -75,9 +97,6 @@ def compile(
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
 
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
-
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
@@ -132,6 +151,8 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
+    "lowering_validate_signature",
+    "lowering_infer_metadata",
     "interpret",
     "compile",
     "uses_node_path",

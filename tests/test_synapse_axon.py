@@ -985,6 +985,21 @@ blk x scores idx = do
         lower_axon_program_to_synapse_spec(modules)
 
 
+def test_moe_select_accepts_positional_expert_compat() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,EPT] -> Tensor[B,T,EPT] -> Tensor[B,T,D]
+blk x scores idx = do
+  x_sel, token_idx, topk_pos, sel_scores <- moe_select x scores idx 0
+  return x_sel
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "moe_select"
+    assert node_specs[0]["_args"] == ["x", "scores", "idx"]
+    assert node_specs[0]["expert"] == 0
+
+
 def test_moe_scatter_add_requires_single_output() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
@@ -994,6 +1009,157 @@ blk m idx upd scores = do
 """
     modules = parse_axon_program(source)
     with pytest.raises(ValueError, match="moe_scatter_add requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_attention_requires_single_output() -> None:
+    source = """
+blk :: Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D]
+blk q k v = do
+  y, z <- attention q k v
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="attention requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_attention_rejects_unknown_kwarg() -> None:
+    source = """
+blk :: Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D]
+blk q k v = do
+  y <- attention q k v foo=1
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError,
+        match=r"attention unsupported kwargs: foo; allowed: causal, mask, scale",
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_cache_update_requires_three_outputs() -> None:
+    source = """
+blk :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D]
+blk past k v = do
+  k_ctx, v_ctx <- _cache_update(past, k, v)
+  return k_ctx
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError, match="cache_update requires exactly three outputs: k_ctx, v_ctx, present"
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_cache_update_rejects_unknown_kwarg() -> None:
+    source = """
+blk :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D]
+blk past k v = do
+  k_ctx, v_ctx, present <- _cache_update(past, k, v, foo=1)
+  return k_ctx
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"cache_update unsupported kwargs: foo"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_list_append_requires_single_output() -> None:
+    source = """
+blk :: ?Cache -> ?Cache -> ?Cache
+blk cache present = do
+  a, b <- _list_append(cache, present)
+  return cache
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="list_append requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_list_append_rejects_unknown_kwarg() -> None:
+    source = """
+blk :: ?Cache -> ?Cache -> ?Cache
+blk cache present = do
+  out <- _list_append(cache, present, foo=1)
+  return out
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"list_append unsupported kwargs: foo"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_cache_seq_len_requires_single_output() -> None:
+    source = """
+blk :: ?Cache -> I
+blk kv = do
+  a, b <- _cache_seq_len(kv)
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="cache_seq_len requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_causal_mask_requires_single_output() -> None:
+    source = """
+blk :: Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,T]
+blk q k = do
+  m, n <- causal_mask q k
+  return m
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="causal_mask requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_linear_position_bias_requires_single_output() -> None:
+    source = """
+blk :: Tensor[B,T] -> Tensor[B,H,1,T]
+blk attention_mask = do
+  a, b <- linear_position_bias attention_mask heads=H
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError, match="linear_position_bias requires a single scalar output binding"
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_list_index_requires_single_output() -> None:
+    source = """
+blk :: ?Cache -> ?Cache
+blk cache = do
+  a, b <- _list_index(cache, 0)
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="list_index requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_list_init_requires_single_output() -> None:
+    source = """
+blk :: ?Cache
+blk = do
+  a, b <- _list_init()
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="list_init requires a single scalar output binding"):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_position_ids_requires_single_output() -> None:
+    source = """
+blk :: Tensor[B,T] -> ?Tensor[B,T] -> Tensor[B,T]
+blk input_ids attn_mask = do
+  a, b <- position_ids input_ids attn_mask
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match="position_ids requires a single scalar output binding"):
         lower_axon_program_to_synapse_spec(modules)
 
 

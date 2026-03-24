@@ -16,6 +16,32 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     return False
 
 
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, str):
+        raise ValueError("position_ids requires a single scalar output binding")
+
+
+def lowering_infer_metadata(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> bool:
+    del kwargs
+    if not isinstance(out, str) or not args:
+        return False
+    source_name = str(args[0]).strip()
+    source_shape = ctx.tensor_shape.get(source_name)
+    if isinstance(source_shape, tuple) and len(source_shape) == 2:
+        ctx.tensor_shape[out] = source_shape
+        ctx.tensor_last_dim[out] = source_shape[-1]
+        return True
+    if source_name in ctx.tensor_last_dim:
+        ctx.tensor_last_dim[out] = ctx.tensor_last_dim[source_name]
+        return True
+    return False
+
+
 def _resolve_past_length(
     model: Any, node_spec: dict[str, Any], env: dict[str, Any], symbols: dict[str, int]
 ) -> int:
@@ -163,6 +189,8 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
+    "lowering_validate_signature",
+    "lowering_infer_metadata",
     "interpret",
     "compile",
     "uses_node_path",

@@ -21,6 +21,21 @@ def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int:
     return 4
 
 
+def lowering_normalize_kwargs(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del out, ctx
+    if "expert" in kwargs:
+        return
+    if len(args) >= 4:
+        expert_token = str(args[3]).strip()
+        if expert_token and expert_token.lstrip("-").isdigit():
+            kwargs["expert"] = int(expert_token)
+        else:
+            kwargs["expert"] = expert_token
+        del args[3:]
+
+
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
@@ -166,6 +181,7 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
+    "lowering_normalize_kwargs",
     "lowering_known_output_arity",
     "lowering_validate_signature",
     "interpret",
