@@ -239,6 +239,36 @@ def axon_test(
         "--dtype",
         help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
     ),
+    hf_align_bf16_profile: bool = typer.Option(
+        False,
+        "--hf-align-bf16-profile/--no-hf-align-bf16-profile",
+        help="Enable a general HF-BF16 alignment profile (mask, posids, add/linear/norm fp32-accum paths).",
+    ),
+    hf_align_mask_contract: bool = typer.Option(
+        False,
+        "--hf-align-mask-contract/--no-hf-align-mask-contract",
+        help="When enabled, normalize additive attention masks to HF-like SDPA bool masks.",
+    ),
+    hf_align_position_ids: bool = typer.Option(
+        False,
+        "--hf-align-position-ids/--no-hf-align-position-ids",
+        help="When enabled, use HF-like padding fill behavior for position_ids.",
+    ),
+    hf_align_add_fp32_accum: bool = typer.Option(
+        False,
+        "--hf-align-add-fp32-accum/--no-hf-align-add-fp32-accum",
+        help="When enabled, compute low-precision add in fp32 and cast back.",
+    ),
+    hf_align_linear_fp32_accum: bool = typer.Option(
+        False,
+        "--hf-align-linear-fp32-accum/--no-hf-align-linear-fp32-accum",
+        help="When enabled, compute low-precision linear in fp32 and cast back.",
+    ),
+    hf_align_norm_fp32: bool = typer.Option(
+        False,
+        "--hf-align-norm-fp32/--no-hf-align-norm-fp32",
+        help="When enabled, run low-precision norm ops through fp32 compute paths.",
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -255,8 +285,81 @@ def axon_test(
             class_name=class_name,
             main_module=main_module,
             dtype=dtype,
+            hf_align_bf16_profile=hf_align_bf16_profile,
+            hf_align_mask_contract=hf_align_mask_contract,
+            hf_align_position_ids=hf_align_position_ids,
+            hf_align_add_fp32_accum=hf_align_add_fp32_accum,
+            hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
+            hf_align_norm_fp32=hf_align_norm_fp32,
         )
     except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("axon-op-parity")
+def axon_op_parity(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    weights: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Path to a .safetensors file or a model directory containing safetensors.",
+    ),
+    hf_model_dir: Path | None = typer.Option(
+        None,
+        "--hf-model-dir",
+        help="HF model directory for AutoModel (defaults to weights directory).",
+    ),
+    tokenizer: str | None = typer.Option(
+        None,
+        "--tokenizer",
+        help="Tokenizer source override (local path or HF repo id).",
+    ),
+    text: list[str] = typer.Option(
+        ["The future of AI is", "Hello world"],
+        "--text",
+        help="Prompt text for forward-pass parity. Repeat --text for batched prompts.",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    dtypes: list[str] = typer.Option(
+        ["float32", "bfloat16", "float16"],
+        "--dtype",
+        help="Dtypes to sweep (repeat --dtype): float32/bfloat16/float16.",
+    ),
+    output_json: Path | None = typer.Option(
+        None,
+        "--output-json",
+        help="Optional path to write a full JSON report.",
+    ),
+) -> None:
+    """Run per-op HF-internals vs Synapse parity harness across requested dtypes."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_op_parity")
+    try:
+        run_fn(
+            axon_file=axon_path,
+            weights=weights,
+            hf_model_dir=hf_model_dir,
+            tokenizer=tokenizer,
+            text=text,
+            device=device,
+            dtypes=dtypes,
+            output_json=output_json,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
 
@@ -308,6 +411,11 @@ def axon_test_matrix(
         "--dry-run",
         help="Only resolve and print matching pairs; do not run tests.",
     ),
+    table_format: str = typer.Option(
+        "plain",
+        "--table-format",
+        help="Summary table format (plain/markdown).",
+    ),
 ) -> None:
     """Run synapse axon-test across matching examples/*.axon and models/* directories."""
     module = _synapse_module()
@@ -322,6 +430,7 @@ def axon_test_matrix(
             text=text or None,
             verbose=verbose,
             dry_run=dry_run,
+            table_format=table_format,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -334,5 +443,6 @@ __all__ = [
     "axon_to_synapse",
     "synapse_to_axon",
     "axon_test",
+    "axon_op_parity",
     "axon_test_matrix",
 ]

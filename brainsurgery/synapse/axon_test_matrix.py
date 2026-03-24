@@ -22,8 +22,13 @@ class _Pair:
 class _SummaryRow:
     axon_file: str
     model_dir: str
+    hf_runtime_s: str
+    axon_runtime_s: str
     runtime_ratio: str
     max_logit_diff: str
+    mean_rel_diff: str
+    masked_mean_rel_diff: str
+    masked_max_rel_diff: str
     top1_eq: str
 
 
@@ -74,6 +79,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only resolve and print matching pairs; do not run tests.",
     )
+    parser.add_argument(
+        "--table-format",
+        default="plain",
+        choices=["plain", "markdown"],
+        help="Summary table format (plain or markdown).",
+    )
     return parser.parse_args()
 
 
@@ -85,14 +96,14 @@ def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
 
     model_dirs = sorted(path for path in models_dir.iterdir() if path.is_dir())
     model_by_name = {path.name: path for path in model_dirs}
+    explicit_model_aliases = {
+        "flexolmo": "flexmath",
+    }
 
     pairs: list[_Pair] = []
     for axon_path in sorted(examples_dir.glob("*.axon")):
         stem = axon_path.stem
-        if stem == "flexolmo":
-            continue
-
-        model_dir = model_by_name.get(stem)
+        model_dir = model_by_name.get(explicit_model_aliases.get(stem, stem))
         if model_dir is None:
             parts = stem.split("_")
             for cut in range(len(parts) - 1, 0, -1):
@@ -111,8 +122,13 @@ def _format_table(rows: list[_SummaryRow]) -> str:
     headers = [
         "axon_file",
         "model_dir",
+        "HF runtime (s)",
+        "AxonDerived runtime (s)",
         "AxonDerived runtime/HF runtime",
         "max logit diff",
+        "mean rel diff",
+        "masked mean rel diff",
+        "masked max rel diff",
         "top1_eq",
     ]
 
@@ -120,8 +136,13 @@ def _format_table(rows: list[_SummaryRow]) -> str:
         [
             row.axon_file,
             row.model_dir,
+            row.hf_runtime_s,
+            row.axon_runtime_s,
             row.runtime_ratio,
             row.max_logit_diff,
+            row.mean_rel_diff,
+            row.masked_mean_rel_diff,
+            row.masked_max_rel_diff,
             row.top1_eq,
         ]
         for row in rows
@@ -139,6 +160,45 @@ def _format_table(rows: list[_SummaryRow]) -> str:
     out_lines = [_fmt(headers), divider]
     out_lines.extend(_fmt(line) for line in body)
     return "\n".join(out_lines)
+
+
+def _format_table_markdown(rows: list[_SummaryRow]) -> str:
+    headers = [
+        "axon_file",
+        "model_dir",
+        "HF runtime (s)",
+        "AxonDerived runtime (s)",
+        "AxonDerived runtime/HF runtime",
+        "max logit diff",
+        "mean rel diff",
+        "masked mean rel diff",
+        "masked max rel diff",
+        "top1_eq",
+    ]
+
+    body = [
+        [
+            row.axon_file,
+            row.model_dir,
+            row.hf_runtime_s,
+            row.axon_runtime_s,
+            row.runtime_ratio,
+            row.max_logit_diff,
+            row.mean_rel_diff,
+            row.masked_mean_rel_diff,
+            row.masked_max_rel_diff,
+            row.top1_eq,
+        ]
+        for row in rows
+    ]
+
+    def _esc(cell: str) -> str:
+        return cell.replace("|", r"\|")
+
+    header_row = "| " + " | ".join(_esc(h) for h in headers) + " |"
+    divider = "| " + " | ".join("---" for _ in headers) + " |"
+    data_rows = ["| " + " | ".join(_esc(cell) for cell in line) + " |" for line in body]
+    return "\n".join([header_row, divider, *data_rows])
 
 
 def _run_pair(
@@ -178,7 +238,11 @@ def run_axon_test_matrix(
     text: list[str] | None = None,
     verbose: bool = False,
     dry_run: bool = False,
+    table_format: str = "plain",
 ) -> int:
+    if table_format not in {"plain", "markdown"}:
+        raise ValueError("table_format must be 'plain' or 'markdown'")
+
     prompts = text if text else ["The future of AI is"]
     pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())
     if not pairs:
@@ -190,13 +254,21 @@ def run_axon_test_matrix(
             _SummaryRow(
                 axon_file=pair.axon_path.name,
                 model_dir=str(pair.model_dir),
+                hf_runtime_s="DRY-RUN",
+                axon_runtime_s="DRY-RUN",
                 runtime_ratio="DRY-RUN",
                 max_logit_diff="DRY-RUN",
+                mean_rel_diff="DRY-RUN",
+                masked_mean_rel_diff="DRY-RUN",
+                masked_max_rel_diff="DRY-RUN",
                 top1_eq="DRY-RUN",
             )
             for pair in pairs
         ]
-        print(_format_table(dry_rows))
+        if table_format == "markdown":
+            print(_format_table_markdown(dry_rows))
+        else:
+            print(_format_table(dry_rows))
         return 0
 
     rows: list[_SummaryRow] = []
@@ -219,8 +291,21 @@ def run_axon_test_matrix(
                 _SummaryRow(
                     axon_file=pair.axon_path.name,
                     model_dir=str(pair.model_dir),
+                    hf_runtime_s=f"{result['hf_time']:.6g}",
+                    axon_runtime_s=f"{result['axon_time']:.6g}",
                     runtime_ratio=f"{result['speed_ratio_axon_over_hf']:.3f}",
                     max_logit_diff=f"{result['max_diff']:.6g}",
+                    mean_rel_diff=f"{float(result['mean_rel_diff']):.6g}",
+                    masked_mean_rel_diff=(
+                        "N/A"
+                        if result.get("masked_mean_rel_diff") is None
+                        else f"{float(result['masked_mean_rel_diff']):.6g}"
+                    ),
+                    masked_max_rel_diff=(
+                        "N/A"
+                        if result.get("masked_max_rel_diff") is None
+                        else f"{float(result['masked_max_rel_diff']):.6g}"
+                    ),
                     top1_eq=str(bool(result["top1_eq"])),
                 )
             )
@@ -230,8 +315,13 @@ def run_axon_test_matrix(
                 _SummaryRow(
                     axon_file=pair.axon_path.name,
                     model_dir=str(pair.model_dir),
+                    hf_runtime_s="ERROR",
+                    axon_runtime_s="ERROR",
                     runtime_ratio="ERROR",
                     max_logit_diff="ERROR",
+                    mean_rel_diff="ERROR",
+                    masked_mean_rel_diff="ERROR",
+                    masked_max_rel_diff="ERROR",
                     top1_eq=f"ERROR: {type(exc).__name__}: {exc}",
                 )
             )
@@ -243,7 +333,10 @@ def run_axon_test_matrix(
     progress.close()
 
     print()
-    print(_format_table(rows))
+    if table_format == "markdown":
+        print(_format_table_markdown(rows))
+    else:
+        print(_format_table(rows))
     print()
     print(f"Total: {len(pairs)} | Passed: {passed} | Failed: {failed}")
     return 0 if failed == 0 else 2
@@ -260,6 +353,7 @@ def main() -> int:
         text=args.text,
         verbose=args.verbose,
         dry_run=args.dry_run,
+        table_format=args.table_format,
     )
 
 

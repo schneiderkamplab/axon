@@ -203,9 +203,20 @@ def run_axon_test(
     class_name: str = "AxonGeneratedModel",
     main_module: str | None = None,
     dtype: str = "float32",
+    hf_align_bf16_profile: bool = False,
+    hf_align_mask_contract: bool = False,
+    hf_align_position_ids: bool = False,
+    hf_align_add_fp32_accum: bool = False,
+    hf_align_linear_fp32_accum: bool = False,
+    hf_align_norm_fp32: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
+    align_mask_contract = bool(hf_align_bf16_profile or hf_align_mask_contract)
+    align_position_ids = bool(hf_align_bf16_profile or hf_align_position_ids)
+    align_add_fp32 = bool(hf_align_bf16_profile or hf_align_add_fp32_accum)
+    align_linear_fp32 = bool(hf_align_bf16_profile or hf_align_linear_fp32_accum)
+    align_norm_fp32 = bool(hf_align_bf16_profile or hf_align_norm_fp32)
 
     axon_file = axon_file.resolve()
     weights_path = weights.resolve()
@@ -315,6 +326,11 @@ def run_axon_test(
             dtype=resolved_dtype,
         )
         syn = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
+        setattr(syn, "_hf_align_mask_contract", align_mask_contract)
+        setattr(syn, "_hf_align_position_ids", align_position_ids)
+        setattr(syn, "_hf_align_add_fp32_accum", align_add_fp32)
+        setattr(syn, "_hf_align_linear_fp32_accum", align_linear_fp32)
+        setattr(syn, "_hf_align_norm_fp32", align_norm_fp32)
 
         def _run_syn_generate(model: Any = syn) -> torch.Tensor:
             generate_kwargs: dict[str, Any] = {
@@ -341,14 +357,23 @@ def run_axon_test(
         if syn_logits.device != hf_logits.device:
             syn_logits = syn_logits.to(hf_logits.device)
         diff = (syn_logits.float() - hf_logits.float()).abs()
+        rel_denom = torch.maximum(
+            torch.maximum(syn_logits.float().abs(), hf_logits.float().abs()),
+            torch.tensor(1.0e-12, device=diff.device, dtype=diff.dtype),
+        )
+        rel_diff = diff / rel_denom
         mean_diff = float(diff.mean())
         max_diff = float(diff.max())
         last_max_diff = float(diff[:, -1, :].max())
+        mean_rel_diff = float(rel_diff.mean())
+        max_rel_diff = float(rel_diff.max())
         top1_eq = bool((syn_logits[:, -1, :].argmax(-1) == hf_logits[:, -1, :].argmax(-1)).all())
 
         masked_mean_diff: float | None = None
         masked_max_diff: float | None = None
         masked_last_max_diff: float | None = None
+        masked_mean_rel_diff: float | None = None
+        masked_max_rel_diff: float | None = None
         masked_top1_eq: bool | None = None
         if attention_mask is not None:
             mask_bool = attention_mask.to(torch.bool)
@@ -356,11 +381,16 @@ def run_axon_test(
             valid_count = int(valid.sum().item())
             if valid_count > 0:
                 valid_diff = diff[valid]
+                valid_rel_diff = rel_diff[valid]
                 masked_mean_diff = float(valid_diff.mean())
                 masked_max_diff = float(valid_diff.max())
+                masked_mean_rel_diff = float(valid_rel_diff.mean())
+                masked_max_rel_diff = float(valid_rel_diff.max())
             else:
                 masked_mean_diff = 0.0
                 masked_max_diff = 0.0
+                masked_mean_rel_diff = 0.0
+                masked_max_rel_diff = 0.0
 
             attn_bool = attention_mask.to(torch.bool)
             rev_last = torch.argmax(attn_bool.flip(dims=[1]).to(torch.long), dim=1)
@@ -388,6 +418,12 @@ def run_axon_test(
         print(f"Tokenizer:      {tokenizer_source}")
         print(f"Device:         {resolved_device}")
         print(f"Prompts:        {len(prompts)}")
+        print(f"HF-align bf16 profile: {bool(hf_align_bf16_profile)}")
+        print(f"HF-align mask:         {align_mask_contract}")
+        print(f"HF-align posid:        {align_position_ids}")
+        print(f"HF-align add fp32:     {align_add_fp32}")
+        print(f"HF-align linear fp32:  {align_linear_fp32}")
+        print(f"HF-align norm fp32:    {align_norm_fp32}")
         print()
         print(
             f"HF:             {hf_time:.4f}s total, {gen_hf / max(hf_time, 1e-9):.2f} tok/s, generated={gen_hf}"
@@ -411,6 +447,11 @@ def run_axon_test(
             last_max_diff,
             top1_eq,
         )
+        print(
+            "Logits rel diff (raw) | mean/max:",
+            mean_rel_diff,
+            max_rel_diff,
+        )
         if attention_mask is not None:
             print(
                 "Logits diff (masked) | mean/max/last_max/top1_eq:",
@@ -418,6 +459,11 @@ def run_axon_test(
                 masked_max_diff,
                 masked_last_max_diff,
                 masked_top1_eq,
+            )
+            print(
+                "Logits rel diff (masked) | mean/max:",
+                masked_mean_rel_diff,
+                masked_max_rel_diff,
             )
 
         result = {
@@ -427,10 +473,14 @@ def run_axon_test(
             "mean_diff": mean_diff,
             "max_diff": max_diff,
             "last_max_diff": last_max_diff,
+            "mean_rel_diff": mean_rel_diff,
+            "max_rel_diff": max_rel_diff,
             "top1_eq": top1_eq,
             "masked_mean_diff": masked_mean_diff,
             "masked_max_diff": masked_max_diff,
             "masked_last_max_diff": masked_last_max_diff,
+            "masked_mean_rel_diff": masked_mean_rel_diff,
+            "masked_max_rel_diff": masked_max_rel_diff,
             "masked_top1_eq": masked_top1_eq,
             "prompts": prompts,
             "generated_hf": hf_gen,

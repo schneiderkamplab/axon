@@ -88,15 +88,20 @@ def interpret(
     ]
     eps_value = float(model._eval_expr(node_spec.get("eps", 1e-6), env, symbols))
     cast_float = bool(node_spec.get("cast_float", False))
+    align_norm_fp32 = bool(getattr(model, "_hf_align_norm_fp32", False))
+    auto_cast_float = (
+        align_norm_fp32 and x.is_floating_point() and x.dtype in {torch.float16, torch.bfloat16}
+    )
+    do_cast_float = cast_float or auto_cast_float
     unit_offset = bool(node_spec.get("unit_offset", False))
-    x_norm_src = x.float() if cast_float else x
-    w_src = weight.float() if cast_float else weight
+    x_norm_src = x.float() if do_cast_float else x
+    w_src = weight.float() if do_cast_float else weight
     x_norm = x_norm_src * torch.rsqrt(
         torch.mean(x_norm_src * x_norm_src, dim=-1, keepdim=True) + eps_value
     )
     y = x_norm * ((1.0 + w_src) if unit_offset else w_src)
     out = model._require_name(node_spec.get("_bind"), field="rmsnorm._bind")
-    env[out] = y.type_as(x) if cast_float else y
+    env[out] = y.type_as(x) if do_cast_float else y
     return
 
 
@@ -127,6 +132,20 @@ def compile(
     tmp = emitter._fresh("xnorm")
     cast_float = bool(node_spec.get("cast_float", False))
     unit_offset = bool(node_spec.get("unit_offset", False))
+    auto_cast_cond = f"torch.is_tensor({src}) and {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}"
+    lines.append(f"{indent}if getattr(self, '_hf_align_norm_fp32', False) and {auto_cast_cond}:")
+    lines.append(
+        f"{indent}    {tmp} = {src}.float() * torch.rsqrt(torch.mean({src}.float() * {src}.float(), dim=-1, keepdim=True) + float({eps}))"
+    )
+    if unit_offset:
+        lines.append(
+            f"{indent}    {out_var} = ({tmp} * (1.0 + emitter._param({infer_param('weight')}).float())).type_as({src})"
+        )
+    else:
+        lines.append(
+            f"{indent}    {out_var} = ({tmp} * emitter._param({infer_param('weight')}).float()).type_as({src})"
+        )
+    lines.append(f"{indent}else:")
     x_norm_src = f"{src}.float()" if cast_float else src
     w_src = (
         f"emitter._param({infer_param('weight')}).float()"
@@ -134,14 +153,14 @@ def compile(
         else f"emitter._param({infer_param('weight')})"
     )
     lines.append(
-        f"{indent}{tmp} = {x_norm_src} * torch.rsqrt(torch.mean({x_norm_src} * {x_norm_src}, dim=-1, keepdim=True) + float({eps}))"
+        f"{indent}    {tmp} = {x_norm_src} * torch.rsqrt(torch.mean({x_norm_src} * {x_norm_src}, dim=-1, keepdim=True) + float({eps}))"
     )
     if unit_offset:
-        lines.append(f"{indent}{out_var} = {tmp} * (1.0 + {w_src})")
+        lines.append(f"{indent}    {out_var} = {tmp} * (1.0 + {w_src})")
     else:
-        lines.append(f"{indent}{out_var} = {tmp} * {w_src}")
+        lines.append(f"{indent}    {out_var} = {tmp} * {w_src}")
     if cast_float:
-        lines.append(f"{indent}{out_var} = {out_var}.type_as({src})")
+        lines.append(f"{indent}    {out_var} = {out_var}.type_as({src})")
     return lines
 
 

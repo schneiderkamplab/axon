@@ -7,9 +7,9 @@ from torch.nn import functional as F
 
 OP_NAME = "activation"
 LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_ALLOWED_KWARGS: set[str] = {"fp32_accum"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {}
+LOWERING_KWARG_KINDS: dict[str, Any] = {"fp32_accum": "bool"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -50,10 +50,36 @@ def interpret(
         raise ValueError("legacy activation node name; use _op: activations_<kind>")
     kind = op_name[len("activations_") :]
     out = model._require_name(node_spec.get("_bind"), field="activation._bind")
+    align_activation_fp32 = bool(node_spec.get("fp32_accum", False))
     if kind == "gelu_new" or kind == "gelu_pytorch_tanh":
-        env[out] = 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
+        if (
+            align_activation_fp32
+            and x.is_floating_point()
+            and x.dtype in {torch.float16, torch.bfloat16}
+        ):
+            x_fp32 = x.float()
+            y_fp32 = (
+                0.5
+                * x_fp32
+                * (
+                    1.0
+                    + torch.tanh(
+                        0.7978845608028654 * (x_fp32 + 0.044715 * x_fp32 * x_fp32 * x_fp32)
+                    )
+                )
+            )
+            env[out] = y_fp32.to(dtype=x.dtype)
+        else:
+            env[out] = 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
     elif kind == "gelu":
-        env[out] = F.gelu(x)
+        if (
+            align_activation_fp32
+            and x.is_floating_point()
+            and x.dtype in {torch.float16, torch.bfloat16}
+        ):
+            env[out] = F.gelu(x.float()).to(dtype=x.dtype)
+        else:
+            env[out] = F.gelu(x)
     elif kind == "relu":
         env[out] = F.relu(x)
     elif kind == "silu":
@@ -90,11 +116,32 @@ def compile(
     kind = op_name[len("activations_") :]
     out_var = assign_out_var(out_name)
     if kind in {"gelu_new", "gelu_pytorch_tanh"}:
-        lines.append(
-            f"{indent}{out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
-        )
+        if bool(node_spec.get("fp32_accum", False)):
+            lines.append(
+                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
+            )
+            lines.append(f"{indent}    _x_fp32 = {src}.float()")
+            lines.append(
+                f"{indent}    {out_var} = (0.5 * _x_fp32 * (1.0 + torch.tanh(0.7978845608028654 * (_x_fp32 + 0.044715 * _x_fp32 * _x_fp32 * _x_fp32)))).to(dtype={src}.dtype)"
+            )
+            lines.append(f"{indent}else:")
+            lines.append(
+                f"{indent}    {out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
+            )
+        else:
+            lines.append(
+                f"{indent}{out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
+            )
     elif kind == "gelu":
-        lines.append(f"{indent}{out_var} = F.gelu({src})")
+        if bool(node_spec.get("fp32_accum", False)):
+            lines.append(
+                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
+            )
+            lines.append(f"{indent}    {out_var} = F.gelu({src}.float()).to(dtype={src}.dtype)")
+            lines.append(f"{indent}else:")
+            lines.append(f"{indent}    {out_var} = F.gelu({src})")
+        else:
+            lines.append(f"{indent}{out_var} = F.gelu({src})")
     elif kind == "relu":
         lines.append(f"{indent}{out_var} = F.relu({src})")
     elif kind == "silu":

@@ -6,9 +6,9 @@ import torch
 
 OP_NAME = "position_ids"
 LOWERING_ARITY = (2, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"past_length"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"past_length", "pad_fill"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"past_length": "dim"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {"past_length": "dim", "pad_fill": "dim"}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -25,6 +25,16 @@ def _resolve_past_length(
         raise ValueError("position_ids.past_length must resolve to non-negative int")
     if value < 0:
         raise ValueError("position_ids.past_length must be >= 0")
+    return int(value)
+
+
+def _resolve_pad_fill(
+    model: Any, node_spec: dict[str, Any], env: dict[str, Any], symbols: dict[str, int]
+) -> int:
+    raw = node_spec.get("pad_fill", 0)
+    value = model._eval_expr(raw, env, symbols)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("position_ids.pad_fill must resolve to int")
     return int(value)
 
 
@@ -58,7 +68,8 @@ def interpret(
         if int(mask_tensor.shape[1]) < seq_len:
             raise ValueError("position_ids.attention_mask width must be >= input sequence length")
         full_pos = mask_tensor.to(torch.long).cumsum(dim=-1) - 1
-        full_pos = full_pos.masked_fill(mask_tensor == 0, 0)
+        pad_fill = _resolve_pad_fill(model, node_spec, env, symbols)
+        full_pos = full_pos.masked_fill(mask_tensor == 0, pad_fill)
         env[out] = full_pos[:, -seq_len:]
         return
 
@@ -96,6 +107,7 @@ def compile(
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     past_expr = emitter._expr_code(node_spec.get("past_length", 0), env)
+    pad_fill_expr = emitter._expr_code(node_spec.get("pad_fill", 0), env)
     offset = emitter._fresh("pos_offset")
 
     lines.append(f"{indent}if {src}.ndim != 2:")
@@ -105,6 +117,7 @@ def compile(
 
     if isinstance(mask, str):
         full_pos = emitter._fresh("full_pos")
+        pad_fill = emitter._fresh("pad_fill")
         lines.append(f"{indent}if {mask} is not None:")
         lines.append(f"{indent}    if {mask}.ndim != 2:")
         lines.append(
@@ -119,7 +132,8 @@ def compile(
             f"{indent}        raise ValueError('position_ids.attention_mask width must be >= input sequence length')"
         )
         lines.append(f"{indent}    {full_pos} = {mask}.to(torch.long).cumsum(dim=-1) - 1")
-        lines.append(f"{indent}    {full_pos} = {full_pos}.masked_fill({mask} == 0, 0)")
+        lines.append(f"{indent}    {pad_fill} = int({pad_fill_expr})")
+        lines.append(f"{indent}    {full_pos} = {full_pos}.masked_fill({mask} == 0, {pad_fill})")
         lines.append(f"{indent}    {out_var} = {full_pos}[:, -{src}.shape[1]:]")
         lines.append(f"{indent}else:")
         lines.append(f"{indent}    {offset} = int({past_expr})")
