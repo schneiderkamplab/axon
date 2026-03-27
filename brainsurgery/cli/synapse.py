@@ -269,6 +269,36 @@ def axon_test(
         "--hf-align-norm-fp32/--no-hf-align-norm-fp32",
         help="When enabled, run low-precision norm ops through fp32 compute paths.",
     ),
+    compile_hf: bool = typer.Option(
+        False,
+        "--compile-hf/--no-compile-hf",
+        help="Compile the HF reference model with torch.compile.",
+    ),
+    compile_axon: bool = typer.Option(
+        False,
+        "--compile-axon/--no-compile-axon",
+        help="Compile the Axon-derived model with torch.compile.",
+    ),
+    compile_backend: str | None = typer.Option(
+        None,
+        "--compile-backend",
+        help="Optional torch.compile backend (e.g. inductor).",
+    ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile-mode",
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    ),
+    compile_fullgraph: bool = typer.Option(
+        False,
+        "--compile-fullgraph/--no-compile-fullgraph",
+        help="Set torch.compile(fullgraph=True).",
+    ),
+    compile_dynamic: bool = typer.Option(
+        False,
+        "--compile-dynamic/--no-compile-dynamic",
+        help="Set torch.compile(dynamic=True).",
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -291,6 +321,12 @@ def axon_test(
             hf_align_add_fp32_accum=hf_align_add_fp32_accum,
             hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
             hf_align_norm_fp32=hf_align_norm_fp32,
+            compile_hf=compile_hf,
+            compile_axon=compile_axon,
+            compile_backend=compile_backend,
+            compile_mode=compile_mode,
+            compile_fullgraph=compile_fullgraph,
+            compile_dynamic=compile_dynamic,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -416,6 +452,36 @@ def axon_test_matrix(
         "--table-format",
         help="Summary table format (plain/markdown).",
     ),
+    compile_hf: bool = typer.Option(
+        False,
+        "--compile-hf/--no-compile-hf",
+        help="Compile the HF reference model with torch.compile.",
+    ),
+    compile_axon: bool = typer.Option(
+        False,
+        "--compile-axon/--no-compile-axon",
+        help="Compile the Axon-derived model with torch.compile.",
+    ),
+    compile_backend: str | None = typer.Option(
+        None,
+        "--compile-backend",
+        help="Optional torch.compile backend (e.g. inductor).",
+    ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile-mode",
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    ),
+    compile_fullgraph: bool = typer.Option(
+        False,
+        "--compile-fullgraph/--no-compile-fullgraph",
+        help="Set torch.compile(fullgraph=True).",
+    ),
+    compile_dynamic: bool = typer.Option(
+        False,
+        "--compile-dynamic/--no-compile-dynamic",
+        help="Set torch.compile(dynamic=True).",
+    ),
 ) -> None:
     """Run synapse axon-test across matching examples/*.axon and models/* directories."""
     module = _synapse_module()
@@ -431,6 +497,12 @@ def axon_test_matrix(
             verbose=verbose,
             dry_run=dry_run,
             table_format=table_format,
+            compile_hf=compile_hf,
+            compile_axon=compile_axon,
+            compile_backend=compile_backend,
+            compile_mode=compile_mode,
+            compile_fullgraph=compile_fullgraph,
+            compile_dynamic=compile_dynamic,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc

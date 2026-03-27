@@ -1034,7 +1034,7 @@ blk q k v = do
     modules = parse_axon_program(source)
     with pytest.raises(
         ValueError,
-        match=r"attention unsupported kwargs: foo; allowed: causal, mask, scale",
+        match=r"attention unsupported kwargs: foo; allowed: causal, eager, mask, scale",
     ):
         lower_axon_program_to_synapse_spec(modules)
 

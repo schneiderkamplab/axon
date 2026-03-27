@@ -13,9 +13,10 @@ import safetensors
 import torch
 from mltiming import timing
 from omegaconf import OmegaConf
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
 from .codegen import emit_model_code_from_synapse_spec
 
 
@@ -149,12 +150,47 @@ def _load_tokenizer(tokenizer_source: str, *, fallback_repo_id: str | None = Non
         )
 
 
+def _normalize_rope_numeric_fields(config: Any) -> Any:
+    def _normalize_dict(mapping: Any) -> None:
+        if not isinstance(mapping, dict):
+            return
+        for key in ("factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim"):
+            value = mapping.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                mapping[key] = float(value)
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    _normalize_dict(rope_scaling)
+    rope_parameters = getattr(config, "rope_parameters", None)
+    _normalize_dict(rope_parameters)
+    return config
+
+
 def _looks_like_tokenizer_dir(path: Path) -> bool:
     return (
         (path / "tokenizer.json").exists()
         or (path / "tokenizer.model").exists()
         or ((path / "vocab.json").exists() and (path / "merges.txt").exists())
     )
+
+
+def _candidate_tokenizer_dirs(model_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    candidates.append(model_dir)
+    candidates.append(model_dir.with_name(f"{model_dir.name}.old"))
+    parts = model_dir.name.split("_")
+    for cut in range(len(parts) - 1, 1, -1):
+        candidates.append(model_dir.with_name("_".join(parts[:cut])))
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    return out
 
 
 def _load_generated_class(py_path: Path, class_name: str) -> type[Any]:
@@ -176,6 +212,31 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
         out = fn()
     dt = time.perf_counter() - t0
     return out, dt
+
+
+def _maybe_compile_model(
+    model: Any,
+    *,
+    enabled: bool,
+    backend: str | None,
+    mode: str | None,
+    fullgraph: bool,
+    dynamic: bool,
+) -> Any:
+    if not enabled:
+        return model
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        raise ValueError("torch.compile is not available in this PyTorch build")
+    kwargs: dict[str, Any] = {
+        "fullgraph": bool(fullgraph),
+        "dynamic": bool(dynamic),
+    }
+    if backend:
+        kwargs["backend"] = backend
+    if mode:
+        kwargs["mode"] = mode
+    return compile_fn(model, **kwargs)
 
 
 def _normalize_texts(text: str | Sequence[str]) -> list[str]:
@@ -209,6 +270,12 @@ def run_axon_test(
     hf_align_add_fp32_accum: bool = False,
     hf_align_linear_fp32_accum: bool = False,
     hf_align_norm_fp32: bool = False,
+    compile_hf: bool = False,
+    compile_axon: bool = False,
+    compile_backend: str | None = None,
+    compile_mode: str | None = None,
+    compile_fullgraph: bool = False,
+    compile_dynamic: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
@@ -230,11 +297,10 @@ def run_axon_test(
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
-        candidate_old = resolved_hf_model_dir.with_name(f"{resolved_hf_model_dir.name}.old")
-        if not _looks_like_tokenizer_dir(resolved_hf_model_dir) and _looks_like_tokenizer_dir(
-            candidate_old
-        ):
-            tokenizer_source = str(candidate_old)
+        for candidate in _candidate_tokenizer_dirs(resolved_hf_model_dir):
+            if _looks_like_tokenizer_dir(candidate):
+                tokenizer_source = str(candidate)
+                break
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
     prompts = _normalize_texts(text)
 
@@ -261,10 +327,42 @@ def run_axon_test(
         model_cls = _load_generated_class(generated_py_path, class_name)
 
         tokenizer_obj = _load_tokenizer(tokenizer_source, fallback_repo_id=tokenizer_fallback)
-        hf_model: Any = AutoModelForCausalLM.from_pretrained(
-            str(resolved_hf_model_dir), local_files_only=True, dtype=resolved_dtype
+        state_dict: dict[str, torch.Tensor] | None = None
+        try:
+            hf_config = AutoConfig.from_pretrained(
+                str(resolved_hf_model_dir), local_files_only=True
+            )
+            hf_config = _normalize_rope_numeric_fields(hf_config)
+            hf_model: Any = AutoModelForCausalLM.from_pretrained(
+                str(resolved_hf_model_dir),
+                local_files_only=True,
+                dtype=resolved_dtype,
+                config=hf_config,
+            )
+            hf = hf_model.to(resolved_device).eval()
+        except Exception:
+            if not is_black_mamba_config_dir(resolved_hf_model_dir):
+                raise
+            state_dict = _load_state_dict(
+                safetensors_files,
+                device=resolved_device,
+                dtype=resolved_dtype,
+            )
+            hf = (
+                BlackMambaReferenceModel.from_state_dict(
+                    model_dir=resolved_hf_model_dir, state_dict=state_dict
+                )
+                .to(resolved_device)
+                .eval()
+            )
+        hf = _maybe_compile_model(
+            hf,
+            enabled=compile_hf,
+            backend=compile_backend,
+            mode=compile_mode,
+            fullgraph=compile_fullgraph,
+            dynamic=compile_dynamic,
         )
-        hf = hf_model.to(resolved_device).eval()
         if hasattr(hf, "generation_config"):
             hf.generation_config.do_sample = False
             hf.generation_config.top_p = None
@@ -320,17 +418,26 @@ def run_axon_test(
         del hf
         _cleanup(resolved_device)
 
-        state_dict = _load_state_dict(
-            safetensors_files,
-            device=resolved_device,
-            dtype=resolved_dtype,
-        )
+        if state_dict is None:
+            state_dict = _load_state_dict(
+                safetensors_files,
+                device=resolved_device,
+                dtype=resolved_dtype,
+            )
         syn = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
         setattr(syn, "_hf_align_mask_contract", align_mask_contract)
         setattr(syn, "_hf_align_position_ids", align_position_ids)
         setattr(syn, "_hf_align_add_fp32_accum", align_add_fp32)
         setattr(syn, "_hf_align_linear_fp32_accum", align_linear_fp32)
         setattr(syn, "_hf_align_norm_fp32", align_norm_fp32)
+        syn = _maybe_compile_model(
+            syn,
+            enabled=compile_axon,
+            backend=compile_backend,
+            mode=compile_mode,
+            fullgraph=compile_fullgraph,
+            dynamic=compile_dynamic,
+        )
 
         def _run_syn_generate(model: Any = syn) -> torch.Tensor:
             generate_kwargs: dict[str, Any] = {
@@ -424,6 +531,12 @@ def run_axon_test(
         print(f"HF-align add fp32:     {align_add_fp32}")
         print(f"HF-align linear fp32:  {align_linear_fp32}")
         print(f"HF-align norm fp32:    {align_norm_fp32}")
+        print(f"Compile HF:            {bool(compile_hf)}")
+        print(f"Compile Axon:          {bool(compile_axon)}")
+        print(f"Compile backend:       {compile_backend}")
+        print(f"Compile mode:          {compile_mode}")
+        print(f"Compile fullgraph:     {bool(compile_fullgraph)}")
+        print(f"Compile dynamic:       {bool(compile_dynamic)}")
         print()
         print(
             f"HF:             {hf_time:.4f}s total, {gen_hf / max(hf_time, 1e-9):.2f} tok/s, generated={gen_hf}"
@@ -482,6 +595,12 @@ def run_axon_test(
             "masked_mean_rel_diff": masked_mean_rel_diff,
             "masked_max_rel_diff": masked_max_rel_diff,
             "masked_top1_eq": masked_top1_eq,
+            "compile_hf": bool(compile_hf),
+            "compile_axon": bool(compile_axon),
+            "compile_backend": compile_backend,
+            "compile_mode": compile_mode,
+            "compile_fullgraph": bool(compile_fullgraph),
+            "compile_dynamic": bool(compile_dynamic),
             "prompts": prompts,
             "generated_hf": hf_gen,
             "generated_axon": syn_gen,

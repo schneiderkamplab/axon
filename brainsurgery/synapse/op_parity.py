@@ -16,12 +16,14 @@ from transformers import AutoModelForCausalLM
 from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from .axon_test import (
     _extract_logits,
+    _load_generated_class,
     _load_state_dict,
     _load_tokenizer,
     _looks_like_tokenizer_dir,
     _resolve_device,
     _resolve_safetensors_paths,
 )
+from .codegen import emit_model_code_from_synapse_spec
 from .runtime import SynapseProgramModel
 
 _CANONICAL_DTYPES = ("float32", "bfloat16", "float16")
@@ -199,6 +201,42 @@ class _TracingSynapseProgramModel(SynapseProgramModel):
                             "attention_via": "linear_out_proj",
                         },
                     )
+
+
+class _NodeTracingSynapseProgramModel(SynapseProgramModel):
+    def __init__(self, spec: dict[str, Any], state_dict: dict[str, torch.Tensor]) -> None:
+        super().__init__(spec=spec, state_dict=state_dict)
+        self.trace_ops: list[dict[str, Any]] = []
+
+    def _execute_op(
+        self,
+        op: str,
+        node_spec: dict[str, Any],
+        env: dict[str, Any],
+        *,
+        node_path: str,
+        scope: str,
+        symbols: dict[str, int | float | bool],
+    ) -> None:
+        super()._execute_op(op, node_spec, env, node_path=node_path, scope=scope, symbols=symbols)
+        bind = node_spec.get("_bind")
+        bind_names = [bind] if isinstance(bind, str) else (bind if isinstance(bind, list) else [])
+        for name in bind_names:
+            if not isinstance(name, str):
+                continue
+            value = env.get(name)
+            tensor = _first_tensor(value)
+            if tensor is None:
+                continue
+            self.trace_ops.append(
+                {
+                    "node_path": node_path,
+                    "op": op,
+                    "bind": name,
+                    "dtype": str(tensor.dtype),
+                    "tensor": tensor.detach().float().cpu(),
+                }
+            )
 
 
 class _AddTraceMode(TorchDispatchMode):
@@ -385,6 +423,30 @@ def _pair_stats(
         "top_offenders": offenders[:10],
         "shape_hf_counts": shape_hf_counts,
         "shape_syn_counts": shape_syn_counts,
+    }
+
+
+def _tensor_diff_stats(lhs: torch.Tensor, rhs: torch.Tensor) -> dict[str, float]:
+    lhs_f = lhs.float()
+    rhs_f = rhs.float()
+    diff = (lhs_f - rhs_f).abs()
+    if diff.numel() == 0:
+        return {
+            "mean_abs": 0.0,
+            "max_abs": 0.0,
+            "mean_rel": 0.0,
+            "max_rel": 0.0,
+        }
+    denom = torch.maximum(
+        torch.maximum(lhs_f.abs(), rhs_f.abs()),
+        torch.tensor(1.0e-12, device=diff.device, dtype=diff.dtype),
+    )
+    rel = diff / denom
+    return {
+        "mean_abs": float(diff.mean()),
+        "max_abs": float(diff.max()),
+        "mean_rel": float(rel.mean()),
+        "max_rel": float(rel.max()),
     }
 
 
@@ -634,4 +696,225 @@ def run_axon_op_parity(
     return payload
 
 
-__all__ = ["run_axon_op_parity"]
+def run_codegen_runtime_parity(
+    *,
+    axon_file: Path,
+    weights: Path,
+    hf_model_dir: Path | None = None,
+    tokenizer: str | None = None,
+    text: str | Sequence[str] = ("The future of AI is",),
+    device: str = "cpu",
+    dtype: str = "float32",
+    class_name: str = "AxonGeneratedParityModel",
+    max_reported: int = 20,
+    abs_tol: float = 1.0e-5,
+    rel_tol: float = 1.0e-3,
+    output_json: Path | None = None,
+) -> dict[str, Any]:
+    resolved_device = _resolve_device(device)
+    resolved_dtype = _resolve_dtype_name(dtype)
+    prompts = _normalize_texts(text)
+    axon_path = axon_file.resolve()
+    weights_path = weights.resolve()
+    if not axon_path.exists():
+        raise FileNotFoundError(f"Axon file not found: {axon_path}")
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Weights path not found: {weights_path}")
+
+    state_dict_paths = _resolve_safetensors_paths(weights_path)
+    default_hf_dir = weights_path if weights_path.is_dir() else state_dict_paths[0].parent
+    resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
+    tokenizer_source = tokenizer or str(resolved_hf_model_dir)
+    if tokenizer is None:
+        candidate_old = resolved_hf_model_dir.with_name(f"{resolved_hf_model_dir.name}.old")
+        if not _looks_like_tokenizer_dir(resolved_hf_model_dir) and _looks_like_tokenizer_dir(
+            candidate_old
+        ):
+            tokenizer_source = str(candidate_old)
+    tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
+
+    with TemporaryDirectory(prefix="axon_codegen_runtime_parity_") as tmp_dir:
+        modules = parse_axon_program_from_path(axon_path)
+        lowered_spec = lower_axon_program_to_synapse_spec(modules)
+        loaded = OmegaConf.create(lowered_spec)
+        loaded_dict = OmegaConf.to_container(loaded, resolve=True)
+        if not isinstance(loaded_dict, dict):
+            raise ValueError("Lowered synapse spec did not produce a mapping")
+        final_spec: dict[str, Any] = {str(k): v for k, v in loaded_dict.items()}
+        model_input_names = set(final_spec.get("model", {}).get("inputs", {}).keys())
+
+        tokenizer_obj, input_ids, attention_mask = _build_inputs(
+            prompts=prompts,
+            tokenizer_source=tokenizer_source,
+            tokenizer_fallback=tokenizer_fallback,
+            device=resolved_device,
+        )
+        del tokenizer_obj
+        syn_kwargs = _forward_kwargs(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            for_hf=False,
+            model_input_names=model_input_names,
+        )
+
+        state_dict = _load_state_dict(
+            state_dict_paths, device=resolved_device, dtype=resolved_dtype
+        )
+        runtime = _NodeTracingSynapseProgramModel(final_spec, state_dict).to(resolved_device).eval()
+
+        generated_py_path = Path(tmp_dir) / "generated_model.py"
+        generated_py_path.write_text(
+            emit_model_code_from_synapse_spec(final_spec, class_name=class_name),
+            encoding="utf-8",
+        )
+        model_cls = _load_generated_class(generated_py_path, class_name)
+        generated = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
+        setattr(generated, "_trace_enabled", True)
+        if hasattr(generated, "_reset_trace"):
+            generated._reset_trace()
+
+        with torch.no_grad():
+            generated_logits = _extract_logits(generated(**syn_kwargs)).detach().float().cpu()
+            runtime_logits = _extract_logits(runtime(**syn_kwargs)).detach().float().cpu()
+
+        generated_trace_raw = list(getattr(generated, "trace_ops", []))
+        runtime_trace_raw = list(runtime.trace_ops)
+        generated_trace = [
+            {
+                "index": idx,
+                "node_path": str(item["node_path"]),
+                "op": str(item["op"]),
+                "bind": str(item["bind"]),
+                "dtype": str(item.get("dtype", "")),
+                "tensor": item["tensor"],
+            }
+            for idx, item in enumerate(generated_trace_raw)
+            if isinstance(item, dict) and torch.is_tensor(item.get("tensor"))
+        ]
+        runtime_trace = [
+            {
+                "index": idx,
+                "node_path": str(item["node_path"]),
+                "op": str(item["op"]),
+                "bind": str(item["bind"]),
+                "dtype": str(item.get("dtype", "")),
+                "tensor": item["tensor"],
+            }
+            for idx, item in enumerate(runtime_trace_raw)
+            if isinstance(item, dict) and torch.is_tensor(item.get("tensor"))
+        ]
+
+        first_divergence: dict[str, Any] | None = None
+        compared: list[dict[str, Any]] = []
+        pair_count = min(len(generated_trace), len(runtime_trace))
+        for idx in range(pair_count):
+            gen_item = generated_trace[idx]
+            run_item = runtime_trace[idx]
+            if (
+                gen_item["node_path"] != run_item["node_path"]
+                or gen_item["op"] != run_item["op"]
+                or gen_item["bind"] != run_item["bind"]
+            ):
+                mismatch = {
+                    "index": idx,
+                    "reason": "trace-key-mismatch",
+                    "generated": {
+                        "node_path": gen_item["node_path"],
+                        "op": gen_item["op"],
+                        "bind": gen_item["bind"],
+                    },
+                    "runtime": {
+                        "node_path": run_item["node_path"],
+                        "op": run_item["op"],
+                        "bind": run_item["bind"],
+                    },
+                }
+                if first_divergence is None:
+                    first_divergence = mismatch
+                compared.append(mismatch)
+                continue
+            if "float" not in gen_item["dtype"] or "float" not in run_item["dtype"]:
+                continue
+            if gen_item["tensor"].shape != run_item["tensor"].shape:
+                mismatch = {
+                    "index": idx,
+                    "reason": "shape-mismatch",
+                    "node_path": gen_item["node_path"],
+                    "op": gen_item["op"],
+                    "bind": gen_item["bind"],
+                    "generated_shape": list(gen_item["tensor"].shape),
+                    "runtime_shape": list(run_item["tensor"].shape),
+                }
+                if first_divergence is None:
+                    first_divergence = mismatch
+                compared.append(mismatch)
+                continue
+            stats = _tensor_diff_stats(gen_item["tensor"], run_item["tensor"])
+            row = {
+                "index": idx,
+                "node_path": gen_item["node_path"],
+                "op": gen_item["op"],
+                "bind": gen_item["bind"],
+                **stats,
+            }
+            compared.append(row)
+            if first_divergence is None and (
+                stats["max_abs"] > abs_tol or stats["max_rel"] > rel_tol
+            ):
+                first_divergence = row
+
+        logits_summary: dict[str, Any]
+        if generated_logits.shape == runtime_logits.shape:
+            logits_summary = {}
+            logits_summary.update(_tensor_diff_stats(generated_logits, runtime_logits))
+            logits_summary["shape"] = list(generated_logits.shape)
+            logits_summary["top1_eq"] = bool(
+                (generated_logits[:, -1, :].argmax(-1) == runtime_logits[:, -1, :].argmax(-1)).all()
+            )
+        else:
+            logits_summary = {
+                "shape_mismatch": {
+                    "generated": list(generated_logits.shape),
+                    "runtime": list(runtime_logits.shape),
+                }
+            }
+
+        numeric_rows = [
+            item
+            for item in compared
+            if isinstance(item.get("max_abs"), float) and isinstance(item.get("max_rel"), float)
+        ]
+        numeric_rows.sort(key=lambda item: float(item["max_abs"]), reverse=True)
+
+    payload = {
+        "axon_file": str(axon_path),
+        "weights": str(weights_path),
+        "hf_model_dir": str(resolved_hf_model_dir),
+        "tokenizer_source": tokenizer_source,
+        "device": str(resolved_device),
+        "dtype": dtype,
+        "prompts": prompts,
+        "trace_counts": {
+            "generated": len(generated_trace),
+            "runtime": len(runtime_trace),
+            "paired": pair_count,
+        },
+        "tolerances": {"abs_tol": float(abs_tol), "rel_tol": float(rel_tol)},
+        "logits": logits_summary,
+        "first_divergence": first_divergence,
+        "top_divergences": numeric_rows[: max(1, int(max_reported))],
+    }
+    if len(generated_trace) != len(runtime_trace) and first_divergence is None:
+        payload["first_divergence"] = {
+            "reason": "trace-length-mismatch",
+            "generated": len(generated_trace),
+            "runtime": len(runtime_trace),
+        }
+    if output_json is not None:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"[op-parity] wrote codegen/runtime report: {output_json}")
+    return payload
+
+
+__all__ = ["run_axon_op_parity", "run_codegen_runtime_parity"]

@@ -85,6 +85,36 @@ def _parse_args() -> argparse.Namespace:
         choices=["plain", "markdown"],
         help="Summary table format (plain or markdown).",
     )
+    parser.add_argument(
+        "--compile-hf",
+        action="store_true",
+        help="Compile the HF reference model with torch.compile.",
+    )
+    parser.add_argument(
+        "--compile-axon",
+        action="store_true",
+        help="Compile the Axon-derived model with torch.compile.",
+    )
+    parser.add_argument(
+        "--compile-backend",
+        default=None,
+        help="Optional torch.compile backend (e.g. inductor).",
+    )
+    parser.add_argument(
+        "--compile-mode",
+        default=None,
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    )
+    parser.add_argument(
+        "--compile-fullgraph",
+        action="store_true",
+        help="Set torch.compile(fullgraph=True).",
+    )
+    parser.add_argument(
+        "--compile-dynamic",
+        action="store_true",
+        help="Set torch.compile(dynamic=True).",
+    )
     return parser.parse_args()
 
 
@@ -98,11 +128,21 @@ def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
     model_by_name = {path.name: path for path in model_dirs}
     explicit_model_aliases = {
         "flexolmo": "flexmath",
+        "black_mamba": "black_mamba_2_8b",
+    }
+    excluded_stems = {
+        "gpt-oss-20b",
+        "gpt_oss_20b",
+        "glm_4_5_air",
+        "nemotron-3",
+        "nemotron3",
     }
 
     pairs: list[_Pair] = []
     for axon_path in sorted(examples_dir.glob("*.axon")):
         stem = axon_path.stem
+        if stem in excluded_stems:
+            continue
         model_dir = model_by_name.get(explicit_model_aliases.get(stem, stem))
         if model_dir is None:
             parts = stem.split("_")
@@ -209,6 +249,12 @@ def _run_pair(
     max_len: int,
     text: list[str],
     verbose: bool,
+    compile_hf: bool,
+    compile_axon: bool,
+    compile_backend: str | None,
+    compile_mode: str | None,
+    compile_fullgraph: bool,
+    compile_dynamic: bool,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "axon_file": pair.axon_path,
@@ -218,8 +264,13 @@ def _run_pair(
         "dtype": dtype,
         "max_len": max_len,
         "text": text,
+        "compile_hf": compile_hf,
+        "compile_axon": compile_axon,
+        "compile_backend": compile_backend,
+        "compile_mode": compile_mode,
+        "compile_fullgraph": compile_fullgraph,
+        "compile_dynamic": compile_dynamic,
     }
-
     if verbose:
         print(f"Running: {kwargs}")
         return run_axon_test(**kwargs)
@@ -239,6 +290,12 @@ def run_axon_test_matrix(
     verbose: bool = False,
     dry_run: bool = False,
     table_format: str = "plain",
+    compile_hf: bool = False,
+    compile_axon: bool = False,
+    compile_backend: str | None = None,
+    compile_mode: str | None = None,
+    compile_fullgraph: bool = False,
+    compile_dynamic: bool = False,
 ) -> int:
     if table_format not in {"plain", "markdown"}:
         raise ValueError("table_format must be 'plain' or 'markdown'")
@@ -286,6 +343,12 @@ def run_axon_test_matrix(
                 max_len=max_len,
                 text=prompts,
                 verbose=verbose,
+                compile_hf=compile_hf,
+                compile_axon=compile_axon,
+                compile_backend=compile_backend,
+                compile_mode=compile_mode,
+                compile_fullgraph=compile_fullgraph,
+                compile_dynamic=compile_dynamic,
             )
             rows.append(
                 _SummaryRow(
@@ -354,6 +417,12 @@ def main() -> int:
         verbose=args.verbose,
         dry_run=args.dry_run,
         table_format=args.table_format,
+        compile_hf=bool(args.compile_hf),
+        compile_axon=bool(args.compile_axon),
+        compile_backend=(str(args.compile_backend) if args.compile_backend is not None else None),
+        compile_mode=str(args.compile_mode) if args.compile_mode is not None else None,
+        compile_fullgraph=bool(args.compile_fullgraph),
+        compile_dynamic=bool(args.compile_dynamic),
     )
 
 

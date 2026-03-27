@@ -10,7 +10,12 @@ LOWERING_ARITY = (2, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = {
     "position_ids",
     "theta",
+    "interleaved",
     "scale_factor",
+    "beta_fast",
+    "beta_slow",
+    "mscale",
+    "mscale_all_dim",
     "low_freq_factor",
     "high_freq_factor",
     "original_context",
@@ -19,7 +24,12 @@ LOWERING_REQUIRED_KWARGS: set[str] = {"position_ids"}
 LOWERING_KWARG_KINDS: dict[str, Any] = {
     "position_ids": "str",
     "theta": "number",
+    "interleaved": "bool",
     "scale_factor": "number",
+    "beta_fast": "number",
+    "beta_slow": "number",
+    "mscale": "number",
+    "mscale_all_dim": "number",
     "low_freq_factor": "number",
     "high_freq_factor": "number",
     "original_context": "dim",
@@ -66,6 +76,70 @@ def _apply_frequency_scaling(
     return torch.where(is_medium, smoothed, inv_scaled)
 
 
+def _apply_transformers_yarn_inv_freq(
+    *,
+    theta: float,
+    head_dim: int,
+    scale_factor: float,
+    beta_fast: float,
+    beta_slow: float,
+    original_context: int,
+    device: torch.device,
+    truncate: bool = True,
+) -> torch.Tensor:
+    if scale_factor <= 0.0:
+        raise ValueError("rope_pair.scale_factor must be > 0")
+    if beta_fast <= 0.0:
+        raise ValueError("rope_pair.beta_fast must be > 0")
+    if beta_slow <= 0.0:
+        raise ValueError("rope_pair.beta_slow must be > 0")
+    if original_context <= 0:
+        raise ValueError("rope_pair.original_context must be > 0")
+    if head_dim <= 0 or head_dim % 2 != 0:
+        raise ValueError("rope_pair head_dim must be positive and even")
+
+    dim = int(head_dim)
+    pos_freqs = theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / float(dim))
+    inv_freq_extrapolation = 1.0 / pos_freqs
+    inv_freq_interpolation = 1.0 / (scale_factor * pos_freqs)
+
+    def _find_correction_dim(num_rotations: float) -> float:
+        return (dim * math.log(original_context / (num_rotations * 2.0 * math.pi))) / (
+            2.0 * math.log(theta)
+        )
+
+    low = _find_correction_dim(beta_fast)
+    high = _find_correction_dim(beta_slow)
+    if truncate:
+        low = math.floor(low)
+        high = math.ceil(high)
+    low = max(low, 0.0)
+    high = min(high, float(dim - 1))
+
+    if low == high:
+        high = high + 0.001
+    linear = (torch.arange(dim // 2, device=device, dtype=torch.float32) - low) / (high - low)
+    ramp = torch.clamp(linear, 0.0, 1.0)
+    inv_freq_extrapolation_factor = 1.0 - ramp
+    return (
+        inv_freq_interpolation * (1.0 - inv_freq_extrapolation_factor)
+        + inv_freq_extrapolation * inv_freq_extrapolation_factor
+    )
+
+
+def _yarn_attention_factor(
+    *, scale_factor: float, mscale: float | None, mscale_all_dim: float | None
+) -> float:
+    def _get_mscale(scale: float, value: float = 1.0) -> float:
+        if scale <= 1.0:
+            return 1.0
+        return 0.1 * float(value) * math.log(scale) + 1.0
+
+    if mscale is not None and mscale_all_dim is not None:
+        return float(_get_mscale(scale_factor, mscale) / _get_mscale(scale_factor, mscale_all_dim))
+    return float(_get_mscale(scale_factor))
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -110,9 +184,42 @@ def interpret(
         raise ValueError("rope_pair.position_ids width must match q/k sequence length")
     half = q.shape[-1] // 2
     inv_freq = 1.0 / (
-        theta ** (torch.arange(0, half, device=q.device, dtype=q.dtype) / float(half))
+        theta ** (torch.arange(0, half, device=q.device, dtype=torch.float32) / float(half))
     )
+    rope_attention_factor = 1.0
     if all(
+        key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")
+    ):
+        scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
+        beta_fast = float(model._eval_expr(node_spec["beta_fast"], env, symbols))
+        beta_slow = float(model._eval_expr(node_spec["beta_slow"], env, symbols))
+        original_context = int(model._eval_expr(node_spec["original_context"], env, symbols))
+        inv_freq = _apply_transformers_yarn_inv_freq(
+            theta=theta,
+            head_dim=int(q.shape[-1]),
+            scale_factor=scale_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+            original_context=original_context,
+            device=q.device,
+            truncate=True,
+        )
+        mscale = (
+            float(model._eval_expr(node_spec["mscale"], env, symbols))
+            if "mscale" in node_spec
+            else None
+        )
+        mscale_all_dim = (
+            float(model._eval_expr(node_spec["mscale_all_dim"], env, symbols))
+            if "mscale_all_dim" in node_spec
+            else None
+        )
+        rope_attention_factor = _yarn_attention_factor(
+            scale_factor=scale_factor,
+            mscale=mscale,
+            mscale_all_dim=mscale_all_dim,
+        )
+    elif all(
         key in node_spec
         for key in ("scale_factor", "low_freq_factor", "high_freq_factor", "original_context")
     ):
@@ -125,12 +232,35 @@ def interpret(
         )
     pos = pos_ids.to(device=q.device, dtype=q.dtype)
     ang = pos.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
-    cos = torch.cos(ang).unsqueeze(1)
-    sin = torch.sin(ang).unsqueeze(1)
-    q1, q2 = q[..., :half], q[..., half : 2 * half]
-    k1, k2 = k[..., :half], k[..., half : 2 * half]
-    env[outs[0]] = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
-    env[outs[1]] = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+    cos_half = torch.cos(ang) * float(rope_attention_factor)
+    sin_half = torch.sin(ang) * float(rope_attention_factor)
+    interleaved = bool(node_spec.get("interleaved", False))
+    if interleaved:
+        cos = cos_half.unsqueeze(1)
+        sin = sin_half.unsqueeze(1)
+        q_even = q[..., 0::2]
+        q_odd = q[..., 1::2]
+        k_even = k[..., 0::2]
+        k_odd = k[..., 1::2]
+        q_rot_even = q_even * cos - q_odd * sin
+        q_rot_odd = q_even * sin + q_odd * cos
+        k_rot_even = k_even * cos - k_odd * sin
+        k_rot_odd = k_even * sin + k_odd * cos
+        q_rot = torch.empty_like(q)
+        k_rot = torch.empty_like(k)
+        q_rot[..., 0::2] = q_rot_even
+        q_rot[..., 1::2] = q_rot_odd
+        k_rot[..., 0::2] = k_rot_even
+        k_rot[..., 1::2] = k_rot_odd
+        env[outs[0]] = q_rot
+        env[outs[1]] = k_rot
+    else:
+        cos = cos_half.unsqueeze(1)
+        sin = sin_half.unsqueeze(1)
+        q1, q2 = q[..., :half], q[..., half : 2 * half]
+        k1, k2 = k[..., :half], k[..., half : 2 * half]
+        env[outs[0]] = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+        env[outs[1]] = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
     return
 
 
@@ -161,6 +291,10 @@ def compile(
     k_out = assign_out_var(str(outs[1]))
     theta = emitter._expr_code(node_spec.get("theta", 10000.0), env)
     scale_factor = emitter._expr_code(node_spec.get("scale_factor"), env)
+    beta_fast = emitter._expr_code(node_spec.get("beta_fast"), env)
+    beta_slow = emitter._expr_code(node_spec.get("beta_slow"), env)
+    mscale_expr = emitter._expr_code(node_spec.get("mscale"), env)
+    mscale_all_dim_expr = emitter._expr_code(node_spec.get("mscale_all_dim"), env)
     low_freq_factor = emitter._expr_code(node_spec.get("low_freq_factor"), env)
     high_freq_factor = emitter._expr_code(node_spec.get("high_freq_factor"), env)
     original_context = emitter._expr_code(node_spec.get("original_context"), env)
@@ -174,10 +308,14 @@ def compile(
     ang = emitter._fresh("ang")
     cos = emitter._fresh("cos")
     sin = emitter._fresh("sin")
+    cos_half = emitter._fresh("cos_half")
+    sin_half = emitter._fresh("sin_half")
     q1 = emitter._fresh("q1")
     q2 = emitter._fresh("q2")
     k1 = emitter._fresh("k1")
     k2 = emitter._fresh("k2")
+    rope_attention_factor = emitter._fresh("rope_attention_factor")
+    interleaved = bool(node_spec.get("interleaved", False))
     lines.append(f"{indent}if {q}.ndim != 4 or {k}.ndim != 4:")
     lines.append(
         f"{indent}    raise ValueError('rope_pair expects q and k to be rank-4 [batch, heads, seq, head_dim]')"
@@ -198,9 +336,78 @@ def compile(
     lines.append(f"{indent}if int({q}.shape[-1]) % 2 != 0:")
     lines.append(f"{indent}    raise ValueError('rope_pair expects even head dimension')")
     lines.append(
-        f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype={q}.dtype) / float({half})))"
+        f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype=torch.float32) / float({half})))"
     )
+    lines.append(f"{indent}{rope_attention_factor} = 1.0")
     if all(
+        key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")
+    ):
+        dim = emitter._fresh("dim")
+        pos_freqs = emitter._fresh("pos_freqs")
+        inv_freq_extrapolation = emitter._fresh("inv_freq_extrapolation")
+        inv_freq_interpolation = emitter._fresh("inv_freq_interpolation")
+        low = emitter._fresh("low")
+        high = emitter._fresh("high")
+        linear = emitter._fresh("linear")
+        ramp = emitter._fresh("ramp")
+        inv_freq_extrapolation_factor = emitter._fresh("inv_freq_extrapolation_factor")
+        mscale_term = emitter._fresh("mscale_term")
+        mscale_all_dim_term = emitter._fresh("mscale_all_dim_term")
+        lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
+        lines.append(f"{indent}if float({beta_fast}) <= 0.0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.beta_fast must be > 0')")
+        lines.append(f"{indent}if float({beta_slow}) <= 0.0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.beta_slow must be > 0')")
+        lines.append(f"{indent}if int({original_context}) <= 0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.original_context must be > 0')")
+        lines.append(f"{indent}{dim} = int({q}.shape[-1])")
+        lines.append(
+            f"{indent}{pos_freqs} = float({theta}) ** (torch.arange(0, {dim}, 2, device={q}.device, dtype=torch.float32) / float({dim}))"
+        )
+        lines.append(f"{indent}{inv_freq_extrapolation} = 1.0 / {pos_freqs}")
+        lines.append(
+            f"{indent}{inv_freq_interpolation} = 1.0 / (float({scale_factor}) * {pos_freqs})"
+        )
+        lines.append(
+            f"{indent}{low} = (float({dim}) * math.log(float({original_context}) / (float({beta_fast}) * 2.0 * math.pi))) / (2.0 * math.log(float({theta})))"
+        )
+        lines.append(
+            f"{indent}{high} = (float({dim}) * math.log(float({original_context}) / (float({beta_slow}) * 2.0 * math.pi))) / (2.0 * math.log(float({theta})))"
+        )
+        lines.append(f"{indent}{low} = max(math.floor({low}), 0.0)")
+        lines.append(f"{indent}{high} = min(math.ceil({high}), float({dim} - 1))")
+        lines.append(f"{indent}if {low} == {high}:")
+        lines.append(f"{indent}    {high} = {high} + 0.001")
+        lines.append(
+            f"{indent}{linear} = (torch.arange({dim} // 2, device={q}.device, dtype=torch.float32) - {low}) / ({high} - {low})"
+        )
+        lines.append(f"{indent}{ramp} = torch.clamp({linear}, 0.0, 1.0)")
+        lines.append(f"{indent}{inv_freq_extrapolation_factor} = 1.0 - {ramp}")
+        lines.append(
+            f"{indent}{inv_freq} = {inv_freq_interpolation} * (1.0 - {inv_freq_extrapolation_factor}) + {inv_freq_extrapolation} * {inv_freq_extrapolation_factor}"
+        )
+        if "mscale" in node_spec and "mscale_all_dim" in node_spec:
+            lines.append(f"{indent}if float({scale_factor}) <= 1.0:")
+            lines.append(f"{indent}    {rope_attention_factor} = 1.0")
+            lines.append(f"{indent}else:")
+            lines.append(
+                f"{indent}    {mscale_term} = (0.1 * float({mscale_expr}) * math.log(float({scale_factor}))) + 1.0"
+            )
+            lines.append(
+                f"{indent}    {mscale_all_dim_term} = (0.1 * float({mscale_all_dim_expr}) * math.log(float({scale_factor}))) + 1.0"
+            )
+            lines.append(
+                f"{indent}    {rope_attention_factor} = float({mscale_term} / {mscale_all_dim_term})"
+            )
+        else:
+            lines.append(f"{indent}if float({scale_factor}) <= 1.0:")
+            lines.append(f"{indent}    {rope_attention_factor} = 1.0")
+            lines.append(f"{indent}else:")
+            lines.append(
+                f"{indent}    {rope_attention_factor} = float((0.1 * math.log(float({scale_factor}))) + 1.0)"
+            )
+    elif all(
         key in node_spec
         for key in ("scale_factor", "low_freq_factor", "high_freq_factor", "original_context")
     ):
@@ -257,18 +464,46 @@ def compile(
     )
     lines.append(f"{indent}{pos} = {pos_ids}.to(device={q}.device, dtype={q}.dtype)")
     lines.append(f"{indent}{ang} = {pos}.unsqueeze(-1) * {inv_freq}.unsqueeze(0).unsqueeze(0)")
-    lines.append(f"{indent}{cos} = torch.cos({ang}).unsqueeze(1)")
-    lines.append(f"{indent}{sin} = torch.sin({ang}).unsqueeze(1)")
-    lines.append(f"{indent}{q1} = {q}[..., :{half}]")
-    lines.append(f"{indent}{q2} = {q}[..., {half}: 2 * {half}]")
-    lines.append(f"{indent}{k1} = {k}[..., :{half}]")
-    lines.append(f"{indent}{k2} = {k}[..., {half}: 2 * {half}]")
-    lines.append(
-        f"{indent}{q_out} = torch.cat([{q1} * {cos} - {q2} * {sin}, {q1} * {sin} + {q2} * {cos}], dim=-1)"
-    )
-    lines.append(
-        f"{indent}{k_out} = torch.cat([{k1} * {cos} - {k2} * {sin}, {k1} * {sin} + {k2} * {cos}], dim=-1)"
-    )
+    lines.append(f"{indent}{cos_half} = torch.cos({ang}) * float({rope_attention_factor})")
+    lines.append(f"{indent}{sin_half} = torch.sin({ang}) * float({rope_attention_factor})")
+    if interleaved:
+        q_even = emitter._fresh("q_even")
+        q_odd = emitter._fresh("q_odd")
+        k_even = emitter._fresh("k_even")
+        k_odd = emitter._fresh("k_odd")
+        q_rot_even = emitter._fresh("q_rot_even")
+        q_rot_odd = emitter._fresh("q_rot_odd")
+        k_rot_even = emitter._fresh("k_rot_even")
+        k_rot_odd = emitter._fresh("k_rot_odd")
+        lines.append(f"{indent}{cos} = {cos_half}.unsqueeze(1)")
+        lines.append(f"{indent}{sin} = {sin_half}.unsqueeze(1)")
+        lines.append(f"{indent}{q_even} = {q}[..., 0::2]")
+        lines.append(f"{indent}{q_odd} = {q}[..., 1::2]")
+        lines.append(f"{indent}{k_even} = {k}[..., 0::2]")
+        lines.append(f"{indent}{k_odd} = {k}[..., 1::2]")
+        lines.append(f"{indent}{q_rot_even} = {q_even} * {cos} - {q_odd} * {sin}")
+        lines.append(f"{indent}{q_rot_odd} = {q_even} * {sin} + {q_odd} * {cos}")
+        lines.append(f"{indent}{k_rot_even} = {k_even} * {cos} - {k_odd} * {sin}")
+        lines.append(f"{indent}{k_rot_odd} = {k_even} * {sin} + {k_odd} * {cos}")
+        lines.append(f"{indent}{q_out} = torch.empty_like({q})")
+        lines.append(f"{indent}{k_out} = torch.empty_like({k})")
+        lines.append(f"{indent}{q_out}[..., 0::2] = {q_rot_even}")
+        lines.append(f"{indent}{q_out}[..., 1::2] = {q_rot_odd}")
+        lines.append(f"{indent}{k_out}[..., 0::2] = {k_rot_even}")
+        lines.append(f"{indent}{k_out}[..., 1::2] = {k_rot_odd}")
+    else:
+        lines.append(f"{indent}{cos} = {cos_half}.unsqueeze(1)")
+        lines.append(f"{indent}{sin} = {sin_half}.unsqueeze(1)")
+        lines.append(f"{indent}{q1} = {q}[..., :{half}]")
+        lines.append(f"{indent}{q2} = {q}[..., {half}: 2 * {half}]")
+        lines.append(f"{indent}{k1} = {k}[..., :{half}]")
+        lines.append(f"{indent}{k2} = {k}[..., {half}: 2 * {half}]")
+        lines.append(
+            f"{indent}{q_out} = torch.cat([{q1} * {cos} - {q2} * {sin}, {q1} * {sin} + {q2} * {cos}], dim=-1)"
+        )
+        lines.append(
+            f"{indent}{k_out} = torch.cat([{k1} * {cos} - {k2} * {sin}, {k1} * {sin} + {k2} * {cos}], dim=-1)"
+        )
     return lines
 
 

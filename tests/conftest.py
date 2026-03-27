@@ -78,5 +78,41 @@ def olmoe_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
 
 
 @pytest.fixture(scope="session")
+def glm4_5_air_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["glm_4_5_air"],
+    )
+
+
+@pytest.fixture(scope="session")
+def deepseek_v2_lite_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["deepseek_v2_lite"],
+    )
+
+
+@pytest.fixture(scope="session")
+def black_mamba_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["black_mamba"],
+    )
+
+
+@pytest.fixture(scope="session")
+def nemotron3_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["nemotron3"],
+    )
+
+
+@pytest.fixture(scope="session")
 def ensure_matrix_test_models(repo_root: Path, pytestconfig: pytest.Config) -> None:
     ensure_matrix_models(repo_root, pytestconfig)

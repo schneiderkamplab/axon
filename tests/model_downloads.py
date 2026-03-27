@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import random
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +23,10 @@ _ESSENTIAL_TEXT_FILES = {
     "vocab.json",
     "merges.txt",
 }
+_DEFAULT_PARALLEL_WORKERS = 4
+_DEFAULT_MAX_RETRIES = 20
+_DEFAULT_BACKOFF_INITIAL_S = 2.0
+_DEFAULT_BACKOFF_MAX_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,35 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
         local_dir="mistral_7b_v0_1", repo_id="mistralai/Mistral-7B-v0.1"
     ),
     "qwen2_5_0_5b": ModelDownloadSpec(local_dir="qwen2_5_0_5b", repo_id="Qwen/Qwen2.5-0.5B"),
+    "mamba_tiny_random": ModelDownloadSpec(
+        local_dir="mamba_tiny_random", repo_id="yujiepan/mamba-tiny-random"
+    ),
+    "mamba_2_8b_hf": ModelDownloadSpec(
+        local_dir="mamba_2_8b_hf", repo_id="state-spaces/mamba-2.8b-hf"
+    ),
+    "jamba_tiny_random": ModelDownloadSpec(
+        local_dir="jamba_tiny_random", repo_id="ai21labs/Jamba-tiny-random"
+    ),
+    "jamba_3b": ModelDownloadSpec(local_dir="jamba_3b", repo_id="ai21labs/AI21-Jamba-Reasoning-3B"),
+    "glm_4_5_air": ModelDownloadSpec(local_dir="glm_4_5_air", repo_id="zai-org/GLM-4.5-Air"),
+    "deepseek_v2_lite": ModelDownloadSpec(
+        local_dir="deepseek_v2_lite",
+        repo_id="deepseek-ai/DeepSeek-V2-Lite",
+    ),
+    "black_mamba_2_8b": ModelDownloadSpec(
+        local_dir="black_mamba_2_8b",
+        repo_id="Zyphra/BlackMamba-2.8B",
+        require_tokenizer=False,
+    ),
+    "black_mamba": ModelDownloadSpec(
+        local_dir="black_mamba_2_8b",
+        repo_id="Zyphra/BlackMamba-2.8B",
+        require_tokenizer=False,
+    ),
+    "nemotron3": ModelDownloadSpec(
+        local_dir="nemotron3",
+        repo_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    ),
     "flexmath": ModelDownloadSpec(local_dir="flexmath", repo_id="allenai/Flex-math-2x7B-1T"),
 }
 
@@ -50,7 +86,10 @@ MATRIX_AXON_TO_MODEL_DIR: dict[str, str] = {
     "gemma3_270m": "gemma3",
     "gpt2": "gpt2.old",
     "gpt2_kv": "gpt2.old",
+    "jamba_3b": "jamba_3b",
+    "black_mamba": "black_mamba_2_8b",
     "llama3_2_1b": "llama3_2_1b",
+    "mamba_2_8b": "mamba_2_8b_hf",
     "mistral_7b_v0_1": "mistral_7b_v0_1",
     "olmoe_1b_7b_0924": "olmoe_1b_7b_0924",
     "qwen2_5_0_5b": "qwen2_5_0_5b",
@@ -85,6 +124,76 @@ def _run_curl(
         raise RuntimeError(f"curl failed for {url}\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}")
 
 
+def _download_with_retry(
+    *,
+    url: str,
+    out_path: Path,
+    headers: list[str],
+    cwd: Path,
+    config: pytest.Config,
+    model_name: str,
+    filename: str,
+    max_retries: int,
+    backoff_initial_s: float,
+    backoff_max_s: float,
+) -> None:
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            _run_curl(
+                url=url,
+                out_path=out_path,
+                headers=headers,
+                resume=True,
+                cwd=cwd,
+            )
+            return
+        except RuntimeError as exc:
+            if attempt >= max_retries:
+                raise RuntimeError(
+                    f"{model_name}: failed downloading {filename} after {attempt} attempts"
+                ) from exc
+            sleep_s = min(backoff_max_s, backoff_initial_s * (2 ** (attempt - 1)))
+            sleep_s += random.uniform(0.0, 0.5)
+            _status(
+                config,
+                (
+                    f"{model_name}: retry {attempt}/{max_retries} for {filename} "
+                    f"after error; sleeping {sleep_s:.1f}s"
+                ),
+            )
+            time.sleep(sleep_s)
+
+
+def _parallel_worker_count(num_items: int) -> int:
+    env_value = os.environ.get("MODEL_DOWNLOAD_WORKERS")
+    workers = _DEFAULT_PARALLEL_WORKERS
+    if env_value:
+        try:
+            workers = int(env_value)
+        except ValueError:
+            workers = _DEFAULT_PARALLEL_WORKERS
+    workers = max(1, workers)
+    return min(workers, max(1, num_items))
+
+
+def _is_valid_safetensors_file(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        from safetensors import safe_open
+    except Exception:
+        # If safetensors is unavailable, fall back to existence checks.
+        return True
+    try:
+        with safe_open(str(path), framework="pt") as handle:
+            _ = list(handle.keys())
+        return True
+    except Exception:
+        return False
+
+
 def _auth_headers() -> list[str]:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
@@ -114,6 +223,7 @@ def _load_hf_siblings(*, repo_id: str, cwd: Path) -> list[str]:
 def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     index_path = model_dir / "model.safetensors.index.json"
     single_path = model_dir / "model.safetensors"
+    pytorch_bin_path = model_dir / "pytorch_model.bin"
 
     has_weights = False
     if index_path.exists():
@@ -129,6 +239,8 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
         except json.JSONDecodeError:
             return False
     elif single_path.exists():
+        has_weights = True
+    elif pytorch_bin_path.exists():
         has_weights = True
 
     if not has_weights:
@@ -148,6 +260,38 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     return True
 
 
+def _normalize_config_rope_numeric_fields(model_dir: Path) -> None:
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        return
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    changed = False
+
+    def _normalize(mapping: object) -> None:
+        nonlocal changed
+        if not isinstance(mapping, dict):
+            return
+        for key in ("factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim"):
+            value = mapping.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                mapping[key] = float(value)
+                changed = True
+
+    _normalize(payload.get("rope_scaling"))
+    _normalize(payload.get("rope_parameters"))
+
+    if changed:
+        config_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+
 def ensure_model_downloaded(
     *,
     repo_root: Path,
@@ -161,6 +305,7 @@ def ensure_model_downloaded(
     model_dir.mkdir(parents=True, exist_ok=True)
 
     if _is_complete_model_dir(model_dir, require_tokenizer=spec.require_tokenizer):
+        _normalize_config_rope_numeric_fields(model_dir)
         _status(config, f"{spec.local_dir}: already complete, skipping download")
         return model_dir
 
@@ -168,30 +313,116 @@ def ensure_model_downloaded(
     siblings = _load_hf_siblings(repo_id=spec.repo_id, cwd=repo_root)
 
     shard_files = sorted(name for name in siblings if name.endswith(".safetensors"))
+    pytorch_bin_files = sorted(name for name in siblings if name.endswith(".bin"))
     index_files = [name for name in siblings if name == "model.safetensors.index.json"]
-    selected_files = set(index_files + shard_files)
+    selected_files = set(index_files + shard_files + pytorch_bin_files)
     selected_files.update(name for name in siblings if name in _ESSENTIAL_TEXT_FILES)
 
     headers = _auth_headers()
+    pending_files: list[str] = []
     for name in sorted(selected_files):
-        dst = model_dir / name
-        if dst.exists():
+        target = model_dir / name
+        if name.endswith(".safetensors"):
+            if not _is_valid_safetensors_file(target):
+                pending_files.append(name)
             continue
+        if not target.exists():
+            pending_files.append(name)
+    if not pending_files:
+        if not _is_complete_model_dir(model_dir, require_tokenizer=spec.require_tokenizer):
+            raise RuntimeError(
+                f"Model download incomplete for {spec.local_dir} ({spec.repo_id}) at {model_dir}"
+            )
+        _normalize_config_rope_numeric_fields(model_dir)
+        _status(config, f"{spec.local_dir}: download complete")
+        return model_dir
+
+    text_files = [name for name in pending_files if name in _ESSENTIAL_TEXT_FILES]
+    weight_files = [name for name in pending_files if name not in _ESSENTIAL_TEXT_FILES]
+
+    for name in text_files:
+        dst = model_dir / name
         dst.parent.mkdir(parents=True, exist_ok=True)
         _status(config, f"{spec.local_dir}: downloading {name}")
-        _run_curl(
+        _download_with_retry(
             url=_HF_RESOLVE.format(repo_id=spec.repo_id, filename=name),
             out_path=dst,
             headers=headers,
-            resume=True,
             cwd=repo_root,
+            config=config,
+            model_name=spec.local_dir,
+            filename=name,
+            max_retries=int(os.environ.get("MODEL_DOWNLOAD_MAX_RETRIES", _DEFAULT_MAX_RETRIES)),
+            backoff_initial_s=float(
+                os.environ.get("MODEL_DOWNLOAD_BACKOFF_INITIAL_S", _DEFAULT_BACKOFF_INITIAL_S)
+            ),
+            backoff_max_s=float(
+                os.environ.get("MODEL_DOWNLOAD_BACKOFF_MAX_S", _DEFAULT_BACKOFF_MAX_S)
+            ),
         )
+
+    if weight_files:
+        workers = _parallel_worker_count(len(weight_files))
+        _status(
+            config,
+            f"{spec.local_dir}: downloading {len(weight_files)} weight file(s) in parallel (workers={workers})",
+        )
+        max_retries = int(os.environ.get("MODEL_DOWNLOAD_MAX_RETRIES", _DEFAULT_MAX_RETRIES))
+        backoff_initial_s = float(
+            os.environ.get("MODEL_DOWNLOAD_BACKOFF_INITIAL_S", _DEFAULT_BACKOFF_INITIAL_S)
+        )
+        backoff_max_s = float(
+            os.environ.get("MODEL_DOWNLOAD_BACKOFF_MAX_S", _DEFAULT_BACKOFF_MAX_S)
+        )
+        if workers == 1:
+            for name in weight_files:
+                dst = model_dir / name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _status(config, f"{spec.local_dir}: downloading {name}")
+                _download_with_retry(
+                    url=_HF_RESOLVE.format(repo_id=spec.repo_id, filename=name),
+                    out_path=dst,
+                    headers=headers,
+                    cwd=repo_root,
+                    config=config,
+                    model_name=spec.local_dir,
+                    filename=name,
+                    max_retries=max_retries,
+                    backoff_initial_s=backoff_initial_s,
+                    backoff_max_s=backoff_max_s,
+                )
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_name: dict[concurrent.futures.Future[None], str] = {}
+                for name in weight_files:
+                    dst = model_dir / name
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    _status(config, f"{spec.local_dir}: queue {name}")
+                    future = executor.submit(
+                        _download_with_retry,
+                        url=_HF_RESOLVE.format(repo_id=spec.repo_id, filename=name),
+                        out_path=dst,
+                        headers=headers,
+                        cwd=repo_root,
+                        config=config,
+                        model_name=spec.local_dir,
+                        filename=name,
+                        max_retries=max_retries,
+                        backoff_initial_s=backoff_initial_s,
+                        backoff_max_s=backoff_max_s,
+                    )
+                    future_to_name[future] = name
+                for future in concurrent.futures.as_completed(future_to_name):
+                    name = future_to_name[future]
+                    future.result()
+                    _status(config, f"{spec.local_dir}: finished {name}")
 
     if not _is_complete_model_dir(model_dir, require_tokenizer=spec.require_tokenizer):
         raise RuntimeError(
             f"Model download incomplete for {spec.local_dir} ({spec.repo_id}) at {model_dir}"
         )
 
+    _normalize_config_rope_numeric_fields(model_dir)
     _status(config, f"{spec.local_dir}: download complete")
     return model_dir
 
