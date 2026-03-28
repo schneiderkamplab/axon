@@ -25,11 +25,18 @@ class _SummaryRow:
     hf_runtime_s: str
     axon_runtime_s: str
     runtime_ratio: str
-    max_logit_diff: str
+    eval_max_abs_diff: str
+    eval_max_rel_diff: str
+    debug_max_logit_diff: str
+    debug_max_rel_diff: str
     mean_rel_diff: str
+    masked_max_diff: str
+    masked_last_max_diff: str
     masked_mean_rel_diff: str
     masked_max_rel_diff: str
-    top1_eq: str
+    eval_top1_eq: str
+    debug_top1_eq: str
+    masked_top1_eq: str
 
 
 def _parse_args() -> argparse.Namespace:
@@ -129,6 +136,9 @@ def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
     explicit_model_aliases = {
         "flexolmo": "flexmath",
         "black_mamba": "black_mamba_2_8b",
+        "mamba": "mamba_tiny_random",
+        "mamba_2_8b": "mamba_2_8b_hf",
+        "jamba": "jamba_tiny_random",
     }
     excluded_stems = {
         "gpt-oss-20b",
@@ -154,6 +164,8 @@ def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
 
         if model_dir is not None:
             pairs.append(_Pair(axon_path=axon_path, model_dir=model_dir))
+        else:
+            print(f"Igoring {axon_path} as I did not locate model_dir from stem {stem}")
 
     return pairs
 
@@ -165,11 +177,18 @@ def _format_table(rows: list[_SummaryRow]) -> str:
         "HF runtime (s)",
         "AxonDerived runtime (s)",
         "AxonDerived runtime/HF runtime",
-        "max logit diff",
+        "eval max abs diff",
+        "eval max rel diff",
+        "eval top1_eq",
+        "masked max abs diff",
+        "masked last max abs diff",
+        "masked max rel diff",
+        "masked_top1_eq",
+        "debug max abs diff",
+        "debug max rel diff",
+        "debug top1_eq",
         "mean rel diff",
         "masked mean rel diff",
-        "masked max rel diff",
-        "top1_eq",
     ]
 
     body = [
@@ -179,11 +198,18 @@ def _format_table(rows: list[_SummaryRow]) -> str:
             row.hf_runtime_s,
             row.axon_runtime_s,
             row.runtime_ratio,
-            row.max_logit_diff,
+            row.eval_max_abs_diff,
+            row.eval_max_rel_diff,
+            row.eval_top1_eq,
+            row.masked_max_diff,
+            row.masked_last_max_diff,
+            row.masked_max_rel_diff,
+            row.masked_top1_eq,
+            row.debug_max_logit_diff,
+            row.debug_max_rel_diff,
+            row.debug_top1_eq,
             row.mean_rel_diff,
             row.masked_mean_rel_diff,
-            row.masked_max_rel_diff,
-            row.top1_eq,
         ]
         for row in rows
     ]
@@ -209,11 +235,18 @@ def _format_table_markdown(rows: list[_SummaryRow]) -> str:
         "HF runtime (s)",
         "AxonDerived runtime (s)",
         "AxonDerived runtime/HF runtime",
-        "max logit diff",
+        "eval max abs diff",
+        "eval max rel diff",
+        "eval top1_eq",
+        "masked max abs diff",
+        "masked last max abs diff",
+        "masked max rel diff",
+        "masked_top1_eq",
+        "debug max abs diff",
+        "debug max rel diff",
+        "debug top1_eq",
         "mean rel diff",
         "masked mean rel diff",
-        "masked max rel diff",
-        "top1_eq",
     ]
 
     body = [
@@ -223,11 +256,18 @@ def _format_table_markdown(rows: list[_SummaryRow]) -> str:
             row.hf_runtime_s,
             row.axon_runtime_s,
             row.runtime_ratio,
-            row.max_logit_diff,
+            row.eval_max_abs_diff,
+            row.eval_max_rel_diff,
+            row.eval_top1_eq,
+            row.masked_max_diff,
+            row.masked_last_max_diff,
+            row.masked_max_rel_diff,
+            row.masked_top1_eq,
+            row.debug_max_logit_diff,
+            row.debug_max_rel_diff,
+            row.debug_top1_eq,
             row.mean_rel_diff,
             row.masked_mean_rel_diff,
-            row.masked_max_rel_diff,
-            row.top1_eq,
         ]
         for row in rows
     ]
@@ -314,11 +354,18 @@ def run_axon_test_matrix(
                 hf_runtime_s="DRY-RUN",
                 axon_runtime_s="DRY-RUN",
                 runtime_ratio="DRY-RUN",
-                max_logit_diff="DRY-RUN",
+                eval_max_abs_diff="DRY-RUN",
+                eval_max_rel_diff="DRY-RUN",
+                debug_max_logit_diff="DRY-RUN",
+                debug_max_rel_diff="DRY-RUN",
                 mean_rel_diff="DRY-RUN",
+                masked_max_diff="DRY-RUN",
+                masked_last_max_diff="DRY-RUN",
                 masked_mean_rel_diff="DRY-RUN",
                 masked_max_rel_diff="DRY-RUN",
-                top1_eq="DRY-RUN",
+                eval_top1_eq="DRY-RUN",
+                debug_top1_eq="DRY-RUN",
+                masked_top1_eq="DRY-RUN",
             )
             for pair in pairs
         ]
@@ -350,6 +397,22 @@ def run_axon_test_matrix(
                 compile_fullgraph=compile_fullgraph,
                 compile_dynamic=compile_dynamic,
             )
+            masked_max_diff_value = result.get("masked_max_diff")
+            masked_max_rel_diff_value = result.get("masked_max_rel_diff")
+            masked_top1_eq_value = result.get("masked_top1_eq")
+            eval_max_abs_diff_value = (
+                masked_max_diff_value if masked_max_diff_value is not None else result["max_diff"]
+            )
+            eval_max_rel_diff_value = (
+                masked_max_rel_diff_value
+                if masked_max_rel_diff_value is not None
+                else result["max_rel_diff"]
+            )
+            eval_top1_eq_value = (
+                bool(masked_top1_eq_value)
+                if masked_top1_eq_value is not None
+                else bool(result["top1_eq"])
+            )
             rows.append(
                 _SummaryRow(
                     axon_file=pair.axon_path.name,
@@ -357,8 +420,21 @@ def run_axon_test_matrix(
                     hf_runtime_s=f"{result['hf_time']:.6g}",
                     axon_runtime_s=f"{result['axon_time']:.6g}",
                     runtime_ratio=f"{result['speed_ratio_axon_over_hf']:.3f}",
-                    max_logit_diff=f"{result['max_diff']:.6g}",
+                    eval_max_abs_diff=f"{float(eval_max_abs_diff_value):.6g}",
+                    eval_max_rel_diff=f"{float(eval_max_rel_diff_value):.6g}",
+                    debug_max_logit_diff=f"{result['max_diff']:.6g}",
+                    debug_max_rel_diff=f"{float(result['max_rel_diff']):.6g}",
                     mean_rel_diff=f"{float(result['mean_rel_diff']):.6g}",
+                    masked_max_diff=(
+                        "N/A"
+                        if result.get("masked_max_diff") is None
+                        else f"{float(result['masked_max_diff']):.6g}"
+                    ),
+                    masked_last_max_diff=(
+                        "N/A"
+                        if result.get("masked_last_max_diff") is None
+                        else f"{float(result['masked_last_max_diff']):.6g}"
+                    ),
                     masked_mean_rel_diff=(
                         "N/A"
                         if result.get("masked_mean_rel_diff") is None
@@ -369,7 +445,13 @@ def run_axon_test_matrix(
                         if result.get("masked_max_rel_diff") is None
                         else f"{float(result['masked_max_rel_diff']):.6g}"
                     ),
-                    top1_eq=str(bool(result["top1_eq"])),
+                    eval_top1_eq=str(eval_top1_eq_value),
+                    debug_top1_eq=str(bool(result["top1_eq"])),
+                    masked_top1_eq=(
+                        "N/A"
+                        if result.get("masked_top1_eq") is None
+                        else str(bool(result["masked_top1_eq"]))
+                    ),
                 )
             )
             passed += 1
@@ -381,11 +463,18 @@ def run_axon_test_matrix(
                     hf_runtime_s="ERROR",
                     axon_runtime_s="ERROR",
                     runtime_ratio="ERROR",
-                    max_logit_diff="ERROR",
+                    eval_max_abs_diff="ERROR",
+                    eval_max_rel_diff="ERROR",
+                    debug_max_logit_diff="ERROR",
+                    debug_max_rel_diff="ERROR",
                     mean_rel_diff="ERROR",
+                    masked_max_diff="ERROR",
+                    masked_last_max_diff="ERROR",
                     masked_mean_rel_diff="ERROR",
                     masked_max_rel_diff="ERROR",
-                    top1_eq=f"ERROR: {type(exc).__name__}: {exc}",
+                    eval_top1_eq=f"ERROR: {type(exc).__name__}: {exc}",
+                    debug_top1_eq="ERROR",
+                    masked_top1_eq="ERROR",
                 )
             )
             failed += 1

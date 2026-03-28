@@ -252,6 +252,40 @@ def _normalize_texts(text: str | Sequence[str]) -> list[str]:
     return out
 
 
+def _spec_uses_mamba_scan(spec: dict[str, Any]) -> bool:
+    model = spec.get("model", {})
+    if not isinstance(model, dict):
+        return False
+    blocks = model.get("blocks", {})
+
+    def _graph_has_mamba(items: Any) -> bool:
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for _name, node_spec in item.items():
+                if not isinstance(node_spec, dict):
+                    continue
+                if node_spec.get("_op") == "mamba_scan":
+                    return True
+                if _graph_has_mamba(node_spec.get("graph")):
+                    return True
+                if node_spec.get("_op") == "for" and _graph_has_mamba(node_spec.get("_body")):
+                    return True
+                if node_spec.get("_op") == "call":
+                    block_name = node_spec.get("_target")
+                    if isinstance(block_name, str):
+                        block_spec = blocks.get(block_name) if isinstance(blocks, dict) else None
+                        if isinstance(block_spec, dict) and _graph_has_mamba(
+                            block_spec.get("graph")
+                        ):
+                            return True
+        return False
+
+    return _graph_has_mamba(model.get("graph"))
+
+
 def run_axon_test(
     *,
     axon_file: Path,
@@ -369,7 +403,9 @@ def run_axon_test(
             hf.generation_config.top_k = None
 
         if len(prompts) > 1:
-            tokenizer_obj.padding_side = "left"
+            # Left padding can corrupt recurrent Mamba states by inserting synthetic prefix tokens.
+            prefers_right_padding = _spec_uses_mamba_scan(lowered_spec)
+            tokenizer_obj.padding_side = "right" if prefers_right_padding else "left"
             if tokenizer_obj.pad_token_id is None:
                 if tokenizer_obj.eos_token_id is None:
                     raise ValueError(
@@ -523,6 +559,7 @@ def run_axon_test(
         print(f"Weights input:  {weights_path}")
         print(f"HF model dir:   {resolved_hf_model_dir}")
         print(f"Tokenizer:      {tokenizer_source}")
+        print(f"Padding side:   {tokenizer_obj.padding_side}")
         print(f"Device:         {resolved_device}")
         print(f"Prompts:        {len(prompts)}")
         print(f"HF-align bf16 profile: {bool(hf_align_bf16_profile)}")
