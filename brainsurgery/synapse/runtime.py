@@ -64,7 +64,7 @@ class SynapseProgramModel(nn.Module):
 
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
-        materialize_mxfp4_aliases(loaded)
+        materialize_mxfp4_aliases(loaded, drop_packed=True)
         self._state = loaded
 
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:

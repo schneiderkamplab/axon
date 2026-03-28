@@ -418,6 +418,30 @@ main hidden topk_scores topk_indices expert = do
         assert first["_op"] in {"moe_select", "_moe_select"}
 
 
+def test_moe_grouped_ffn_builtin_import_resolves_from_builtin_file(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import MoE
+
+main :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
+main hidden topk_scores topk_indices = do
+  out <- MoE.grouped_ffn hidden topk_scores topk_indices
+  return out
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if first["_op"] == "call":
+        assert first["_target"] == "MoE.grouped_ffn"
+    else:
+        assert first["_op"] in {"moe_grouped_ffn", "_moe_grouped_ffn"}
+
+
 def test_multi_path_parameters_support_triple_at_call_syntax() -> None:
     source = """
 expert_ffn@gate@up@down :: @Path -> @Path -> @Path -> Tensor[B,T,D] -> Tensor[B,T,D]

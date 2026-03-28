@@ -94,7 +94,7 @@ class _Emitter:
                 "",
                 "    def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:",
                 "        loaded = dict(state_dict)",
-                "        materialize_mxfp4_aliases(loaded)",
+                "        materialize_mxfp4_aliases(loaded, drop_packed=True)",
                 "        self._state = loaded",
                 "",
                 "    def _param(self, path: str) -> torch.Tensor:",

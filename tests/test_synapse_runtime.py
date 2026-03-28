@@ -169,6 +169,31 @@ def _moe_scatter_add_spec() -> dict[str, object]:
     }
 
 
+def _moe_grouped_ffn_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}, "scores": {}, "idx": {}},
+            "graph": [
+                {
+                    "ffn": {
+                        "_op": "moe_grouped_ffn",
+                        "_args": ["x", "scores", "idx"],
+                        "_bind": "m_out",
+                        "gate_up_weight": "mlp.experts.gate_up_proj.weight",
+                        "gate_up_bias": "mlp.experts.gate_up_proj.bias",
+                        "down_weight": "mlp.experts.down_proj.weight",
+                        "down_bias": "mlp.experts.down_proj.bias",
+                        "alpha": 1.702,
+                        "limit": 7.0,
+                    }
+                }
+            ],
+            "outputs": {"m_out": "m_out"},
+        },
+    }
+
+
 def _attention_with_sink_spec() -> dict[str, object]:
     return {
         "synapse": 1,
@@ -632,6 +657,111 @@ def test_runtime_moe_scatter_add_validates_token_index_bounds() -> None:
             token_idx=torch.tensor([3], dtype=torch.long),
             upd=torch.randn(1, 3),
             scores=torch.ones(1),
+        )
+
+
+def test_runtime_moe_grouped_ffn_matches_grouped_reference() -> None:
+    spec = _moe_grouped_ffn_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.tensor(
+        [[[0.25, -0.5], [1.0, 0.75], [-0.25, 0.5]]],
+        dtype=torch.bfloat16,
+    )
+    scores = torch.tensor(
+        [[[0.7, 0.3], [0.1, 0.9], [0.4, 0.6]]],
+        dtype=torch.bfloat16,
+    )
+    idx = torch.tensor(
+        [[[0, 1], [1, 0], [0, 1]]],
+        dtype=torch.long,
+    )
+    gate_up_weight = torch.tensor(
+        [
+            [[0.4, -0.3, 0.2, 0.1], [0.1, 0.2, -0.4, 0.5]],
+            [[-0.2, 0.6, 0.3, -0.1], [0.5, -0.4, 0.2, 0.3]],
+        ],
+        dtype=torch.bfloat16,
+    )
+    gate_up_bias = torch.tensor(
+        [[0.1, -0.2, 0.05, 0.2], [-0.1, 0.05, 0.15, -0.05]],
+        dtype=torch.bfloat16,
+    )
+    down_weight = torch.tensor(
+        [
+            [[0.3, -0.1], [0.2, 0.4]],
+            [[-0.2, 0.5], [0.6, -0.3]],
+        ],
+        dtype=torch.bfloat16,
+    )
+    down_bias = torch.tensor([[0.05, -0.1], [0.02, 0.03]], dtype=torch.bfloat16)
+    state = {
+        "mlp.experts.gate_up_proj.weight": gate_up_weight,
+        "mlp.experts.gate_up_proj.bias": gate_up_bias,
+        "mlp.experts.down_proj.weight": down_weight,
+        "mlp.experts.down_proj.bias": down_bias,
+    }
+    model.load_state_dict_tensors(state)
+
+    out = model(x=x, scores=scores, idx=idx)["m_out"]
+
+    hidden_flat = x.reshape(-1, x.shape[-1])
+    scores_flat = scores.reshape(-1, scores.shape[-1])
+    idx_flat = idx.reshape(-1, idx.shape[-1])
+    num_tokens = int(hidden_flat.shape[0])
+    num_topk = int(idx_flat.shape[-1])
+    token_idx = (
+        torch.arange(num_tokens, device=hidden_flat.device)
+        .unsqueeze(1)
+        .expand(-1, num_topk)
+        .reshape(-1)
+    )
+    sample_weights = scores_flat.reshape(-1)
+    expert_ids = idx_flat.reshape(-1)
+    selected_hidden = hidden_flat[token_idx]
+    selected_gate_up_weight = gate_up_weight[expert_ids]
+    selected_gate_up_bias = gate_up_bias[expert_ids]
+    gate_up = (
+        torch.bmm(selected_hidden.unsqueeze(1), selected_gate_up_weight).squeeze(1)
+        + selected_gate_up_bias
+    )
+    gate = gate_up[..., ::2].clamp(max=7.0)
+    up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
+    ff = (up + 1.0) * (gate * torch.sigmoid(gate * 1.702))
+    selected_down_weight = down_weight[expert_ids]
+    selected_down_bias = down_bias[expert_ids]
+    down = torch.bmm(ff.unsqueeze(1), selected_down_weight).squeeze(1) + selected_down_bias
+    weighted = down * sample_weights.unsqueeze(-1)
+    expected = weighted.view(num_tokens, num_topk, hidden_flat.shape[-1]).sum(dim=1)
+    expected = expected.to(dtype=x.dtype).reshape_as(x)
+
+    assert torch.allclose(out, expected)
+
+
+def test_runtime_moe_grouped_ffn_validates_input_shapes_and_types() -> None:
+    spec = _moe_grouped_ffn_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors(
+        {
+            "mlp.experts.gate_up_proj.weight": torch.randn(2, 2, 4),
+            "mlp.experts.gate_up_proj.bias": torch.randn(2, 4),
+            "mlp.experts.down_proj.weight": torch.randn(2, 2, 2),
+            "mlp.experts.down_proj.bias": torch.randn(2, 2),
+        }
+    )
+    with pytest.raises(ValueError, match="moe_grouped_ffn topk_indices must be integer"):
+        model(
+            x=torch.randn(1, 3, 2),
+            scores=torch.randn(1, 3, 2),
+            idx=torch.randn(1, 3, 2),
+        )
+    with pytest.raises(
+        ValueError,
+        match="moe_grouped_ffn hidden and topk tensors must align on flattened token count",
+    ):
+        model(
+            x=torch.randn(1, 4, 2),
+            scores=torch.randn(1, 3, 2),
+            idx=torch.zeros(1, 3, 2, dtype=torch.long),
         )
 
 

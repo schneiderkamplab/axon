@@ -3,3 +3,6 @@ select = _moe_select
 
 scatter_add :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
 scatter_add = _moe_scatter_add
+
+grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
+grouped_ffn = _moe_grouped_ffn

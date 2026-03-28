@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
 import io
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +83,21 @@ def _parse_args() -> argparse.Namespace:
         help="Show per-run output from synapse axon-test.",
     )
     parser.add_argument(
+        "--exclude-axon",
+        action="append",
+        default=None,
+        help="Exclude specific .axon files by name (repeatable, e.g. gpt2.axon).",
+    )
+    parser.add_argument(
+        "--force-include-axon",
+        action="append",
+        default=None,
+        help=(
+            "Force include specific .axon files by name, even if a model dir would otherwise "
+            "be skipped as duplicate (repeatable, e.g. gpt2_kv.axon)."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Only resolve and print matching pairs; do not run tests.",
@@ -125,7 +141,27 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
+def _normalize_axon_names(values: list[str] | None) -> set[str]:
+    out: set[str] = set()
+    if not values:
+        return out
+    for value in values:
+        name = str(value).strip()
+        if not name:
+            continue
+        if not name.endswith(".axon"):
+            name = f"{name}.axon"
+        out.add(name)
+    return out
+
+
+def _resolve_pairs(
+    examples_dir: Path,
+    models_dir: Path,
+    *,
+    excluded_axons: set[str] | None = None,
+    force_included_axons: set[str] | None = None,
+) -> list[_Pair]:
     if not examples_dir.is_dir():
         raise FileNotFoundError(f"Examples directory not found: {examples_dir}")
     if not models_dir.is_dir():
@@ -141,15 +177,19 @@ def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
         "jamba": "jamba_tiny_random",
     }
     excluded_stems = {
-        "gpt-oss-20b",
-        "gpt_oss_20b",
         "glm_4_5_air",
         "nemotron-3",
         "nemotron3",
     }
 
+    excluded = set() if excluded_axons is None else set(excluded_axons)
+    forced = set() if force_included_axons is None else set(force_included_axons)
+
     pairs: list[_Pair] = []
+    seen_model_dirs: set[Path] = set()
     for axon_path in sorted(examples_dir.glob("*.axon")):
+        if axon_path.name in excluded:
+            continue
         stem = axon_path.stem
         if stem in excluded_stems:
             continue
@@ -163,6 +203,12 @@ def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
                     break
 
         if model_dir is not None:
+            if model_dir in seen_model_dirs and axon_path.name not in forced:
+                print(
+                    f"Skipping {axon_path.name} because model dir {model_dir.name} is already covered"
+                )
+                continue
+            seen_model_dirs.add(model_dir)
             pairs.append(_Pair(axon_path=axon_path, model_dir=model_dir))
         else:
             print(f"Igoring {axon_path} as I did not locate model_dir from stem {stem}")
@@ -336,12 +382,19 @@ def run_axon_test_matrix(
     compile_mode: str | None = None,
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
+    exclude_axon: list[str] | None = None,
+    force_include_axon: list[str] | None = None,
 ) -> int:
     if table_format not in {"plain", "markdown"}:
         raise ValueError("table_format must be 'plain' or 'markdown'")
 
     prompts = text if text else ["The future of AI is"]
-    pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())
+    pairs = _resolve_pairs(
+        examples_dir.resolve(),
+        models_dir.resolve(),
+        excluded_axons=_normalize_axon_names(exclude_axon),
+        force_included_axons=_normalize_axon_names(force_include_axon),
+    )
     if not pairs:
         print("No matching .axon/model directory pairs found.")
         return 1
@@ -479,6 +532,7 @@ def run_axon_test_matrix(
             )
             failed += 1
         finally:
+            gc.collect()
             progress.update(1)
             progress.set_postfix_str(f"passed={passed} failed={failed}")
 
@@ -512,6 +566,8 @@ def main() -> int:
         compile_mode=str(args.compile_mode) if args.compile_mode is not None else None,
         compile_fullgraph=bool(args.compile_fullgraph),
         compile_dynamic=bool(args.compile_dynamic),
+        exclude_axon=args.exclude_axon,
+        force_include_axon=args.force_include_axon,
     )
 
 

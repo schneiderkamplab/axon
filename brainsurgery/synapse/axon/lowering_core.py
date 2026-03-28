@@ -76,6 +76,7 @@ _PRIMITIVE_NAME_ALIASES: dict[str, str] = {
     "_list_index": "list_index",
     "_list_append": "list_append",
     "_moe_select": "moe_select",
+    "_moe_grouped_ffn": "moe_grouped_ffn",
 }
 _CACHE_PRIMITIVE_ALIASES: dict[str, str] = {
     "update": "cache_update",

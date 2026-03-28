@@ -82,6 +82,7 @@ def materialize_mxfp4_aliases(
     state_dict: dict[str, torch.Tensor],
     *,
     dtype: torch.dtype | None = None,
+    drop_packed: bool = False,
 ) -> None:
     target_dtype = _infer_target_dtype(state_dict) if dtype is None else dtype
     blocks_suffix = "_blocks"
@@ -113,6 +114,11 @@ def materialize_mxfp4_aliases(
             if bias.is_floating_point() and bias.dtype != target_dtype:
                 bias = bias.to(dtype=target_dtype)
             state_dict[bias_dst_key] = bias
+        if drop_packed:
+            state_dict.pop(key, None)
+            state_dict.pop(scales_key, None)
+            if bias_src_key in state_dict and bias_dst_key in state_dict:
+                state_dict.pop(bias_src_key, None)
 
     _materialize_moe_expert_index_aliases(state_dict)
 

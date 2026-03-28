@@ -394,6 +394,7 @@ def compile(
     q_out = assign_out_var(str(outs[0]))
     k_out = assign_out_var(str(outs[1]))
     theta = emitter._expr_code(node_spec.get("theta", 10000.0), env)
+    attention_factor_expr = emitter._expr_code(node_spec.get("attention_factor", 1.0), env)
     scale_factor = emitter._expr_code(node_spec.get("scale_factor"), env)
     beta_fast = emitter._expr_code(node_spec.get("beta_fast"), env)
     beta_slow = emitter._expr_code(node_spec.get("beta_slow"), env)
@@ -444,7 +445,7 @@ def compile(
     lines.append(
         f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype=torch.float32) / float({half})))"
     )
-    lines.append(f"{indent}{rope_attention_factor} = 1.0")
+    lines.append(f"{indent}{rope_attention_factor} = float({attention_factor_expr})")
     if all(
         key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")
     ):

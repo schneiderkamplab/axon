@@ -14,6 +14,7 @@ import torch
 from mltiming import timing
 from omegaconf import OmegaConf
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.utils.quantization_config import Mxfp4Config
 
 from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
@@ -88,7 +89,7 @@ def _load_state_dict(
             else:
                 tensor = tensor.to(device=device)
             out[key] = tensor
-    materialize_mxfp4_aliases(out, dtype=dtype)
+    materialize_mxfp4_aliases(out, dtype=dtype, drop_packed=True)
     return out
 
 
@@ -166,6 +167,36 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
     rope_parameters = getattr(config, "rope_parameters", None)
     _normalize_dict(rope_parameters)
     return config
+
+
+def _read_quant_method(config: Any) -> str | None:
+    quant_cfg = getattr(config, "quantization_config", None)
+    if quant_cfg is None:
+        return None
+    if isinstance(quant_cfg, dict):
+        value = quant_cfg.get("quant_method")
+        return None if value is None else str(value)
+    value = getattr(quant_cfg, "quant_method", None)
+    if value is None:
+        return None
+    if hasattr(value, "value"):
+        value = value.value
+    return str(value)
+
+
+def _build_non_mxfp4_quantization_config(config: Any) -> Mxfp4Config | None:
+    if _read_quant_method(config) != "mxfp4":
+        return None
+    quant_cfg = getattr(config, "quantization_config", None)
+    modules_to_not_convert: list[str] | None = None
+    if isinstance(quant_cfg, dict):
+        raw = quant_cfg.get("modules_to_not_convert")
+        if isinstance(raw, list):
+            modules_to_not_convert = [str(item) for item in raw]
+    return Mxfp4Config(
+        modules_to_not_convert=modules_to_not_convert,
+        dequantize=True,
+    )
 
 
 def _looks_like_tokenizer_dir(path: Path) -> bool:
@@ -371,13 +402,15 @@ def run_axon_test(
                 str(resolved_hf_model_dir), local_files_only=True
             )
             hf_config = _normalize_rope_numeric_fields(hf_config)
+            non_mxfp4_quant_config = _build_non_mxfp4_quantization_config(hf_config)
             hf_model: Any = AutoModelForCausalLM.from_pretrained(
                 str(resolved_hf_model_dir),
                 local_files_only=True,
                 dtype=resolved_dtype,
                 config=hf_config,
+                quantization_config=non_mxfp4_quant_config,
             )
-            hf = hf_model.to(resolved_device).eval()
+            hf = hf_model.to(device=resolved_device, dtype=resolved_dtype).eval()
         except Exception:
             if not is_black_mamba_config_dir(resolved_hf_model_dir):
                 raise
@@ -491,6 +524,9 @@ def run_axon_test(
                 dtype=resolved_dtype,
             )
         syn = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
+        state_dict.clear()
+        del state_dict
+        _cleanup(resolved_device)
         setattr(syn, "_hf_align_mask_contract", align_mask_contract)
         setattr(syn, "_hf_align_position_ids", align_position_ids)
         setattr(syn, "_hf_align_add_fp32_accum", align_add_fp32)
@@ -753,7 +789,6 @@ def run_axon_test(
         }
 
         del syn
-        del state_dict
         _cleanup(resolved_device)
         return result
 
