@@ -1749,3 +1749,49 @@ def test_synapse_to_axon_readable_blocks_lower_back_via_program() -> None:
     assert "blocks" in spec2["model"]
     assert "blk" in spec2["model"]["blocks"]
     assert "for@loop i <- [0..2) do" in axon
+
+
+def test_parse_axon_padding_side_pragma_is_preserved() -> None:
+    source = """
+{-# PADDING_SIDE "right" #-}
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  return x
+"""
+    module = parse_axon_module(source)
+    assert module.pragmas == {"padding_side": "right"}
+    spec = lower_axon_module_to_synapse_spec(module)
+    assert spec["model"]["meta"] == {"padding_side": "right"}
+
+
+def test_parse_program_top_level_padding_side_pragma_applies_to_main_module() -> None:
+    source = """
+{-# PADDING_SIDE "left" #-}
+helper :: Tensor[B,T,D] -> Tensor[B,T,D]
+helper x = do
+  return x
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- helper x
+  return y
+"""
+    modules = parse_axon_program(source)
+    assert [module.pragmas for module in modules] == [
+        {"padding_side": "left"},
+        {"padding_side": "left"},
+    ]
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    assert spec["model"]["meta"] == {"padding_side": "left"}
+
+
+def test_parse_rejects_conflicting_padding_side_pragmas() -> None:
+    source = """
+{-# PADDING_SIDE "left" #-}
+{-# PADDING_SIDE "right" #-}
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  return x
+"""
+    with pytest.raises(ValueError, match="conflicting PADDING_SIDE pragmas"):
+        parse_axon_module(source)

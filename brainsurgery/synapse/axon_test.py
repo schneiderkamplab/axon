@@ -252,38 +252,27 @@ def _normalize_texts(text: str | Sequence[str]) -> list[str]:
     return out
 
 
-def _spec_uses_mamba_scan(spec: dict[str, Any]) -> bool:
+def _spec_padding_side(spec: dict[str, Any]) -> str | None:
     model = spec.get("model", {})
     if not isinstance(model, dict):
-        return False
-    blocks = model.get("blocks", {})
+        return None
+    meta = model.get("meta", {})
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get("padding_side")
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized not in {"left", "right"}:
+        raise ValueError(f"Invalid model.meta.padding_side={value!r}; expected 'left' or 'right'.")
+    return normalized
 
-    def _graph_has_mamba(items: Any) -> bool:
-        if not isinstance(items, list):
-            return False
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            for _name, node_spec in item.items():
-                if not isinstance(node_spec, dict):
-                    continue
-                if node_spec.get("_op") == "mamba_scan":
-                    return True
-                if _graph_has_mamba(node_spec.get("graph")):
-                    return True
-                if node_spec.get("_op") == "for" and _graph_has_mamba(node_spec.get("_body")):
-                    return True
-                if node_spec.get("_op") == "call":
-                    block_name = node_spec.get("_target")
-                    if isinstance(block_name, str):
-                        block_spec = blocks.get(block_name) if isinstance(blocks, dict) else None
-                        if isinstance(block_spec, dict) and _graph_has_mamba(
-                            block_spec.get("graph")
-                        ):
-                            return True
-        return False
 
-    return _graph_has_mamba(model.get("graph"))
+def _preferred_padding_side(spec: dict[str, Any]) -> str:
+    explicit = _spec_padding_side(spec)
+    if explicit is not None:
+        return explicit
+    return "left"
 
 
 def run_axon_test(
@@ -403,9 +392,7 @@ def run_axon_test(
             hf.generation_config.top_k = None
 
         if len(prompts) > 1:
-            # Left padding can corrupt recurrent Mamba states by inserting synthetic prefix tokens.
-            prefers_right_padding = _spec_uses_mamba_scan(lowered_spec)
-            tokenizer_obj.padding_side = "right" if prefers_right_padding else "left"
+            tokenizer_obj.padding_side = _preferred_padding_side(lowered_spec)
             if tokenizer_obj.pad_token_id is None:
                 if tokenizer_obj.eos_token_id is None:
                     raise ValueError(

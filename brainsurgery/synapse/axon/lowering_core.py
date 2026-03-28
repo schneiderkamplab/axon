@@ -1191,6 +1191,8 @@ def lower_axon_module_to_synapse_spec(module: AxonModule) -> dict[str, Any]:
     }
     if module.symbols:
         model["symbols"] = dict(module.symbols)
+    if module.pragmas:
+        model["meta"] = dict(module.pragmas)
     return {
         "synapse": 1,
         "model": model,
@@ -1655,6 +1657,8 @@ def lower_axon_program_to_synapse_spec(
     model: dict[str, Any] = {"inputs": main_inputs, "graph": main_graph, "outputs": main_outputs}
     if main.symbols:
         model["symbols"] = dict(main.symbols)
+    if main.pragmas:
+        model["meta"] = dict(main.pragmas)
     spec: dict[str, Any] = {"synapse": 1, "model": model}
 
     blocks: dict[str, Any] = {}

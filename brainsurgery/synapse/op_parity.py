@@ -20,6 +20,7 @@ from .axon_test import (
     _load_state_dict,
     _load_tokenizer,
     _looks_like_tokenizer_dir,
+    _preferred_padding_side,
     _resolve_device,
     _resolve_safetensors_paths,
 )
@@ -452,6 +453,7 @@ def _tensor_diff_stats(lhs: torch.Tensor, rhs: torch.Tensor) -> dict[str, float]
 
 def _build_inputs(
     *,
+    lowered_spec: dict[str, Any],
     prompts: list[str],
     tokenizer_source: str,
     tokenizer_fallback: str | None,
@@ -459,7 +461,7 @@ def _build_inputs(
 ) -> tuple[Any, torch.Tensor, torch.Tensor | None]:
     tokenizer_obj = _load_tokenizer(tokenizer_source, fallback_repo_id=tokenizer_fallback)
     if len(prompts) > 1:
-        tokenizer_obj.padding_side = "left"
+        tokenizer_obj.padding_side = _preferred_padding_side(lowered_spec)
         if tokenizer_obj.pad_token_id is None:
             if tokenizer_obj.eos_token_id is None:
                 raise ValueError(
@@ -510,6 +512,7 @@ def _run_single_dtype(
     trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add"}
     model_input_names = set(lowered_spec.get("model", {}).get("inputs", {}).keys())
     tokenizer_obj, input_ids, attention_mask = _build_inputs(
+        lowered_spec=lowered_spec,
         prompts=prompts,
         tokenizer_source=tokenizer_source,
         tokenizer_fallback=tokenizer_fallback,
@@ -744,6 +747,7 @@ def run_codegen_runtime_parity(
         model_input_names = set(final_spec.get("model", {}).get("inputs", {}).keys())
 
         tokenizer_obj, input_ids, attention_mask = _build_inputs(
+            lowered_spec=final_spec,
             prompts=prompts,
             tokenizer_source=tokenizer_source,
             tokenizer_fallback=tokenizer_fallback,
