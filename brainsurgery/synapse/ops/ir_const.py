@@ -14,6 +14,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     return False
 
 
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, str):
+        raise ValueError("_ir_const requires a single scalar output binding")
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -59,6 +67,7 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
+    "lowering_validate_signature",
     "interpret",
     "compile",
     "uses_node_path",

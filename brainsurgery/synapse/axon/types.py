@@ -59,6 +59,7 @@ class AxonModule:
     imports: tuple[str, ...] = ()
     imported_members: dict[str, tuple[str, ...]] | None = None
     symbols: dict[str, object] | None = None
+    pragmas: dict[str, object] | None = None
     return_type_expr: str | None = None
     return_shape: tuple[str, ...] | None = None
 

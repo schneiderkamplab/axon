@@ -1,0 +1,522 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from tqdm import tqdm
+
+from .axon_test import run_axon_test
+
+
+@dataclass(frozen=True)
+class _Pair:
+    axon_path: Path
+    model_dir: Path
+
+
+@dataclass(frozen=True)
+class _SummaryRow:
+    axon_file: str
+    model_dir: str
+    hf_runtime_s: str
+    axon_runtime_s: str
+    runtime_ratio: str
+    eval_max_abs_diff: str
+    eval_max_rel_diff: str
+    debug_max_logit_diff: str
+    debug_max_rel_diff: str
+    mean_rel_diff: str
+    masked_max_diff: str
+    masked_last_max_diff: str
+    masked_mean_rel_diff: str
+    masked_max_rel_diff: str
+    eval_top1_eq: str
+    debug_top1_eq: str
+    masked_top1_eq: str
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run brainsurgery synapse axon-test across matching examples/*.axon and models/* dirs."
+        )
+    )
+    parser.add_argument(
+        "--examples-dir",
+        type=Path,
+        default=Path("examples"),
+        help="Directory with Axon files (default: examples).",
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=Path("models"),
+        help="Directory with model directories (default: models).",
+    )
+    parser.add_argument("--device", default="cpu", help="Device passed to axon-test.")
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        choices=["float32", "bfloat16", "float16"],
+        help="Floating point dtype passed to axon-test.",
+    )
+    parser.add_argument(
+        "--max-len",
+        type=int,
+        default=32,
+        help="Total sequence length target for generation.",
+    )
+    parser.add_argument(
+        "--text",
+        action="append",
+        default=None,
+        help="Prompt text. Repeat to pass multiple prompts.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show per-run output from synapse axon-test.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only resolve and print matching pairs; do not run tests.",
+    )
+    parser.add_argument(
+        "--table-format",
+        default="plain",
+        choices=["plain", "markdown"],
+        help="Summary table format (plain or markdown).",
+    )
+    parser.add_argument(
+        "--compile-hf",
+        action="store_true",
+        help="Compile the HF reference model with torch.compile.",
+    )
+    parser.add_argument(
+        "--compile-axon",
+        action="store_true",
+        help="Compile the Axon-derived model with torch.compile.",
+    )
+    parser.add_argument(
+        "--compile-backend",
+        default=None,
+        help="Optional torch.compile backend (e.g. inductor).",
+    )
+    parser.add_argument(
+        "--compile-mode",
+        default=None,
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    )
+    parser.add_argument(
+        "--compile-fullgraph",
+        action="store_true",
+        help="Set torch.compile(fullgraph=True).",
+    )
+    parser.add_argument(
+        "--compile-dynamic",
+        action="store_true",
+        help="Set torch.compile(dynamic=True).",
+    )
+    return parser.parse_args()
+
+
+def _resolve_pairs(examples_dir: Path, models_dir: Path) -> list[_Pair]:
+    if not examples_dir.is_dir():
+        raise FileNotFoundError(f"Examples directory not found: {examples_dir}")
+    if not models_dir.is_dir():
+        raise FileNotFoundError(f"Models directory not found: {models_dir}")
+
+    model_dirs = sorted(path for path in models_dir.iterdir() if path.is_dir())
+    model_by_name = {path.name: path for path in model_dirs}
+    explicit_model_aliases = {
+        "flexolmo": "flexmath",
+        "black_mamba": "black_mamba_2_8b",
+        "mamba": "mamba_tiny_random",
+        "mamba_2_8b": "mamba_2_8b_hf",
+        "jamba": "jamba_tiny_random",
+    }
+    excluded_stems = {
+        "gpt-oss-20b",
+        "gpt_oss_20b",
+        "glm_4_5_air",
+        "nemotron-3",
+        "nemotron3",
+    }
+
+    pairs: list[_Pair] = []
+    for axon_path in sorted(examples_dir.glob("*.axon")):
+        stem = axon_path.stem
+        if stem in excluded_stems:
+            continue
+        model_dir = model_by_name.get(explicit_model_aliases.get(stem, stem))
+        if model_dir is None:
+            parts = stem.split("_")
+            for cut in range(len(parts) - 1, 0, -1):
+                candidate = "_".join(parts[:cut])
+                model_dir = model_by_name.get(candidate)
+                if model_dir is not None:
+                    break
+
+        if model_dir is not None:
+            pairs.append(_Pair(axon_path=axon_path, model_dir=model_dir))
+        else:
+            print(f"Igoring {axon_path} as I did not locate model_dir from stem {stem}")
+
+    return pairs
+
+
+def _format_table(rows: list[_SummaryRow]) -> str:
+    headers = [
+        "axon_file",
+        "model_dir",
+        "HF runtime (s)",
+        "AxonDerived runtime (s)",
+        "AxonDerived runtime/HF runtime",
+        "eval max abs diff",
+        "eval max rel diff",
+        "eval top1_eq",
+        "masked max abs diff",
+        "masked last max abs diff",
+        "masked max rel diff",
+        "masked_top1_eq",
+        "debug max abs diff",
+        "debug max rel diff",
+        "debug top1_eq",
+        "mean rel diff",
+        "masked mean rel diff",
+    ]
+
+    body = [
+        [
+            row.axon_file,
+            row.model_dir,
+            row.hf_runtime_s,
+            row.axon_runtime_s,
+            row.runtime_ratio,
+            row.eval_max_abs_diff,
+            row.eval_max_rel_diff,
+            row.eval_top1_eq,
+            row.masked_max_diff,
+            row.masked_last_max_diff,
+            row.masked_max_rel_diff,
+            row.masked_top1_eq,
+            row.debug_max_logit_diff,
+            row.debug_max_rel_diff,
+            row.debug_top1_eq,
+            row.mean_rel_diff,
+            row.masked_mean_rel_diff,
+        ]
+        for row in rows
+    ]
+
+    widths = [len(header) for header in headers]
+    for line in body:
+        for idx, cell in enumerate(line):
+            widths[idx] = max(widths[idx], len(cell))
+
+    def _fmt(line: list[str]) -> str:
+        return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(line))
+
+    divider = "-+-".join("-" * width for width in widths)
+    out_lines = [_fmt(headers), divider]
+    out_lines.extend(_fmt(line) for line in body)
+    return "\n".join(out_lines)
+
+
+def _format_table_markdown(rows: list[_SummaryRow]) -> str:
+    headers = [
+        "axon_file",
+        "model_dir",
+        "HF runtime (s)",
+        "AxonDerived runtime (s)",
+        "AxonDerived runtime/HF runtime",
+        "eval max abs diff",
+        "eval max rel diff",
+        "eval top1_eq",
+        "masked max abs diff",
+        "masked last max abs diff",
+        "masked max rel diff",
+        "masked_top1_eq",
+        "debug max abs diff",
+        "debug max rel diff",
+        "debug top1_eq",
+        "mean rel diff",
+        "masked mean rel diff",
+    ]
+
+    body = [
+        [
+            row.axon_file,
+            row.model_dir,
+            row.hf_runtime_s,
+            row.axon_runtime_s,
+            row.runtime_ratio,
+            row.eval_max_abs_diff,
+            row.eval_max_rel_diff,
+            row.eval_top1_eq,
+            row.masked_max_diff,
+            row.masked_last_max_diff,
+            row.masked_max_rel_diff,
+            row.masked_top1_eq,
+            row.debug_max_logit_diff,
+            row.debug_max_rel_diff,
+            row.debug_top1_eq,
+            row.mean_rel_diff,
+            row.masked_mean_rel_diff,
+        ]
+        for row in rows
+    ]
+
+    def _esc(cell: str) -> str:
+        return cell.replace("|", r"\|")
+
+    header_row = "| " + " | ".join(_esc(h) for h in headers) + " |"
+    divider = "| " + " | ".join("---" for _ in headers) + " |"
+    data_rows = ["| " + " | ".join(_esc(cell) for cell in line) + " |" for line in body]
+    return "\n".join([header_row, divider, *data_rows])
+
+
+def _run_pair(
+    pair: _Pair,
+    *,
+    device: str,
+    dtype: str,
+    max_len: int,
+    text: list[str],
+    verbose: bool,
+    compile_hf: bool,
+    compile_axon: bool,
+    compile_backend: str | None,
+    compile_mode: str | None,
+    compile_fullgraph: bool,
+    compile_dynamic: bool,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "axon_file": pair.axon_path,
+        "weights": pair.model_dir,
+        "hf_model_dir": pair.model_dir,
+        "device": device,
+        "dtype": dtype,
+        "max_len": max_len,
+        "text": text,
+        "compile_hf": compile_hf,
+        "compile_axon": compile_axon,
+        "compile_backend": compile_backend,
+        "compile_mode": compile_mode,
+        "compile_fullgraph": compile_fullgraph,
+        "compile_dynamic": compile_dynamic,
+    }
+    if verbose:
+        print(f"Running: {kwargs}")
+        return run_axon_test(**kwargs)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        return run_axon_test(**kwargs)
+
+
+def run_axon_test_matrix(
+    *,
+    examples_dir: Path = Path("examples"),
+    models_dir: Path = Path("models"),
+    device: str = "cpu",
+    dtype: str = "float32",
+    max_len: int = 32,
+    text: list[str] | None = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+    table_format: str = "plain",
+    compile_hf: bool = False,
+    compile_axon: bool = False,
+    compile_backend: str | None = None,
+    compile_mode: str | None = None,
+    compile_fullgraph: bool = False,
+    compile_dynamic: bool = False,
+) -> int:
+    if table_format not in {"plain", "markdown"}:
+        raise ValueError("table_format must be 'plain' or 'markdown'")
+
+    prompts = text if text else ["The future of AI is"]
+    pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())
+    if not pairs:
+        print("No matching .axon/model directory pairs found.")
+        return 1
+
+    if dry_run:
+        dry_rows = [
+            _SummaryRow(
+                axon_file=pair.axon_path.name,
+                model_dir=str(pair.model_dir),
+                hf_runtime_s="DRY-RUN",
+                axon_runtime_s="DRY-RUN",
+                runtime_ratio="DRY-RUN",
+                eval_max_abs_diff="DRY-RUN",
+                eval_max_rel_diff="DRY-RUN",
+                debug_max_logit_diff="DRY-RUN",
+                debug_max_rel_diff="DRY-RUN",
+                mean_rel_diff="DRY-RUN",
+                masked_max_diff="DRY-RUN",
+                masked_last_max_diff="DRY-RUN",
+                masked_mean_rel_diff="DRY-RUN",
+                masked_max_rel_diff="DRY-RUN",
+                eval_top1_eq="DRY-RUN",
+                debug_top1_eq="DRY-RUN",
+                masked_top1_eq="DRY-RUN",
+            )
+            for pair in pairs
+        ]
+        if table_format == "markdown":
+            print(_format_table_markdown(dry_rows))
+        else:
+            print(_format_table(dry_rows))
+        return 0
+
+    rows: list[_SummaryRow] = []
+    passed = 0
+    failed = 0
+
+    progress = tqdm(total=len(pairs), desc="synapse axon-test", unit="pair")
+    for pair in pairs:
+        progress.set_postfix_str(pair.axon_path.name)
+        try:
+            result = _run_pair(
+                pair,
+                device=device,
+                dtype=dtype,
+                max_len=max_len,
+                text=prompts,
+                verbose=verbose,
+                compile_hf=compile_hf,
+                compile_axon=compile_axon,
+                compile_backend=compile_backend,
+                compile_mode=compile_mode,
+                compile_fullgraph=compile_fullgraph,
+                compile_dynamic=compile_dynamic,
+            )
+            masked_max_diff_value = result.get("masked_max_diff")
+            masked_max_rel_diff_value = result.get("masked_max_rel_diff")
+            masked_top1_eq_value = result.get("masked_top1_eq")
+            eval_max_abs_diff_value = (
+                masked_max_diff_value if masked_max_diff_value is not None else result["max_diff"]
+            )
+            eval_max_rel_diff_value = (
+                masked_max_rel_diff_value
+                if masked_max_rel_diff_value is not None
+                else result["max_rel_diff"]
+            )
+            eval_top1_eq_value = (
+                bool(masked_top1_eq_value)
+                if masked_top1_eq_value is not None
+                else bool(result["top1_eq"])
+            )
+            rows.append(
+                _SummaryRow(
+                    axon_file=pair.axon_path.name,
+                    model_dir=str(pair.model_dir),
+                    hf_runtime_s=f"{result['hf_time']:.6g}",
+                    axon_runtime_s=f"{result['axon_time']:.6g}",
+                    runtime_ratio=f"{result['speed_ratio_axon_over_hf']:.3f}",
+                    eval_max_abs_diff=f"{float(eval_max_abs_diff_value):.6g}",
+                    eval_max_rel_diff=f"{float(eval_max_rel_diff_value):.6g}",
+                    debug_max_logit_diff=f"{result['max_diff']:.6g}",
+                    debug_max_rel_diff=f"{float(result['max_rel_diff']):.6g}",
+                    mean_rel_diff=f"{float(result['mean_rel_diff']):.6g}",
+                    masked_max_diff=(
+                        "N/A"
+                        if result.get("masked_max_diff") is None
+                        else f"{float(result['masked_max_diff']):.6g}"
+                    ),
+                    masked_last_max_diff=(
+                        "N/A"
+                        if result.get("masked_last_max_diff") is None
+                        else f"{float(result['masked_last_max_diff']):.6g}"
+                    ),
+                    masked_mean_rel_diff=(
+                        "N/A"
+                        if result.get("masked_mean_rel_diff") is None
+                        else f"{float(result['masked_mean_rel_diff']):.6g}"
+                    ),
+                    masked_max_rel_diff=(
+                        "N/A"
+                        if result.get("masked_max_rel_diff") is None
+                        else f"{float(result['masked_max_rel_diff']):.6g}"
+                    ),
+                    eval_top1_eq=str(eval_top1_eq_value),
+                    debug_top1_eq=str(bool(result["top1_eq"])),
+                    masked_top1_eq=(
+                        "N/A"
+                        if result.get("masked_top1_eq") is None
+                        else str(bool(result["masked_top1_eq"]))
+                    ),
+                )
+            )
+            passed += 1
+        except Exception as exc:
+            rows.append(
+                _SummaryRow(
+                    axon_file=pair.axon_path.name,
+                    model_dir=str(pair.model_dir),
+                    hf_runtime_s="ERROR",
+                    axon_runtime_s="ERROR",
+                    runtime_ratio="ERROR",
+                    eval_max_abs_diff="ERROR",
+                    eval_max_rel_diff="ERROR",
+                    debug_max_logit_diff="ERROR",
+                    debug_max_rel_diff="ERROR",
+                    mean_rel_diff="ERROR",
+                    masked_max_diff="ERROR",
+                    masked_last_max_diff="ERROR",
+                    masked_mean_rel_diff="ERROR",
+                    masked_max_rel_diff="ERROR",
+                    eval_top1_eq=f"ERROR: {type(exc).__name__}: {exc}",
+                    debug_top1_eq="ERROR",
+                    masked_top1_eq="ERROR",
+                )
+            )
+            failed += 1
+        finally:
+            progress.update(1)
+            progress.set_postfix_str(f"passed={passed} failed={failed}")
+
+    progress.close()
+
+    print()
+    if table_format == "markdown":
+        print(_format_table_markdown(rows))
+    else:
+        print(_format_table(rows))
+    print()
+    print(f"Total: {len(pairs)} | Passed: {passed} | Failed: {failed}")
+    return 0 if failed == 0 else 2
+
+
+def main() -> int:
+    args = _parse_args()
+    return run_axon_test_matrix(
+        examples_dir=args.examples_dir,
+        models_dir=args.models_dir,
+        device=args.device,
+        dtype=args.dtype,
+        max_len=args.max_len,
+        text=args.text,
+        verbose=args.verbose,
+        dry_run=args.dry_run,
+        table_format=args.table_format,
+        compile_hf=bool(args.compile_hf),
+        compile_axon=bool(args.compile_axon),
+        compile_backend=(str(args.compile_backend) if args.compile_backend is not None else None),
+        compile_mode=str(args.compile_mode) if args.compile_mode is not None else None,
+        compile_fullgraph=bool(args.compile_fullgraph),
+        compile_dynamic=bool(args.compile_dynamic),
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["main", "run_axon_test_matrix"]

@@ -70,6 +70,7 @@ class _Emitter:
                 "",
                 "from brainsurgery.synapse.mxfp4 import materialize_mxfp4_aliases",
                 "",
+                "import math",
                 "import torch",
                 "from torch import nn",
                 "from torch.nn import functional as F",
@@ -80,6 +81,8 @@ class _Emitter:
                 "        super().__init__()",
                 "        self._state: dict[str, torch.Tensor] = {}",
                 f"        self._symbols: dict[str, int | float | bool] = {repr(self.symbols)}",
+                "        self._trace_enabled = False",
+                "        self.trace_ops: list[dict[str, Any]] = []",
                 "        if state_dict is not None:",
                 "            self.load_state_dict_tensors(state_dict)",
                 "",
@@ -113,6 +116,40 @@ class _Emitter:
                 "        if name not in env:",
                 '            raise ValueError(f"Missing variable in graph env: {name}")',
                 "        return env[name]",
+                "",
+                "    def _first_tensor(self, value: Any) -> torch.Tensor | None:",
+                "        if torch.is_tensor(value):",
+                "            return value",
+                "        if isinstance(value, (list, tuple)):",
+                "            for item in value:",
+                "                tensor = self._first_tensor(item)",
+                "                if tensor is not None:",
+                "                    return tensor",
+                "            return None",
+                "        if isinstance(value, dict):",
+                "            for item in value.values():",
+                "                tensor = self._first_tensor(item)",
+                "                if tensor is not None:",
+                "                    return tensor",
+                "            return None",
+                "        return None",
+                "",
+                "    def _reset_trace(self) -> None:",
+                "        self.trace_ops = []",
+                "",
+                "    def _trace_op(self, node_path: str, op: str, bind: str, value: Any) -> None:",
+                "        if not bool(getattr(self, '_trace_enabled', False)):",
+                "            return",
+                "        tensor = self._first_tensor(value)",
+                "        if tensor is None:",
+                "            return",
+                "        self.trace_ops.append({",
+                "            'node_path': str(node_path),",
+                "            'op': str(op),",
+                "            'bind': str(bind),",
+                "            'dtype': str(tensor.dtype),",
+                "            'tensor': tensor.detach().float().cpu(),",
+                "        })",
                 "",
                 "    def _prepare_env(self, input_ids: torch.Tensor | None, inputs: dict[str, Any], input_specs: dict[str, Any]) -> dict[str, Any]:",
                 "        env = {'input_ids': input_ids, **inputs} if input_ids is not None else dict(inputs)",
@@ -245,15 +282,30 @@ class _Emitter:
         if not isinstance(outputs, dict):
             raise ValueError("model.outputs must be mapping")
 
-        past_input_name: str | None = None
-        for candidate in ("past_key_values", "past_kv", "past"):
+        state_input_name: str | None = None
+        for candidate in (
+            "past_key_values",
+            "past_kv",
+            "past",
+            "cache_params",
+            "cache_state",
+            "state",
+        ):
             if candidate in inputs:
-                past_input_name = candidate
+                state_input_name = candidate
                 break
         use_cache_name = "use_cache" if "use_cache" in inputs else None
-        cache_output_names = [
+        state_output_names = [
             name
-            for name in ("past_key_values", "present_key_values", "new_kv", "past_kv")
+            for name in (
+                "past_key_values",
+                "present_key_values",
+                "new_kv",
+                "past_kv",
+                "cache_params",
+                "cache_state",
+                "state",
+            )
             if name in outputs
         ]
 
@@ -292,11 +344,22 @@ class _Emitter:
             "                    step_input = generated[:, :cur_len] if cache_state is None else generated[:, cur_len - 1:cur_len]",
             "                    call_kwargs: dict[str, Any] = {}",
             "                    if generated_mask is not None:",
-            "                        call_kwargs['attention_mask'] = generated_mask[:, :cur_len]",
-            "                        call_kwargs['attn_mask'] = generated_mask[:, :cur_len]",
         ]
-        if past_input_name is not None:
-            lines.append(f"                    call_kwargs[{past_input_name!r}] = cache_state")
+        has_mask_input = False
+        if "attention_mask" in inputs:
+            has_mask_input = True
+            lines.append(
+                "                        call_kwargs['attention_mask'] = generated_mask[:, :cur_len]"
+            )
+        if "attn_mask" in inputs:
+            has_mask_input = True
+            lines.append(
+                "                        call_kwargs['attn_mask'] = generated_mask[:, :cur_len]"
+            )
+        if not has_mask_input:
+            lines.append("                        pass")
+        if state_input_name is not None:
+            lines.append(f"                    call_kwargs[{state_input_name!r}] = cache_state")
         if use_cache_name is not None:
             lines.append(f"                    call_kwargs[{use_cache_name!r}] = True")
         lines.extend(
@@ -306,7 +369,7 @@ class _Emitter:
                 "                        logits = model_out['logits']",
             ]
         )
-        for idx, out_name in enumerate(cache_output_names):
+        for idx, out_name in enumerate(state_output_names):
             if idx == 0:
                 lines.append(f"                        if {out_name!r} in model_out:")
             else:
@@ -426,12 +489,13 @@ class _Emitter:
             if not isinstance(op, str):
                 raise ValueError(f"node {node_name!r} missing op")
 
+            trace_node_path = self._fresh("trace_node_path")
+            lines.append(
+                f"{inner_indent}{trace_node_path} = self._join_scope({scope_var}, {node_name!r})"
+            )
             node_path = scope_var
             if self._op_uses_node_path(op, node_spec):
-                node_path = self._fresh("node_path")
-                lines.append(
-                    f"{inner_indent}{node_path} = self._join_scope({scope_var}, {node_name!r})"
-                )
+                node_path = trace_node_path
             lines.extend(
                 self._compile_op(
                     op=op,
@@ -442,6 +506,12 @@ class _Emitter:
                     indent=inner_indent,
                 )
             )
+            for out_name in self._node_output_names(node_spec):
+                _out_var = env.get(out_name)
+                if isinstance(_out_var, str):
+                    lines.append(
+                        f"{inner_indent}self._trace_op({trace_node_path}, {op!r}, {out_name!r}, {_out_var})"
+                    )
         return lines
 
     def _op_uses_node_path(self, op: str, node_spec: dict[str, Any]) -> bool:

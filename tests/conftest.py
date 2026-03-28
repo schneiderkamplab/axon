@@ -6,6 +6,13 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.model_downloads import (
+    MODEL_SPECS,
+    ensure_gpt2_weights_alias,
+    ensure_matrix_models,
+    ensure_model_downloaded,
+)
+
 
 class SingleModelProvider:
     def __init__(self, state_dict: object, model: str = "model") -> None:
@@ -47,27 +54,65 @@ def repo_root() -> Path:
 
 
 @pytest.fixture(scope="session")
-def gpt2_local_paths(repo_root: Path) -> tuple[Path, Path]:
-    synapse_weights = repo_root / "models" / "gpt2" / "model.safetensors"
+def gpt2_local_paths(repo_root: Path, pytestconfig: pytest.Config) -> tuple[Path, Path]:
+    ensure_model_downloaded(repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gpt2.old"])
+    synapse_weights = ensure_gpt2_weights_alias(repo_root, pytestconfig)
     hf_model_dir = repo_root / "models" / "gpt2.old"
-    if not synapse_weights.exists():
-        pytest.skip(f"missing local GPT-2 checkpoint: {synapse_weights}")
-    if not hf_model_dir.exists():
-        pytest.skip(f"missing local GPT-2 HF directory: {hf_model_dir}")
     return synapse_weights, hf_model_dir
 
 
 @pytest.fixture(scope="session")
-def gemma3_local_path(repo_root: Path) -> Path:
-    hf_model_dir = repo_root / "models" / "gemma3"
-    if not hf_model_dir.exists():
-        pytest.skip(f"missing local Gemma3 HF directory: {hf_model_dir}")
-    return hf_model_dir
+def gemma3_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma3"]
+    )
 
 
 @pytest.fixture(scope="session")
-def olmoe_local_path(repo_root: Path) -> Path:
-    hf_model_dir = repo_root / "models" / "olmoe_1b_7b_0924"
-    if not hf_model_dir.exists():
-        pytest.skip(f"missing local OLMoE HF directory: {hf_model_dir}")
-    return hf_model_dir
+def olmoe_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["olmoe_1b_7b_0924"],
+    )
+
+
+@pytest.fixture(scope="session")
+def glm4_5_air_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["glm_4_5_air"],
+    )
+
+
+@pytest.fixture(scope="session")
+def deepseek_v2_lite_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["deepseek_v2_lite"],
+    )
+
+
+@pytest.fixture(scope="session")
+def black_mamba_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["black_mamba"],
+    )
+
+
+@pytest.fixture(scope="session")
+def nemotron3_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["nemotron3"],
+    )
+
+
+@pytest.fixture(scope="session")
+def ensure_matrix_test_models(repo_root: Path, pytestconfig: pytest.Config) -> None:
+    ensure_matrix_models(repo_root, pytestconfig)

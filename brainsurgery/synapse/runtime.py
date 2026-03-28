@@ -141,7 +141,43 @@ class SynapseProgramModel(nn.Module):
         if mask is not None:
             generated_mask = mask.new_zeros((batch, max_len))
             generated_mask[:, :start_len] = mask
-        past_key_values = None
+        model = self.spec.get("model", {})
+        input_specs = model.get("inputs", {})
+        output_specs = model.get("outputs", {})
+        if not isinstance(input_specs, dict):
+            input_specs = {}
+        if not isinstance(output_specs, dict):
+            output_specs = {}
+
+        state_input_name: str | None = None
+        for candidate in (
+            "past_key_values",
+            "past_kv",
+            "past",
+            "cache_params",
+            "cache_state",
+            "state",
+        ):
+            if candidate in input_specs:
+                state_input_name = candidate
+                break
+
+        use_cache_name = "use_cache" if "use_cache" in input_specs else None
+        state_output_names = [
+            name
+            for name in (
+                "past_key_values",
+                "present_key_values",
+                "new_kv",
+                "past_kv",
+                "cache_params",
+                "cache_state",
+                "state",
+            )
+            if name in output_specs
+        ]
+
+        cache_state = None
         finished = torch.zeros(batch, dtype=torch.bool, device=input_ids.device)
         cur_len = start_len
         was_training = self.training
@@ -151,27 +187,26 @@ class SynapseProgramModel(nn.Module):
                 while cur_len < max_len and not torch.all(finished):
                     step_input = (
                         generated[:, :cur_len]
-                        if past_key_values is None
+                        if cache_state is None
                         else generated[:, cur_len - 1 : cur_len]
                     )
-                    if generated_mask is None:
-                        model_out = self.forward(
-                            step_input, past_key_values=past_key_values, use_cache=True
-                        )
-                    else:
-                        model_out = self.forward(
-                            step_input,
-                            attention_mask=generated_mask[:, :cur_len],
-                            attn_mask=generated_mask[:, :cur_len],
-                            past_key_values=past_key_values,
-                            use_cache=True,
-                        )
+                    call_kwargs: dict[str, Any] = {}
+                    if generated_mask is not None:
+                        if "attention_mask" in input_specs:
+                            call_kwargs["attention_mask"] = generated_mask[:, :cur_len]
+                        if "attn_mask" in input_specs:
+                            call_kwargs["attn_mask"] = generated_mask[:, :cur_len]
+                    if state_input_name is not None:
+                        call_kwargs[state_input_name] = cache_state
+                    if use_cache_name is not None:
+                        call_kwargs[use_cache_name] = True
+                    model_out = self.forward(step_input, **call_kwargs)
                     if isinstance(model_out, dict):
                         logits = model_out["logits"]
-                        if "past_key_values" in model_out:
-                            past_key_values = model_out["past_key_values"]
-                        elif "present_key_values" in model_out:
-                            past_key_values = model_out["present_key_values"]
+                        for out_name in state_output_names:
+                            if out_name in model_out:
+                                cache_state = model_out[out_name]
+                                break
                     else:
                         logits = model_out
                     next_token = torch.argmax(logits[:, -1, :], dim=-1)

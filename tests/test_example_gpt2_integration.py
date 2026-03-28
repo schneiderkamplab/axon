@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,38 +17,6 @@ from brainsurgery.engine import (
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.transforms.copy import CopyTransform
-
-_GPT2_MODEL_URL = "https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors"
-
-
-def _ensure_gpt2_model_path() -> Path:
-    if shutil.which("curl") is None:
-        pytest.skip("curl not available")
-
-    repo_root = Path(__file__).resolve().parents[1]
-    model_path = repo_root / "models" / "gpt2" / "model.safetensors"
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not model_path.exists():
-        download = subprocess.run(
-            [
-                "curl",
-                "-fL",
-                "-o",
-                str(model_path),
-                _GPT2_MODEL_URL,
-            ],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-        )
-        assert download.returncode == 0, (
-            "failed to download GPT-2 model.safetensors\n"
-            f"stdout:\n{download.stdout}\n"
-            f"stderr:\n{download.stderr}"
-        )
-
-    return model_path
 
 
 def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, object]) -> dict[str, object]:
@@ -80,9 +47,11 @@ def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, object]) ->
     return patched
 
 
-def test_download_gpt2_model_and_run_example_yaml(tmp_path: Path) -> None:
+def test_download_gpt2_model_and_run_example_yaml(
+    tmp_path: Path, gpt2_local_paths: tuple[Path, Path]
+) -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    _ensure_gpt2_model_path()
+    _ = gpt2_local_paths
     source_plan = OmegaConf.to_container(
         OmegaConf.load(repo_root / "examples" / "gpt2.yaml"), resolve=True
     )
@@ -114,9 +83,9 @@ def test_download_gpt2_model_and_run_example_yaml(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_gpt2_copy_tracks_access_counts_for_real_providers(
-    tmp_path: Path, provider_name: str
+    tmp_path: Path, provider_name: str, gpt2_local_paths: tuple[Path, Path]
 ) -> None:
-    model_path = _ensure_gpt2_model_path()
+    model_path = gpt2_local_paths[0]
     provider = create_state_dict_provider(
         provider=provider_name,
         model_paths={"loaded": model_path},
@@ -153,8 +122,9 @@ def test_gpt2_dry_run_pipeline_preserves_loaded_state_dict(
     tmp_path: Path,
     provider_name: str,
     capsys: pytest.CaptureFixture[str],
+    gpt2_local_paths: tuple[Path, Path],
 ) -> None:
-    model_path = _ensure_gpt2_model_path()
+    model_path = gpt2_local_paths[0]
     raw = {
         "inputs": [f"loaded::{model_path}"],
         "transforms": [

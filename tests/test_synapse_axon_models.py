@@ -19,6 +19,9 @@ from tests.synapse_test_utils import (
     extract_logits,
     load_yaml_mapping,
 )
+from tests.test_flags import LONG_TEST_ENV, run_long_tests_enabled
+
+_RUN_LONG = run_long_tests_enabled()
 
 
 def _load_axon_spec(path: Path) -> dict[str, Any]:
@@ -191,6 +194,7 @@ def test_codegen_and_runtime_from_axon_match_hf_decoder_models(
     assert torch.equal(rt_gen, hf_gen)
 
 
+@pytest.mark.skipif(not _RUN_LONG, reason=f"set {LONG_TEST_ENV}=1 to enable long tests")
 def test_codegen_and_runtime_from_axon_match_hf_olmoe_cpu(
     repo_root: Path, olmoe_local_path: Path
 ) -> None:

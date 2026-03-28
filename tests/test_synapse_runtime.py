@@ -189,6 +189,26 @@ def _attention_with_sink_spec() -> dict[str, object]:
     }
 
 
+def _concat_spec(*, dim: int = -1) -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}, "y": {}},
+            "graph": [
+                {
+                    "cat": {
+                        "_op": "concat",
+                        "_args": ["x", "y"],
+                        "_bind": "z",
+                        "dim": dim,
+                    }
+                }
+            ],
+            "outputs": {"z": "z"},
+        },
+    }
+
+
 def _linear_expert_spec() -> dict[str, object]:
     return {
         "synapse": 1,
@@ -207,6 +227,89 @@ def _linear_expert_spec() -> dict[str, object]:
                 }
             ],
             "outputs": {"y": "y"},
+        },
+    }
+
+
+def _mamba_scan_spec(*, with_state_input: bool, with_state_output: bool) -> dict[str, object]:
+    inputs: dict[str, object] = {
+        "u": {},
+        "delta": {},
+        "A": {},
+        "B": {},
+        "C": {},
+        "D": {},
+    }
+    args: list[object] = ["u", "delta", "A", "B", "C", "D"]
+    if with_state_input:
+        inputs["state"] = {"optional": True}
+        args.append("state")
+    bind: object = ["y", "final_state"] if with_state_output else "y"
+    outputs: dict[str, object] = {"y": "y"}
+    if with_state_output:
+        outputs["final_state"] = "final_state"
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": inputs,
+            "graph": [{"scan": {"_op": "mamba_scan", "_args": args, "_bind": bind}}],
+            "outputs": outputs,
+        },
+    }
+
+
+def _mamba_scan_reference(
+    *,
+    u: torch.Tensor,
+    delta: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    d: torch.Tensor,
+    state: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    delta_sp = torch.nn.functional.softplus(delta)
+    batch, seq, dim = u.shape
+    state_dim = a.shape[1]
+    cur = torch.zeros((batch, dim, state_dim), dtype=u.dtype) if state is None else state.clone()
+    ys: list[torch.Tensor] = []
+    for t in range(seq):
+        u_t = u[:, t, :]
+        delta_t = delta_sp[:, t, :]
+        b_t = b[:, t, :]
+        c_t = c[:, t, :]
+        a_t = torch.exp(delta_t.unsqueeze(-1) * a.unsqueeze(0))
+        bu_t = (delta_t * u_t).unsqueeze(-1) * b_t.unsqueeze(1)
+        cur = a_t * cur + bu_t
+        y_t = (cur * c_t.unsqueeze(1)).sum(dim=-1) + u_t * d.unsqueeze(0)
+        ys.append(y_t)
+    return torch.stack(ys, dim=1), cur
+
+
+def _cache_state_generate_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "symbols": {"V": 8, "D": 4},
+            "inputs": {
+                "input_ids": {"shape": ["B", "T"], "dtype": "int64"},
+                "cache_state": {"optional": True},
+                "use_cache": {"optional": True},
+            },
+            "graph": [
+                {"tok": {"_op": "embedding", "_args": "input_ids", "_bind": "x", "dim": "D"}},
+                {
+                    "head": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "logits",
+                        "dim": "V",
+                        "bias": False,
+                        "weight": "tok.weight",
+                    }
+                },
+            ],
+            "outputs": {"logits": "logits", "cache_state": "input_ids"},
         },
     }
 
@@ -328,6 +431,15 @@ def test_runtime_three_reshape_heads_infers_head_dim_from_heads() -> None:
     assert out["qh"].shape == (2, 12, 5, 64)
     assert out["kh"].shape == (2, 12, 5, 64)
     assert out["vh"].shape == (2, 12, 5, 64)
+
+
+def test_runtime_concat_last_dim_matches_torch_cat() -> None:
+    spec = _concat_spec(dim=-1)
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.randn(2, 3, 4)
+    y = torch.randn(2, 3, 5)
+    out = model(x=x, y=y)
+    assert torch.equal(out["z"], torch.cat([x, y], dim=-1))
 
 
 def test_runtime_three_reshape_heads_infers_heads_from_head_dim() -> None:
@@ -625,3 +737,76 @@ def test_runtime_clamp_and_sigmoid_ops() -> None:
     out = model(x=x)
     expected = torch.sigmoid(torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32))
     assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
+
+
+def test_runtime_mamba_scan_matches_reference_without_state_io() -> None:
+    spec = _mamba_scan_spec(with_state_input=False, with_state_output=False)
+    model = SynapseProgramModel.from_spec(spec)
+    u = torch.tensor(
+        [[[0.2, -0.1], [0.4, 0.3], [0.7, -0.2]]],
+        dtype=torch.float32,
+    )
+    delta = torch.tensor(
+        [[[0.1, 0.5], [0.2, -0.3], [0.6, 0.4]]],
+        dtype=torch.float32,
+    )
+    a = torch.tensor([[0.2, -0.1], [-0.3, 0.4]], dtype=torch.float32)
+    b = torch.tensor([[[0.7, 0.2], [0.6, -0.2], [0.1, 0.3]]], dtype=torch.float32)
+    c = torch.tensor([[[0.8, -0.5], [0.2, 0.4], [-0.1, 0.6]]], dtype=torch.float32)
+    d = torch.tensor([0.9, -0.3], dtype=torch.float32)
+
+    out = model(u=u, delta=delta, A=a, B=b, C=c, D=d)
+    expected_y, _ = _mamba_scan_reference(u=u, delta=delta, a=a, b=b, c=c, d=d, state=None)
+    assert torch.allclose(out["y"], expected_y, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_runtime_mamba_scan_returns_final_state_with_state_input() -> None:
+    spec = _mamba_scan_spec(with_state_input=True, with_state_output=True)
+    model = SynapseProgramModel.from_spec(spec)
+    u = torch.tensor(
+        [[[0.3, 0.1], [0.5, -0.4]]],
+        dtype=torch.float32,
+    )
+    delta = torch.tensor(
+        [[[0.2, 0.7], [0.1, -0.2]]],
+        dtype=torch.float32,
+    )
+    a = torch.tensor([[0.3, -0.2], [0.1, 0.2]], dtype=torch.float32)
+    b = torch.tensor([[[0.4, 0.6], [0.9, -0.1]]], dtype=torch.float32)
+    c = torch.tensor([[[0.5, -0.4], [0.8, 0.2]]], dtype=torch.float32)
+    d = torch.tensor([0.7, -0.5], dtype=torch.float32)
+    state = torch.tensor([[[0.1, -0.3], [0.2, 0.5]]], dtype=torch.float32)
+
+    out = model(u=u, delta=delta, A=a, B=b, C=c, D=d, state=state)
+    expected_y, expected_state = _mamba_scan_reference(
+        u=u,
+        delta=delta,
+        a=a,
+        b=b,
+        c=c,
+        d=d,
+        state=state,
+    )
+    assert torch.allclose(out["y"], expected_y, atol=1.0e-6, rtol=1.0e-6)
+    assert torch.allclose(out["final_state"], expected_state, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_runtime_generate_uses_generic_cache_state_contract() -> None:
+    spec = _cache_state_generate_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors({"tok.weight": torch.randn(8, 4)})
+
+    seen_lengths: list[int] = []
+    original_forward = model.forward
+
+    def _wrapped_forward(input_ids: torch.Tensor | None = None, **inputs: object):
+        assert input_ids is not None
+        seen_lengths.append(int(input_ids.shape[1]))
+        return original_forward(input_ids, **inputs)
+
+    model.forward = _wrapped_forward  # type: ignore[method-assign]
+    input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    generated = model.generate(input_ids=input_ids, eos_token_id=7, max_len=6)
+    assert generated.shape[1] <= 6
+    assert seen_lengths[0] == 3
+    assert all(length == 1 for length in seen_lengths[1:])

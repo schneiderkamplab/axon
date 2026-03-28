@@ -24,6 +24,27 @@ def run_axon_test(*args, **kwargs):
     return _run_axon_test(*args, **kwargs)
 
 
+def run_axon_test_matrix(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .axon_test_matrix import run_axon_test_matrix as _run_axon_test_matrix
+
+    return _run_axon_test_matrix(*args, **kwargs)
+
+
+def run_axon_op_parity(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .op_parity import run_axon_op_parity as _run_axon_op_parity
+
+    return _run_axon_op_parity(*args, **kwargs)
+
+
+def run_codegen_runtime_parity(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .op_parity import run_codegen_runtime_parity as _run_codegen_runtime_parity
+
+    return _run_codegen_runtime_parity(*args, **kwargs)
+
+
 __all__ = [
     "AxonBind",
     "AxonModule",
@@ -34,6 +55,9 @@ __all__ = [
     "SynapseProgramModel",
     "emit_model_code_from_synapse_spec",
     "run_axon_test",
+    "run_axon_test_matrix",
+    "run_axon_op_parity",
+    "run_codegen_runtime_parity",
     "lower_axon_module_to_synapse_block",
     "lower_axon_module_to_synapse_spec",
     "lower_axon_program_to_synapse_spec",

@@ -239,6 +239,66 @@ def axon_test(
         "--dtype",
         help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
     ),
+    hf_align_bf16_profile: bool = typer.Option(
+        False,
+        "--hf-align-bf16-profile/--no-hf-align-bf16-profile",
+        help="Enable a general HF-BF16 alignment profile (mask, posids, add/linear/norm fp32-accum paths).",
+    ),
+    hf_align_mask_contract: bool = typer.Option(
+        False,
+        "--hf-align-mask-contract/--no-hf-align-mask-contract",
+        help="When enabled, normalize additive attention masks to HF-like SDPA bool masks.",
+    ),
+    hf_align_position_ids: bool = typer.Option(
+        False,
+        "--hf-align-position-ids/--no-hf-align-position-ids",
+        help="When enabled, use HF-like padding fill behavior for position_ids.",
+    ),
+    hf_align_add_fp32_accum: bool = typer.Option(
+        False,
+        "--hf-align-add-fp32-accum/--no-hf-align-add-fp32-accum",
+        help="When enabled, compute low-precision add in fp32 and cast back.",
+    ),
+    hf_align_linear_fp32_accum: bool = typer.Option(
+        False,
+        "--hf-align-linear-fp32-accum/--no-hf-align-linear-fp32-accum",
+        help="When enabled, compute low-precision linear in fp32 and cast back.",
+    ),
+    hf_align_norm_fp32: bool = typer.Option(
+        False,
+        "--hf-align-norm-fp32/--no-hf-align-norm-fp32",
+        help="When enabled, run low-precision norm ops through fp32 compute paths.",
+    ),
+    compile_hf: bool = typer.Option(
+        False,
+        "--compile-hf/--no-compile-hf",
+        help="Compile the HF reference model with torch.compile.",
+    ),
+    compile_axon: bool = typer.Option(
+        False,
+        "--compile-axon/--no-compile-axon",
+        help="Compile the Axon-derived model with torch.compile.",
+    ),
+    compile_backend: str | None = typer.Option(
+        None,
+        "--compile-backend",
+        help="Optional torch.compile backend (e.g. inductor).",
+    ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile-mode",
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    ),
+    compile_fullgraph: bool = typer.Option(
+        False,
+        "--compile-fullgraph/--no-compile-fullgraph",
+        help="Set torch.compile(fullgraph=True).",
+    ),
+    compile_dynamic: bool = typer.Option(
+        False,
+        "--compile-dynamic/--no-compile-dynamic",
+        help="Set torch.compile(dynamic=True).",
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -255,9 +315,206 @@ def axon_test(
             class_name=class_name,
             main_module=main_module,
             dtype=dtype,
+            hf_align_bf16_profile=hf_align_bf16_profile,
+            hf_align_mask_contract=hf_align_mask_contract,
+            hf_align_position_ids=hf_align_position_ids,
+            hf_align_add_fp32_accum=hf_align_add_fp32_accum,
+            hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
+            hf_align_norm_fp32=hf_align_norm_fp32,
+            compile_hf=compile_hf,
+            compile_axon=compile_axon,
+            compile_backend=compile_backend,
+            compile_mode=compile_mode,
+            compile_fullgraph=compile_fullgraph,
+            compile_dynamic=compile_dynamic,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
 
-__all__ = ["app", "emit_generic", "axon_to_synapse", "synapse_to_axon", "axon_test"]
+@app.command("axon-op-parity")
+def axon_op_parity(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    weights: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Path to a .safetensors file or a model directory containing safetensors.",
+    ),
+    hf_model_dir: Path | None = typer.Option(
+        None,
+        "--hf-model-dir",
+        help="HF model directory for AutoModel (defaults to weights directory).",
+    ),
+    tokenizer: str | None = typer.Option(
+        None,
+        "--tokenizer",
+        help="Tokenizer source override (local path or HF repo id).",
+    ),
+    text: list[str] = typer.Option(
+        ["The future of AI is", "Hello world"],
+        "--text",
+        help="Prompt text for forward-pass parity. Repeat --text for batched prompts.",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    dtypes: list[str] = typer.Option(
+        ["float32", "bfloat16", "float16"],
+        "--dtype",
+        help="Dtypes to sweep (repeat --dtype): float32/bfloat16/float16.",
+    ),
+    output_json: Path | None = typer.Option(
+        None,
+        "--output-json",
+        help="Optional path to write a full JSON report.",
+    ),
+) -> None:
+    """Run per-op HF-internals vs Synapse parity harness across requested dtypes."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_op_parity")
+    try:
+        run_fn(
+            axon_file=axon_path,
+            weights=weights,
+            hf_model_dir=hf_model_dir,
+            tokenizer=tokenizer,
+            text=text,
+            device=device,
+            dtypes=dtypes,
+            output_json=output_json,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("axon-test-matrix")
+def axon_test_matrix(
+    examples_dir: Path = typer.Option(
+        Path("examples"),
+        "--examples-dir",
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Directory with Axon files (default: examples).",
+    ),
+    models_dir: Path = typer.Option(
+        Path("models"),
+        "--models-dir",
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Directory with model directories (default: models).",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    dtype: str = typer.Option(
+        "float32",
+        "--dtype",
+        help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
+    ),
+    max_len: int = typer.Option(
+        32,
+        "--max-len",
+        help="Total sequence length target for generation.",
+    ),
+    text: list[str] = typer.Option(
+        [],
+        "--text",
+        help="Prompt text to complete. Repeat --text for batched prompts.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Show per-run output from synapse axon-test.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Only resolve and print matching pairs; do not run tests.",
+    ),
+    table_format: str = typer.Option(
+        "plain",
+        "--table-format",
+        help="Summary table format (plain/markdown).",
+    ),
+    compile_hf: bool = typer.Option(
+        False,
+        "--compile-hf/--no-compile-hf",
+        help="Compile the HF reference model with torch.compile.",
+    ),
+    compile_axon: bool = typer.Option(
+        False,
+        "--compile-axon/--no-compile-axon",
+        help="Compile the Axon-derived model with torch.compile.",
+    ),
+    compile_backend: str | None = typer.Option(
+        None,
+        "--compile-backend",
+        help="Optional torch.compile backend (e.g. inductor).",
+    ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile-mode",
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    ),
+    compile_fullgraph: bool = typer.Option(
+        False,
+        "--compile-fullgraph/--no-compile-fullgraph",
+        help="Set torch.compile(fullgraph=True).",
+    ),
+    compile_dynamic: bool = typer.Option(
+        False,
+        "--compile-dynamic/--no-compile-dynamic",
+        help="Set torch.compile(dynamic=True).",
+    ),
+) -> None:
+    """Run synapse axon-test across matching examples/*.axon and models/* directories."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_test_matrix")
+    try:
+        exit_code = run_fn(
+            examples_dir=examples_dir,
+            models_dir=models_dir,
+            device=device,
+            dtype=dtype,
+            max_len=max_len,
+            text=text or None,
+            verbose=verbose,
+            dry_run=dry_run,
+            table_format=table_format,
+            compile_hf=compile_hf,
+            compile_axon=compile_axon,
+            compile_backend=compile_backend,
+            compile_mode=compile_mode,
+            compile_fullgraph=compile_fullgraph,
+            compile_dynamic=compile_dynamic,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raise typer.Exit(code=int(exit_code))
+
+
+__all__ = [
+    "app",
+    "emit_generic",
+    "axon_to_synapse",
+    "synapse_to_axon",
+    "axon_test",
+    "axon_op_parity",
+    "axon_test_matrix",
+]

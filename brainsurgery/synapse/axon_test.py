@@ -13,9 +13,10 @@ import safetensors
 import torch
 from mltiming import timing
 from omegaconf import OmegaConf
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
 from .codegen import emit_model_code_from_synapse_spec
 from .mxfp4 import materialize_mxfp4_aliases
 
@@ -151,12 +152,47 @@ def _load_tokenizer(tokenizer_source: str, *, fallback_repo_id: str | None = Non
         )
 
 
+def _normalize_rope_numeric_fields(config: Any) -> Any:
+    def _normalize_dict(mapping: Any) -> None:
+        if not isinstance(mapping, dict):
+            return
+        for key in ("factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim"):
+            value = mapping.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                mapping[key] = float(value)
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    _normalize_dict(rope_scaling)
+    rope_parameters = getattr(config, "rope_parameters", None)
+    _normalize_dict(rope_parameters)
+    return config
+
+
 def _looks_like_tokenizer_dir(path: Path) -> bool:
     return (
         (path / "tokenizer.json").exists()
         or (path / "tokenizer.model").exists()
         or ((path / "vocab.json").exists() and (path / "merges.txt").exists())
     )
+
+
+def _candidate_tokenizer_dirs(model_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    candidates.append(model_dir)
+    candidates.append(model_dir.with_name(f"{model_dir.name}.old"))
+    parts = model_dir.name.split("_")
+    for cut in range(len(parts) - 1, 1, -1):
+        candidates.append(model_dir.with_name("_".join(parts[:cut])))
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    return out
 
 
 def _load_generated_class(py_path: Path, class_name: str) -> type[Any]:
@@ -178,6 +214,31 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
         out = fn()
     dt = time.perf_counter() - t0
     return out, dt
+
+
+def _maybe_compile_model(
+    model: Any,
+    *,
+    enabled: bool,
+    backend: str | None,
+    mode: str | None,
+    fullgraph: bool,
+    dynamic: bool,
+) -> Any:
+    if not enabled:
+        return model
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        raise ValueError("torch.compile is not available in this PyTorch build")
+    kwargs: dict[str, Any] = {
+        "fullgraph": bool(fullgraph),
+        "dynamic": bool(dynamic),
+    }
+    if backend:
+        kwargs["backend"] = backend
+    if mode:
+        kwargs["mode"] = mode
+    return compile_fn(model, **kwargs)
 
 
 def _normalize_texts(text: str | Sequence[str]) -> list[str]:
@@ -205,6 +266,29 @@ def _to_cpu_float(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.detach().to(dtype=torch.float32, device="cpu")
 
 
+def _spec_padding_side(spec: dict[str, Any]) -> str | None:
+    model = spec.get("model", {})
+    if not isinstance(model, dict):
+        return None
+    meta = model.get("meta", {})
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get("padding_side")
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized not in {"left", "right"}:
+        raise ValueError(f"Invalid model.meta.padding_side={value!r}; expected 'left' or 'right'.")
+    return normalized
+
+
+def _preferred_padding_side(spec: dict[str, Any]) -> str:
+    explicit = _spec_padding_side(spec)
+    if explicit is not None:
+        return explicit
+    return "left"
+
+
 def run_axon_test(
     *,
     axon_file: Path,
@@ -218,9 +302,26 @@ def run_axon_test(
     main_module: str | None = None,
     dtype: str = "float32",
     trace_layers: bool = False,
+    hf_align_bf16_profile: bool = False,
+    hf_align_mask_contract: bool = False,
+    hf_align_position_ids: bool = False,
+    hf_align_add_fp32_accum: bool = False,
+    hf_align_linear_fp32_accum: bool = False,
+    hf_align_norm_fp32: bool = False,
+    compile_hf: bool = False,
+    compile_axon: bool = False,
+    compile_backend: str | None = None,
+    compile_mode: str | None = None,
+    compile_fullgraph: bool = False,
+    compile_dynamic: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
+    align_mask_contract = bool(hf_align_bf16_profile or hf_align_mask_contract)
+    align_position_ids = bool(hf_align_bf16_profile or hf_align_position_ids)
+    align_add_fp32 = bool(hf_align_bf16_profile or hf_align_add_fp32_accum)
+    align_linear_fp32 = bool(hf_align_bf16_profile or hf_align_linear_fp32_accum)
+    align_norm_fp32 = bool(hf_align_bf16_profile or hf_align_norm_fp32)
 
     axon_file = axon_file.resolve()
     weights_path = weights.resolve()
@@ -234,11 +335,10 @@ def run_axon_test(
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
-        candidate_old = resolved_hf_model_dir.with_name(f"{resolved_hf_model_dir.name}.old")
-        if not _looks_like_tokenizer_dir(resolved_hf_model_dir) and _looks_like_tokenizer_dir(
-            candidate_old
-        ):
-            tokenizer_source = str(candidate_old)
+        for candidate in _candidate_tokenizer_dirs(resolved_hf_model_dir):
+            if _looks_like_tokenizer_dir(candidate):
+                tokenizer_source = str(candidate)
+                break
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
     prompts = _normalize_texts(text)
 
@@ -265,17 +365,49 @@ def run_axon_test(
         model_cls = _load_generated_class(generated_py_path, class_name)
 
         tokenizer_obj = _load_tokenizer(tokenizer_source, fallback_repo_id=tokenizer_fallback)
-        hf_model: Any = AutoModelForCausalLM.from_pretrained(
-            str(resolved_hf_model_dir), local_files_only=True, dtype=resolved_dtype
+        state_dict: dict[str, torch.Tensor] | None = None
+        try:
+            hf_config = AutoConfig.from_pretrained(
+                str(resolved_hf_model_dir), local_files_only=True
+            )
+            hf_config = _normalize_rope_numeric_fields(hf_config)
+            hf_model: Any = AutoModelForCausalLM.from_pretrained(
+                str(resolved_hf_model_dir),
+                local_files_only=True,
+                dtype=resolved_dtype,
+                config=hf_config,
+            )
+            hf = hf_model.to(resolved_device).eval()
+        except Exception:
+            if not is_black_mamba_config_dir(resolved_hf_model_dir):
+                raise
+            state_dict = _load_state_dict(
+                safetensors_files,
+                device=resolved_device,
+                dtype=resolved_dtype,
+            )
+            hf = (
+                BlackMambaReferenceModel.from_state_dict(
+                    model_dir=resolved_hf_model_dir, state_dict=state_dict
+                )
+                .to(resolved_device)
+                .eval()
+            )
+        hf = _maybe_compile_model(
+            hf,
+            enabled=compile_hf,
+            backend=compile_backend,
+            mode=compile_mode,
+            fullgraph=compile_fullgraph,
+            dynamic=compile_dynamic,
         )
-        hf = hf_model.to(resolved_device).eval()
         if hasattr(hf, "generation_config"):
             hf.generation_config.do_sample = False
             hf.generation_config.top_p = None
             hf.generation_config.top_k = None
 
         if len(prompts) > 1:
-            tokenizer_obj.padding_side = "left"
+            tokenizer_obj.padding_side = _preferred_padding_side(lowered_spec)
             if tokenizer_obj.pad_token_id is None:
                 if tokenizer_obj.eos_token_id is None:
                     raise ValueError(
@@ -301,11 +433,7 @@ def run_axon_test(
         attention_mask = inputs.get("attention_mask")
         if attention_mask is not None:
             hf_inputs["attention_mask"] = attention_mask
-        use_mask_for_syn = bool(attention_mask is not None)
-        if use_mask_for_syn and len(prompts) == 1:
-            # Single unpadded prompt does not need an explicit mask on the Synapse side.
-            # Keeping it unset avoids extra per-step mask materialization in KV decode.
-            use_mask_for_syn = bool((attention_mask == 0).any())
+        use_mask_for_syn = bool(attention_mask is not None and syn_mask_key is not None)
 
         def _run_hf_generate(model: Any = hf) -> torch.Tensor:
             return model.generate(
@@ -356,12 +484,26 @@ def run_axon_test(
         del hf
         _cleanup(resolved_device)
 
-        state_dict = _load_state_dict(
-            safetensors_files,
-            device=resolved_device,
-            dtype=resolved_dtype,
-        )
+        if state_dict is None:
+            state_dict = _load_state_dict(
+                safetensors_files,
+                device=resolved_device,
+                dtype=resolved_dtype,
+            )
         syn = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
+        setattr(syn, "_hf_align_mask_contract", align_mask_contract)
+        setattr(syn, "_hf_align_position_ids", align_position_ids)
+        setattr(syn, "_hf_align_add_fp32_accum", align_add_fp32)
+        setattr(syn, "_hf_align_linear_fp32_accum", align_linear_fp32)
+        setattr(syn, "_hf_align_norm_fp32", align_norm_fp32)
+        syn = _maybe_compile_model(
+            syn,
+            enabled=compile_axon,
+            backend=compile_backend,
+            mode=compile_mode,
+            fullgraph=compile_fullgraph,
+            dynamic=compile_dynamic,
+        )
 
         def _run_syn_generate(model: Any = syn) -> torch.Tensor:
             generate_kwargs: dict[str, Any] = {
@@ -414,14 +556,23 @@ def run_axon_test(
         if syn_logits.device != hf_logits.device:
             syn_logits = syn_logits.to(hf_logits.device)
         diff = (syn_logits.float() - hf_logits.float()).abs()
+        rel_denom = torch.maximum(
+            torch.maximum(syn_logits.float().abs(), hf_logits.float().abs()),
+            torch.tensor(1.0e-12, device=diff.device, dtype=diff.dtype),
+        )
+        rel_diff = diff / rel_denom
         mean_diff = float(diff.mean())
         max_diff = float(diff.max())
         last_max_diff = float(diff[:, -1, :].max())
+        mean_rel_diff = float(rel_diff.mean())
+        max_rel_diff = float(rel_diff.max())
         top1_eq = bool((syn_logits[:, -1, :].argmax(-1) == hf_logits[:, -1, :].argmax(-1)).all())
 
         masked_mean_diff: float | None = None
         masked_max_diff: float | None = None
         masked_last_max_diff: float | None = None
+        masked_mean_rel_diff: float | None = None
+        masked_max_rel_diff: float | None = None
         masked_top1_eq: bool | None = None
         if attention_mask is not None:
             mask_bool = attention_mask.to(torch.bool)
@@ -429,11 +580,16 @@ def run_axon_test(
             valid_count = int(valid.sum().item())
             if valid_count > 0:
                 valid_diff = diff[valid]
+                valid_rel_diff = rel_diff[valid]
                 masked_mean_diff = float(valid_diff.mean())
                 masked_max_diff = float(valid_diff.max())
+                masked_mean_rel_diff = float(valid_rel_diff.mean())
+                masked_max_rel_diff = float(valid_rel_diff.max())
             else:
                 masked_mean_diff = 0.0
                 masked_max_diff = 0.0
+                masked_mean_rel_diff = 0.0
+                masked_max_rel_diff = 0.0
 
             attn_bool = attention_mask.to(torch.bool)
             rev_last = torch.argmax(attn_bool.flip(dims=[1]).to(torch.long), dim=1)
@@ -491,8 +647,21 @@ def run_axon_test(
         print(f"Weights input:  {weights_path}")
         print(f"HF model dir:   {resolved_hf_model_dir}")
         print(f"Tokenizer:      {tokenizer_source}")
+        print(f"Padding side:   {tokenizer_obj.padding_side}")
         print(f"Device:         {resolved_device}")
         print(f"Prompts:        {len(prompts)}")
+        print(f"HF-align bf16 profile: {bool(hf_align_bf16_profile)}")
+        print(f"HF-align mask:         {align_mask_contract}")
+        print(f"HF-align posid:        {align_position_ids}")
+        print(f"HF-align add fp32:     {align_add_fp32}")
+        print(f"HF-align linear fp32:  {align_linear_fp32}")
+        print(f"HF-align norm fp32:    {align_norm_fp32}")
+        print(f"Compile HF:            {bool(compile_hf)}")
+        print(f"Compile Axon:          {bool(compile_axon)}")
+        print(f"Compile backend:       {compile_backend}")
+        print(f"Compile mode:          {compile_mode}")
+        print(f"Compile fullgraph:     {bool(compile_fullgraph)}")
+        print(f"Compile dynamic:       {bool(compile_dynamic)}")
         print()
         print(
             f"HF:             {hf_time:.4f}s total, {gen_hf / max(hf_time, 1e-9):.2f} tok/s, generated={gen_hf}"
@@ -516,6 +685,11 @@ def run_axon_test(
             last_max_diff,
             top1_eq,
         )
+        print(
+            "Logits rel diff (raw) | mean/max:",
+            mean_rel_diff,
+            max_rel_diff,
+        )
         if attention_mask is not None:
             print(
                 "Logits diff (masked) | mean/max/last_max/top1_eq:",
@@ -523,6 +697,11 @@ def run_axon_test(
                 masked_max_diff,
                 masked_last_max_diff,
                 masked_top1_eq,
+            )
+            print(
+                "Logits rel diff (masked) | mean/max:",
+                masked_mean_rel_diff,
+                masked_max_rel_diff,
             )
         if trace_layers and layer_diffs:
             print()
@@ -552,12 +731,22 @@ def run_axon_test(
             "mean_diff": mean_diff,
             "max_diff": max_diff,
             "last_max_diff": last_max_diff,
+            "mean_rel_diff": mean_rel_diff,
+            "max_rel_diff": max_rel_diff,
             "top1_eq": top1_eq,
             "masked_mean_diff": masked_mean_diff,
             "masked_max_diff": masked_max_diff,
             "masked_last_max_diff": masked_last_max_diff,
+            "masked_mean_rel_diff": masked_mean_rel_diff,
+            "masked_max_rel_diff": masked_max_rel_diff,
             "masked_top1_eq": masked_top1_eq,
             "layer_diffs": layer_diffs if trace_layers else None,
+            "compile_hf": bool(compile_hf),
+            "compile_axon": bool(compile_axon),
+            "compile_backend": compile_backend,
+            "compile_mode": compile_mode,
+            "compile_fullgraph": bool(compile_fullgraph),
+            "compile_dynamic": bool(compile_dynamic),
             "prompts": prompts,
             "generated_hf": hf_gen,
             "generated_axon": syn_gen,

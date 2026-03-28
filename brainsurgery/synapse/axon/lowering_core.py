@@ -416,11 +416,6 @@ def _lower_simple_call(
         resolved_kwargs[key] = value
     kwargs = resolved_kwargs
 
-    # Canonicalize positional expert for the primitive MoE selector.
-    if callee == "_moe_select" and "expert" not in kwargs and len(args) >= 4:
-        kwargs["expert"] = args[3]
-        args = args[:3]
-
     is_absolute_path = "@@" in callee
     if is_absolute_path:
         callee = callee.replace("@@", "@", 1)
@@ -759,6 +754,36 @@ def _pipeline_temp_out(stage: str, ctx: _LowerCtx) -> str | list[str]:
     return [ctx.fresh("pipe") for _ in range(arity)]
 
 
+def _call_output_arity(expr: str, ctx: _LowerCtx) -> int | None:
+    if not _looks_like_call(expr):
+        return None
+    callee, _, kwargs = _parse_call(expr)
+    resolved = _resolve_block_call(callee, ctx)
+    if resolved is not None and ctx.block_signatures:
+        block_name, _ = resolved
+        _, output_names = ctx.block_signatures[block_name]
+        return len(output_names)
+
+    normalized = _canonical_op_name(callee)
+    op_arity = get_op_lowering_known_output_arity(normalized)
+    if callable(op_arity):
+        arity = op_arity(kwargs=kwargs)
+        if isinstance(arity, int):
+            return arity
+    return None
+
+
+def _expand_call_outputs_for_ternary(
+    call_expr: str, out: str | list[str], ctx: _LowerCtx
+) -> str | list[str]:
+    if not isinstance(out, list):
+        return out
+    arity = _call_output_arity(call_expr, ctx)
+    if not isinstance(arity, int) or arity <= len(out):
+        return out
+    return [*out, *[ctx.fresh("discard") for _ in range(arity - len(out))]]
+
+
 def _lower_expr(
     expr: str,
     out: str | list[str],
@@ -801,7 +826,8 @@ def _lower_expr(
             false_items = _tuple_items(false_expr)
             ternary_graph: list[dict[str, Any]] = []
             if len(true_items) == 1 and _looks_like_call(true_items[0]):
-                ternary_graph.extend(_lower_expr(true_items[0], out, ctx, when=cond))
+                ternary_out = _expand_call_outputs_for_ternary(true_items[0], out, ctx)
+                ternary_graph.extend(_lower_expr(true_items[0], ternary_out, ctx, when=cond))
             elif len(true_items) == len(out):
                 for name, item in zip(out, true_items, strict=True):
                     ternary_graph.extend(_lower_expr(item, name, ctx, when=cond))
@@ -809,7 +835,10 @@ def _lower_expr(
                 raise ValueError("ternary true-branch arity must match binding targets")
 
             if len(false_items) == 1 and _looks_like_call(false_items[0]):
-                ternary_graph.extend(_lower_expr(false_items[0], out, ctx, when=f"not ({cond})"))
+                ternary_out = _expand_call_outputs_for_ternary(false_items[0], out, ctx)
+                ternary_graph.extend(
+                    _lower_expr(false_items[0], ternary_out, ctx, when=f"not ({cond})")
+                )
             elif len(false_items) == len(out):
                 for name, item in zip(out, false_items, strict=True):
                     ternary_graph.extend(_lower_expr(item, name, ctx, when=f"not ({cond})"))
@@ -1163,6 +1192,8 @@ def lower_axon_module_to_synapse_spec(module: AxonModule) -> dict[str, Any]:
     }
     if module.symbols:
         model["symbols"] = dict(module.symbols)
+    if module.pragmas:
+        model["meta"] = dict(module.pragmas)
     return {
         "synapse": 1,
         "model": model,
@@ -1627,6 +1658,8 @@ def lower_axon_program_to_synapse_spec(
     model: dict[str, Any] = {"inputs": main_inputs, "graph": main_graph, "outputs": main_outputs}
     if main.symbols:
         model["symbols"] = dict(main.symbols)
+    if main.pragmas:
+        model["meta"] = dict(main.pragmas)
     spec: dict[str, Any] = {"synapse": 1, "model": model}
 
     blocks: dict[str, Any] = {}

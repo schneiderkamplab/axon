@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
 from torch.nn import functional as F
 
 OP_NAME = "layernorm"
@@ -92,7 +93,17 @@ def interpret(
     bias = model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="bias")]
     eps_value = model._eval_expr(node_spec.get("eps", 1e-5), env, symbols)
     out = model._require_name(node_spec.get("_bind"), field="layernorm._bind")
-    env[out] = F.layer_norm(x, (x.shape[-1],), weight=weight, bias=bias, eps=float(eps_value))
+    align_norm_fp32 = bool(getattr(model, "_hf_align_norm_fp32", False))
+    if align_norm_fp32 and x.is_floating_point() and x.dtype in {torch.float16, torch.bfloat16}:
+        env[out] = F.layer_norm(
+            x.float(),
+            (x.shape[-1],),
+            weight=weight.float(),
+            bias=bias.float(),
+            eps=float(eps_value),
+        ).to(dtype=x.dtype)
+    else:
+        env[out] = F.layer_norm(x, (x.shape[-1],), weight=weight, bias=bias, eps=float(eps_value))
     return
 
 
@@ -121,7 +132,14 @@ def compile(
     w = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'weight')})"
     b = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'bias')})"
     lines.append(
-        f"{indent}{out_var} = F.layer_norm({src}, ({src}.shape[-1],), weight={w}, bias={b}, eps=float({eps}))"
+        f"{indent}if getattr(self, '_hf_align_norm_fp32', False) and {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
+    )
+    lines.append(
+        f"{indent}    {out_var} = F.layer_norm({src}.float(), ({src}.shape[-1],), weight={w}.float(), bias={b}.float(), eps=float({eps})).to(dtype={src}.dtype)"
+    )
+    lines.append(f"{indent}else:")
+    lines.append(
+        f"{indent}    {out_var} = F.layer_norm({src}, ({src}.shape[-1],), weight={w}, bias={b}, eps=float({eps}))"
     )
     return lines
 

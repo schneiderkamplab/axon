@@ -148,11 +148,32 @@ def interpret(
         out_dim = int(weight.shape[-1]) if transpose else int(weight.shape[0])
         env[out] = x.new_empty((*x.shape[:-1], out_dim))
         return
-    if transpose:
-        y = torch.matmul(x, weight)
-        env[out] = y + bias if bias is not None else y
+    weight_run = weight
+    bias_run = bias
+    if x.is_floating_point() and weight_run.is_floating_point() and x.dtype != weight_run.dtype:
+        weight_run = weight_run.to(dtype=x.dtype)
+        if bias_run is not None and bias_run.is_floating_point() and bias_run.dtype != x.dtype:
+            bias_run = bias_run.to(dtype=x.dtype)
+
+    align_linear_fp32 = bool(getattr(model, "_hf_align_linear_fp32_accum", False))
+    if align_linear_fp32 and x.is_floating_point() and x.dtype in {torch.float16, torch.bfloat16}:
+        if transpose:
+            y_fp32 = torch.matmul(x.float(), weight_run.float())
+            if bias_run is not None:
+                y_fp32 = y_fp32 + bias_run.float()
+            env[out] = y_fp32.to(dtype=x.dtype)
+        else:
+            env[out] = F.linear(
+                x.float(),
+                weight_run.float(),
+                bias_run.float() if bias_run is not None else None,
+            ).to(dtype=x.dtype)
     else:
-        env[out] = F.linear(x, weight, bias)
+        if transpose:
+            y = torch.matmul(x, weight_run)
+            env[out] = y + bias_run if bias_run is not None else y
+        else:
+            env[out] = F.linear(x, weight_run, bias_run)
 
 
 def compile(
@@ -199,18 +220,51 @@ def compile(
                 f"else ({bias_expr}))"
             )
     out_dim_expr = f"{selected_weight}.shape[-1]" if transpose else f"{selected_weight}.shape[0]"
+    weight_var = emitter._fresh("weight")
+    bias_var = emitter._fresh("bias")
+    weight_run_var = emitter._fresh("weight_run")
+    bias_run_var = emitter._fresh("bias_run")
 
+    lines.append(f"{indent}{weight_var} = {selected_weight}")
+    lines.append(f"{indent}{bias_var} = {selected_bias}")
+    lines.append(f"{indent}{weight_run_var} = {weight_var}")
+    lines.append(f"{indent}{bias_run_var} = {bias_var}")
+    lines.append(
+        f"{indent}if torch.is_tensor({src}) and torch.is_tensor({weight_run_var}) and {src}.is_floating_point() and {weight_run_var}.is_floating_point() and {src}.dtype != {weight_run_var}.dtype:"
+    )
+    lines.append(f"{indent}    {weight_run_var} = {weight_run_var}.to(dtype={src}.dtype)")
+    lines.append(
+        f"{indent}    if {bias_run_var} is not None and torch.is_tensor({bias_run_var}) and {bias_run_var}.is_floating_point() and {bias_run_var}.dtype != {src}.dtype:"
+    )
+    lines.append(f"{indent}        {bias_run_var} = {bias_run_var}.to(dtype={src}.dtype)")
     lines.append(f"{indent}if {src}.numel() == 0:")
     lines.append(
         f"{indent}    {out_var} = {src}.new_empty((*{src}.shape[:-1], int({out_dim_expr})))"
     )
     lines.append(f"{indent}else:")
+    lines.append(
+        f"{indent}    if getattr(self, '_hf_align_linear_fp32_accum', False) and {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
+    )
     if transpose:
-        lines.append(f"{indent}    {out_var} = torch.matmul({src}, {selected_weight})")
-        lines.append(f"{indent}    if {selected_bias} is not None:")
-        lines.append(f"{indent}        {out_var} = {out_var} + {selected_bias}")
+        lines.append(
+            f"{indent}        {out_var} = torch.matmul({src}.float(), {weight_run_var}.float())"
+        )
+        lines.append(f"{indent}        if {bias_run_var} is not None:")
+        lines.append(f"{indent}            {out_var} = {out_var} + {bias_run_var}.float()")
+        lines.append(f"{indent}        {out_var} = {out_var}.to(dtype={src}.dtype)")
     else:
-        lines.append(f"{indent}    {out_var} = F.linear({src}, {selected_weight}, {selected_bias})")
+        lines.append(
+            f"{indent}        {out_var} = F.linear({src}.float(), {weight_run_var}.float(), {bias_run_var}.float() if {bias_run_var} is not None else None).to(dtype={src}.dtype)"
+        )
+    lines.append(f"{indent}    else:")
+    if transpose:
+        lines.append(f"{indent}        {out_var} = torch.matmul({src}, {weight_run_var})")
+        lines.append(f"{indent}        if {bias_run_var} is not None:")
+        lines.append(f"{indent}            {out_var} = {out_var} + {bias_run_var}")
+    else:
+        lines.append(
+            f"{indent}        {out_var} = F.linear({src}, {weight_run_var}, {bias_run_var})"
+        )
 
     return lines
 

@@ -21,6 +21,33 @@ def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int:
     return 3
 
 
+def lowering_validate_signature(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, kwargs, ctx
+    if not isinstance(out, list) or len(out) != 3:
+        raise ValueError("cache_update requires exactly three outputs: k_ctx, v_ctx, present")
+
+
+def lowering_infer_metadata(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> bool:
+    del kwargs
+    if not isinstance(out, list) or len(out) != 3 or len(args) < 3:
+        return False
+    k_source = str(args[1]).strip()
+    v_source = str(args[2]).strip()
+    if k_source in ctx.tensor_last_dim:
+        ctx.tensor_last_dim[out[0]] = ctx.tensor_last_dim[k_source]
+    if v_source in ctx.tensor_last_dim:
+        ctx.tensor_last_dim[out[1]] = ctx.tensor_last_dim[v_source]
+    if k_source in ctx.tensor_shape:
+        ctx.tensor_shape[out[0]] = ctx.tensor_shape[k_source]
+    if v_source in ctx.tensor_shape:
+        ctx.tensor_shape[out[1]] = ctx.tensor_shape[v_source]
+    return True
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -64,9 +91,6 @@ def compile(
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
 
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
-
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
@@ -97,6 +121,8 @@ __all__ = [
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
     "lowering_known_output_arity",
+    "lowering_validate_signature",
+    "lowering_infer_metadata",
     "interpret",
     "compile",
     "uses_node_path",

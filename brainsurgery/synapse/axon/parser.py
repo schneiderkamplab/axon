@@ -31,6 +31,9 @@ _PATH_SIG_SHORT_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)$")
 _IMPORT_RE = re.compile(rf"^import\s+({_MOD_NAME_RE})(?:\s+(.*))?$")
 _IMPORT_MEMBER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SIMPLE_CALLEE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:.@]*$")
+_PADDING_SIDE_PRAGMA_RE = re.compile(
+    r"""^\{-#\s*PADDING_SIDE\s+(['"])(left|right)\1\s*#-\}\s*$""", re.IGNORECASE
+)
 
 
 def _strip_haskell_comment(line: str) -> str:
@@ -137,6 +140,28 @@ def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str,
     return body, constants
 
 
+def _extract_top_level_pragmas(lines: list[str]) -> tuple[list[str], dict[str, object]]:
+    body: list[str] = []
+    pragmas: dict[str, object] = {}
+    for line in lines:
+        if len(line) != len(line.lstrip(" ")):
+            body.append(line)
+            continue
+        stripped = line.strip()
+        padding_match = _PADDING_SIDE_PRAGMA_RE.match(stripped)
+        if padding_match is not None:
+            value = padding_match.group(2).lower()
+            prev = pragmas.get("padding_side")
+            if prev is not None and prev != value:
+                raise ValueError(
+                    "conflicting PADDING_SIDE pragmas; expected a single consistent value"
+                )
+            pragmas["padding_side"] = value
+            continue
+        body.append(line)
+    return body, pragmas
+
+
 def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> AxonModule:
     if not symbols:
         return module
@@ -153,6 +178,29 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
         imports=module.imports,
         imported_members=module.imported_members,
         symbols=merged,
+        pragmas=module.pragmas,
+        return_type_expr=module.return_type_expr,
+        return_shape=module.return_shape,
+    )
+
+
+def _inject_pragmas(module: AxonModule, pragmas: dict[str, object]) -> AxonModule:
+    if not pragmas:
+        return module
+    merged: dict[str, object] = dict(pragmas)
+    if module.pragmas:
+        merged.update({str(k): v for k, v in module.pragmas.items()})
+    return AxonModule(
+        name=module.name,
+        path_param=module.path_param,
+        path_params=module.path_params,
+        params=module.params,
+        returns=module.returns,
+        statements=module.statements,
+        imports=module.imports,
+        imported_members=module.imported_members,
+        symbols=module.symbols,
+        pragmas=merged,
         return_type_expr=module.return_type_expr,
         return_shape=module.return_shape,
     )
@@ -363,7 +411,8 @@ def _parse_haskell_header(
 
 
 def parse_axon_module(source: str) -> AxonModule:
-    lines, top_constants = _extract_top_level_constants(_normalized_source_lines(source))
+    lines, top_pragmas = _extract_top_level_pragmas(_normalized_source_lines(source))
+    lines, top_constants = _extract_top_level_constants(lines)
     lines, imports, imported_members = _extract_top_level_imports(lines)
     if not lines:
         raise ValueError("empty Axon source")
@@ -395,9 +444,11 @@ def parse_axon_module(source: str) -> AxonModule:
             imports=imports,
             imported_members=imported_members or None,
             symbols=None,
+            pragmas=None,
             return_type_expr=return_type_expr,
             return_shape=return_shape,
         )
+        module = _inject_pragmas(module, top_pragmas)
         module = _inject_symbols_meta(module, annotation_symbols)
         return _inject_symbols_meta(module, top_constants)
 
@@ -413,6 +464,7 @@ def parse_axon_module(source: str) -> AxonModule:
             imports=imports,
             imported_members=imported_members or None,
             symbols=top_constants if top_constants else None,
+            pragmas=top_pragmas if top_pragmas else None,
             return_type_expr=return_type_expr,
             return_shape=return_shape,
         )
@@ -431,9 +483,11 @@ def parse_axon_module(source: str) -> AxonModule:
         imports=imports,
         imported_members=imported_members or None,
         symbols=None,
+        pragmas=None,
         return_type_expr=return_type_expr,
         return_shape=return_shape,
     )
+    module = _inject_pragmas(module, top_pragmas)
     module = _inject_symbols_meta(module, annotation_symbols)
     return _inject_symbols_meta(module, top_constants)
 
@@ -545,7 +599,8 @@ def _parse_statements(
 
 
 def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
-    raw_lines, top_constants = _extract_top_level_constants(_normalized_source_lines(source))
+    raw_lines, top_pragmas = _extract_top_level_pragmas(_normalized_source_lines(source))
+    raw_lines, top_constants = _extract_top_level_constants(raw_lines)
     raw_lines, top_imports, top_imported_members = _extract_top_level_imports(raw_lines)
     module_starts: list[int] = []
     for idx, line in enumerate(raw_lines):
@@ -581,10 +636,12 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
                 imports=merged_imports,
                 imported_members=merged_imported_members or None,
                 symbols=module.symbols,
+                pragmas=module.pragmas,
                 return_type_expr=module.return_type_expr,
                 return_shape=module.return_shape,
             )
         )
+        modules[-1] = _inject_pragmas(modules[-1], top_pragmas)
     if modules:
         modules[-1] = _inject_symbols_meta(modules[-1], top_constants)
     return tuple(modules)
@@ -625,6 +682,7 @@ def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
                     imports=module.imports,
                     imported_members=module.imported_members,
                     symbols=module.symbols,
+                    pragmas=module.pragmas,
                     return_type_expr=module.return_type_expr,
                     return_shape=module.return_shape,
                 )

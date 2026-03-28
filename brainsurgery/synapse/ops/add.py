@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
+
 OP_NAME = "add"
 LOWERING_ARITY = (2, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
@@ -83,7 +85,20 @@ def interpret(
     if not isinstance(inputs, list) or len(inputs) != 2:
         raise ValueError("add expects two inputs")
     out = model._require_name(node_spec.get("_bind"), field="add._bind")
-    env[out] = env[inputs[0]] + env[inputs[1]]
+    left = env[inputs[0]]
+    right = env[inputs[1]]
+    align_add_fp32 = bool(getattr(model, "_hf_align_add_fp32_accum", False))
+    if align_add_fp32 and (
+        torch.is_tensor(left)
+        and torch.is_tensor(right)
+        and left.is_floating_point()
+        and right.is_floating_point()
+        and left.dtype == right.dtype
+        and left.dtype in {torch.float16, torch.bfloat16}
+    ):
+        env[out] = (left.float() + right.float()).to(dtype=left.dtype)
+    else:
+        env[out] = left + right
     return
 
 
@@ -114,7 +129,12 @@ def compile(
     b = read(str(inputs[1]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    lines.append(f"{indent}{out_var} = {a} + {b}")
+    lines.append(
+        f"{indent}if getattr(self, '_hf_align_add_fp32_accum', False) and torch.is_tensor({a}) and torch.is_tensor({b}) and {a}.is_floating_point() and {b}.is_floating_point() and {a}.dtype == {b}.dtype and {a}.dtype in {{torch.float16, torch.bfloat16}}:"
+    )
+    lines.append(f"{indent}    {out_var} = ({a}.float() + {b}.float()).to(dtype={a}.dtype)")
+    lines.append(f"{indent}else:")
+    lines.append(f"{indent}    {out_var} = {a} + {b}")
     return lines
 
 
