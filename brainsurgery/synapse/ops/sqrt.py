@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-OP_NAME = "cache_seq_len"
+OP_NAME = "sqrt"
 LOWERING_ARITY = (1, 1)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
@@ -21,7 +21,7 @@ def lowering_validate_signature(
 ) -> None:
     del args, kwargs, ctx
     if not isinstance(out, str):
-        raise ValueError("cache_seq_len requires a single scalar output binding")
+        raise ValueError("sqrt requires a single scalar output binding")
 
 
 def interpret(
@@ -33,18 +33,16 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    ref = node_spec.get("_args")
-    out_name = model._require_name(node_spec.get("_bind"), field="cache_seq_len._bind")
-    if not isinstance(ref, str):
-        raise ValueError("cache_seq_len.in must be a string")
-    value = env.get(ref)
-    if value is None:
-        env[out_name] = 0
+    del node_path, scope
+    src_value = model._eval_expr(node_spec.get("_args"), env, symbols)
+    out = model._require_name(node_spec.get("_bind"), field="sqrt._bind")
+    if torch.is_tensor(src_value):
+        env[out] = torch.sqrt(src_value)
         return
-    if not isinstance(value, tuple) or len(value) < 1 or not torch.is_tensor(value[0]):
-        raise ValueError("cache_seq_len expects kv tuple (k, v)")
-    env[out_name] = int(value[0].shape[-2])
-    return
+    scalar = float(src_value)
+    if scalar < 0.0:
+        raise ValueError("sqrt expects non-negative scalar input")
+    env[out] = scalar**0.5
 
 
 def compile(
@@ -56,31 +54,27 @@ def compile(
     scope_var: str,
     indent: str,
 ) -> list[str]:
+    del node_path_var, scope_var
     lines: list[str] = []
-
-    def assign_out_var(out_name: str) -> str:
-        return emitter._assign_out_var(env, out_name)
-
-    def read(name: str) -> str:
-        return emitter._read_env_var(env, name)
-
-    ref = node_spec.get("_args")
-    if not isinstance(ref, str):
-        raise ValueError("cache_seq_len.in must be string")
-    out_name = str(node_spec.get("_bind"))
-    out_var = assign_out_var(out_name)
-    src = read(ref)
-    lines.append(f"{indent}if {src} is None:")
-    lines.append(f"{indent}    {out_var} = 0")
+    src = emitter._expr_code(node_spec.get("_args"), env)
+    out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
+    src_val = emitter._fresh("sqrt_src")
+    scalar_val = emitter._fresh("sqrt_scalar")
+    lines.append(f"{indent}{src_val} = {src}")
+    lines.append(f"{indent}if torch.is_tensor({src_val}):")
+    lines.append(f"{indent}    {out_var} = torch.sqrt({src_val})")
     lines.append(f"{indent}else:")
-    lines.append(f"{indent}    {out_var} = int({src}[0].shape[-2])")
+    lines.append(f"{indent}    {scalar_val} = float({src_val})")
+    lines.append(f"{indent}    if {scalar_val} < 0.0:")
+    lines.append(f"{indent}        raise ValueError('sqrt expects non-negative scalar input')")
+    lines.append(f"{indent}    {out_var} = {scalar_val} ** 0.5")
     return lines
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
+    "args": ("Float",),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": ("Int",),
+    "returns": ("Float",),
 }
 
 __all__ = [
