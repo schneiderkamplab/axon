@@ -1,8 +1,7 @@
-<p align="center">
-  <img src="docs/logos/axon-logo.png" alt="axon" width="250" />
-</p>
-
-<h1 align="center"><code>axon</code></h1>
+<h1 align="center">
+  <img src="docs/logos/axon-logo.png" alt="axon" width="250" /><br/>
+  <code>axon</code>
+</h1>
 
 <p align="center">
   A typed declarative DSL and compiler for neural network model definitions.<br/>
