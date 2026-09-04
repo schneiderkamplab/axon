@@ -1,3 +1,8 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+</style>
+
+
 <p align="center">
   <img src="docs/logos/axon-logo.png" alt="axon" width="480" />
 </p>
@@ -6,7 +11,6 @@
 
 <p align="center">
   A typed declarative DSL and compiler for neural network model definitions.<br/>
-  Parse → Resolve → Normalize → Elaborate → Flatten → Typecheck → Graph IR → Optimize → Codegen
 </p>
 
 ---
@@ -341,5 +345,5 @@ MIT
 </p>
 
 <p align="center">
-  Created by <a href="https://github.com/ordbogen">OdenseNLP</a>
+  Created by <a href="https://odensenlp.github.io">OdenseNLP</a>
 </p>
