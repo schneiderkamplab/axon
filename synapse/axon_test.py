@@ -37,7 +37,11 @@ from transformers import (
 )
 from transformers.generation import GenerationConfig, GenerationMixin
 from transformers.utils import import_utils as transformers_import_utils
-from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
+try:
+    from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
+except ImportError:
+    FineGrainedFP8Config = None  # type: ignore[assignment,misc]
+    Mxfp4Config = None  # type: ignore[assignment,misc]
 
 from .axon import (
     candidate_tokenizer_dirs,
