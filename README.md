@@ -1,13 +1,13 @@
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
 </style>
 
 
 <p align="center">
-  <img src="docs/logos/axon-logo.png" alt="axon" width="480" />
+  <img src="docs/logos/axon-logo.png" alt="axon" width="300" />
 </p>
 
-<h3 align="center">axon</h3>
+<h3 align="center" style="font-family: 'Roboto Mono', monospace; font-size: 3rem;">axon</h3>
 
 <p align="center">
   A typed declarative DSL and compiler for neural network model definitions.<br/>
