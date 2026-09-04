@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 import torch
 
-import brainsurgery.synapse.axon.tokenization as tokenization
-from brainsurgery.synapse.axon import (
+import synapse.axon.tokenization as tokenization
+from synapse.axon import (
     candidate_tokenizer_dirs,
     preferred_padding_side,
     spec_padding_side,

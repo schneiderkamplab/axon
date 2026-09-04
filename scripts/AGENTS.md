@@ -10,7 +10,7 @@ Wiki memory for scripts: `../wiki/AGENTS.md` and `../wiki/scripts.md`
 
 ## Benchmark Execution Conventions
 
-- Canonical runner: `brainsurgery synapse axon-benchmark`.
+- Canonical runner: `synapse axon-benchmark`.
 - All new benchmark/run artifacts go under repo-root `log/`.
   - Use `--log-dir log/<run-id>`.
   - Use `--stream-csv log/<run-id>/stream.csv` when streaming CSV.
@@ -46,7 +46,7 @@ Wiki memory for scripts: `../wiki/AGENTS.md` and `../wiki/scripts.md`
 - Reusable generic rematerialization helper:
   - `scripts/rematerialize_all_generic.sh`
 - Purpose:
-  - Re-materialize all `generic-*.axon` model files under `brainsurgery/synapse/models`.
+  - Re-materialize all `generic-*.axon` model files under `synapse/models`.
 - Usage:
   - `scripts/rematerialize_all_generic.sh [PARALLEL] [MODELS_ROOT]`
   - defaults: `PARALLEL=8`, `MODELS_ROOT=models`
@@ -65,4 +65,4 @@ Wiki memory for scripts: `../wiki/AGENTS.md` and `../wiki/scripts.md`
 
 - Safe refactors and ergonomics updates are allowed.
 - Behavioral changes to benchmark semantics require a short note in `wiki/log.md`.
-- If script changes imply main package behavior changes, request approval before touching `brainsurgery/*`.
+- If script changes imply main package behavior changes, request approval before touching `synapse/*`.

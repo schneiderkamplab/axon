@@ -16,12 +16,12 @@ from tempfile import TemporaryDirectory
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING)
-logging.getLogger("brainsurgery").setLevel(logging.ERROR)
+logging.getLogger("synapse").setLevel(logging.ERROR)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 if "--gemma4-e2b" in sys.argv:
-    AXON_FILE = REPO_ROOT / "brainsurgery" / "synapse" / "models" / "gemma4" / "gemma-4-E2B.axon"
+    AXON_FILE = REPO_ROOT / "synapse" / "models" / "gemma4" / "gemma-4-E2B.axon"
     WEIGHTS_DIR = REPO_ROOT / "models" / "gemma-4-E2B"
     MODEL_NAME = "Gemma-4-E2B"
     KEY_FILTER = "model.language_model."
@@ -34,7 +34,7 @@ if "--gemma4-e2b" in sys.argv:
     EQ_PROMPT_LEN = 16
     EQ_GEN_STEPS = 16
 elif "--gemma3" in sys.argv:
-    AXON_FILE = REPO_ROOT / "brainsurgery" / "synapse" / "models" / "gemma3" / "gemma-3-270m.axon"
+    AXON_FILE = REPO_ROOT / "synapse" / "models" / "gemma3" / "gemma-3-270m.axon"
     WEIGHTS_DIR = REPO_ROOT / "models" / "gemma-3-270m"
     MODEL_NAME = "Gemma-3-270M"
     KEY_FILTER = None
@@ -47,7 +47,7 @@ elif "--gemma3" in sys.argv:
     EQ_PROMPT_LEN = 16
     EQ_GEN_STEPS = 16
 else:
-    AXON_FILE = REPO_ROOT / "brainsurgery" / "synapse" / "models" / "gpt2" / "gpt2.axon"
+    AXON_FILE = REPO_ROOT / "synapse" / "models" / "gpt2" / "gpt2.axon"
     WEIGHTS_DIR = REPO_ROOT / "models" / "gpt2"
     if not (WEIGHTS_DIR / "model.safetensors").exists():
         WEIGHTS_DIR = REPO_ROOT / "models" / "openai-community" / "gpt2"
@@ -95,7 +95,7 @@ def _load_model_config(model_dir: Path) -> dict:
 
 def compile_and_load(backend: str, tmp_dir: Path):
     """Compile axon → graph IR → codegen → load model class + state dict."""
-    from brainsurgery.synapse.axon import (
+    from synapse.axon import (
         elaborate_closed_axon_file,
         flatten_closed_axon_file,
         lower_axon_program_to_graph_ir,
@@ -105,15 +105,15 @@ def compile_and_load(backend: str, tmp_dir: Path):
         typecheck2_flat_axon_file,
         GraphOptimizeConfig,
     )
-    from brainsurgery.synapse.axon.codegen2_torch import (
+    from synapse.axon.codegen2_torch import (
         emit_model_code_from_graph_ir as emit_torch,
         graph_main_output_names,
     )
-    from brainsurgery.synapse.axon.codegen2_mlx import (
+    from synapse.axon.codegen2_mlx import (
         emit_model_code_from_graph_ir as emit_mlx,
     )
     try:
-        from brainsurgery.synapse.axon.codegen2_triton import (
+        from synapse.axon.codegen2_triton import (
             emit_model_code_from_graph_ir as emit_triton,
         )
     except ImportError:

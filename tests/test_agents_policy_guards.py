@@ -5,8 +5,8 @@ from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODELS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "models"
-BUILTINS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "builtins"
+MODELS_DIR = REPO_ROOT / "synapse" / "models"
+BUILTINS_DIR = REPO_ROOT / "synapse" / "builtins"
 
 
 def _model_family_names() -> set[str]:
@@ -19,15 +19,15 @@ def _model_family_names() -> set[str]:
 
 def _restricted_files() -> list[Path]:
     out: list[Path] = []
-    out.extend((REPO_ROOT / "brainsurgery" / "synapse" / "axon").rglob("*.py"))
-    out.extend((REPO_ROOT / "brainsurgery" / "synapse" / "ops").glob("*.py"))
+    out.extend((REPO_ROOT / "synapse" / "axon").rglob("*.py"))
+    out.extend((REPO_ROOT / "synapse" / "ops").glob("*.py"))
     return out
 
 
 def test_no_model_family_conditionals_in_restricted_layers() -> None:
     families = _model_family_names()
     allowlisted = {
-        REPO_ROOT / "brainsurgery" / "synapse" / "axon" / "tokenization.py",
+        REPO_ROOT / "synapse" / "axon" / "tokenization.py",
     }
     conditionish = re.compile(r"(==|!=|startswith\(|endswith\(|\bin\s*\{)")
     quoted = re.compile(r'"([A-Za-z0-9_\-]+)"|\'([A-Za-z0-9_\-]+)\'')

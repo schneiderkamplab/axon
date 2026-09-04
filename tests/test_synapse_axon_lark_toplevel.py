@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     AxonExprName,
     AxonExprPipe,
     AxonExprTuple,
@@ -17,13 +17,13 @@ from brainsurgery.synapse.axon.ast import (
     render_axon_file,
     render_type,
 )
-from brainsurgery.synapse.axon.parse import (
+from synapse.axon.parse import (
     parse_axon_program,
     parse_axon_program_from_path,
     parse_surface_program_source,
 )
-from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.validate import validate_closed_axon_file
+from synapse.axon.resolve import resolve_axon_program_from_path
+from synapse.axon.validate import validate_closed_axon_file
 
 
 def test_parse_program_source_extracts_signature_type() -> None:
@@ -291,7 +291,7 @@ main x = x |> Math.exp
 
 
 def test_parse_render_parse_roundtrip_gpt2_ast_equal(tmp_path: Path) -> None:
-    src = Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
+    src = Path("synapse/models/gpt2/gpt2.axon")
     original = parse_axon_program_from_path(src)
     rendered_path = tmp_path / "gpt2-roundtrip.axon"
     rendered_path.write_text(render_axon_file(original), encoding="utf-8")

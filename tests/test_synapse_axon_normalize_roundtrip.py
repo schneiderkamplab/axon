@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     AxonBind,
     AxonExprAscribe,
     AxonExprBool,
@@ -20,14 +20,14 @@ from brainsurgery.synapse.axon.ast import (
     TypeTensor,
     TypeVar,
 )
-from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
-from brainsurgery.synapse.axon.parse import parse_axon_program
-from brainsurgery.synapse.axon.validate import validate_normalized_axon_file
+from synapse.axon.normalize import normalize_closed_axon_file
+from synapse.axon.parse import parse_axon_program
+from synapse.axon.validate import validate_normalized_axon_file
 from scripts.axon_normalize_weak_roundtrip import normalize_weak_roundtrip_path
 
 
 def _model_axon_paths() -> list[Path]:
-    return sorted(Path("brainsurgery/synapse/models").glob("**/*.axon"))
+    return sorted(Path("synapse/models").glob("**/*.axon"))
 
 
 @pytest.mark.parametrize("axon_path", _model_axon_paths(), ids=lambda path: path.as_posix())

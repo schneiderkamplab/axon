@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import tests.conftest as test_fixtures
-from brainsurgery.synapse.axon_test_matrix import run_axon_test_matrix
+from synapse.axon_test_matrix import run_axon_test_matrix
 from tests.model_downloads import MATRIX_AXON_MODEL_DIR_PAIRS, MODEL_SPECS
 
 

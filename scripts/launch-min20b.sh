@@ -3,8 +3,8 @@
 set -euo pipefail
 
 OMP_NUM_THREADS=64 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-brainsurgery synapse axon-benchmark \
-  brainsurgery/synapse/models \
+synapse axon-benchmark \
+  synapse/models \
   --device cuda \
   --processes 1 \
   --axon-backend pipeline2-torch \

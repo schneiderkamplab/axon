@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse import run_axon_test
+from synapse import run_axon_test
 from tests.test_flags import LONG_TEST_ENV, run_long_tests_enabled
 
 _RUN_PERF_SMOKE = run_long_tests_enabled()

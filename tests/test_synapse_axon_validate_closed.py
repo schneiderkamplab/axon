@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import AxonExprName, AxonFile, AxonDefinition
-from brainsurgery.synapse.axon.entrypoint import resolve_main_module
-from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
-from brainsurgery.synapse.axon.parse import parse_axon_program, parse_axon_program_from_path
-from brainsurgery.synapse.axon.resolve import prune_unreachable_definitions, resolve_axon_program_from_path
-from brainsurgery.synapse.axon.validate import validate_closed_axon_file
+from synapse.axon.ast import AxonExprName, AxonFile, AxonDefinition
+from synapse.axon.entrypoint import resolve_main_module
+from synapse.axon.normalize import normalize_closed_axon_file
+from synapse.axon.parse import parse_axon_program, parse_axon_program_from_path
+from synapse.axon.resolve import prune_unreachable_definitions, resolve_axon_program_from_path
+from synapse.axon.validate import validate_closed_axon_file
 
 
 def _resolved_from_tmp_source(tmp_path: Path, source: str) -> AxonFile:

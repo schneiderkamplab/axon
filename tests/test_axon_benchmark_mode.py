@@ -1,6 +1,6 @@
 import pytest
 
-from brainsurgery.synapse.axon_test import (
+from synapse.axon_test import (
     _resolve_benchmark_mode,
     _should_generate_for_benchmark,
 )

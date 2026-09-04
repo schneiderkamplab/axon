@@ -7,7 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from brainsurgery.synapse.axon import (
+from synapse.axon import (
     flatten_closed_axon_file,
     elaborate_closed_axon_file,
     normalize_closed_axon_file,
@@ -15,14 +15,14 @@ from brainsurgery.synapse.axon import (
     resolve_axon_program_from_path,
     typecheck2_flat_axon_file,
 )
-from brainsurgery.synapse.axon.validate import validate_typed_axon_file
+from synapse.axon.validate import validate_typed_axon_file
 
 
 _BARE_CACHE_RE = re.compile(r"\??CacheLayer(?!\[)|\??Cache(?!\[|Layer)\b")
 
 
 def _default_paths() -> list[Path]:
-    roots = [Path("brainsurgery/synapse/builtins"), Path("brainsurgery/synapse/models")]
+    roots = [Path("synapse/builtins"), Path("synapse/models")]
     return [path for root in roots for path in sorted(root.rglob("*.axon"))]
 
 

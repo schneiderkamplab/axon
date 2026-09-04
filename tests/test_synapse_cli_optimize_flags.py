@@ -4,11 +4,11 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from brainsurgery import app
+from synapse.cli.synapse import app
 
 
 def _help(command: str) -> str:
-    result = CliRunner(env={"COLUMNS": "240"}).invoke(app, ["synapse", command, "--help"])
+    result = CliRunner(env={"COLUMNS": "240"}).invoke(app, [command, "--help"])
     assert result.exit_code == 0, result.output
     return result.output
 
@@ -41,7 +41,6 @@ main x = do
     result = CliRunner().invoke(
         app,
         [
-            "synapse",
             "axon-stage-dump",
             str(source),
             str(output),
@@ -78,7 +77,6 @@ main x = do
     result = CliRunner().invoke(
         app,
         [
-            "synapse",
             "axon-codegen-dump",
             str(source),
             str(output),
@@ -114,7 +112,6 @@ main x = do
     result = CliRunner().invoke(
         app,
         [
-            "synapse",
             "axon-codegen-dump",
             str(source),
             str(output),

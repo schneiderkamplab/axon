@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     AxonBind,
     AxonCond,
     AxonExpr,
@@ -35,12 +35,12 @@ from brainsurgery.synapse.axon.ast import (
     ast_equal,
     render_axon_file,
 )
-from brainsurgery.synapse.axon.elaborate import elaborate_closed_axon_file
-from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
-from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
-from brainsurgery.synapse.axon.parse import parse_axon_program
-from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.validate import validate_flat_axon_file
+from synapse.axon.elaborate import elaborate_closed_axon_file
+from synapse.axon.flatten import flatten_closed_axon_file
+from synapse.axon.normalize import normalize_closed_axon_file
+from synapse.axon.parse import parse_axon_program
+from synapse.axon.resolve import resolve_axon_program_from_path
+from synapse.axon.validate import validate_flat_axon_file
 
 
 def _flatten(program, *, main_module: str):
@@ -296,7 +296,7 @@ main x = do
 
 def test_flatten_threads_loop_scope_into_called_module_paths() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     flat = _flatten(resolved, main_module="gpt2")
     validate_flat_axon_file(flat, main_module="gpt2")

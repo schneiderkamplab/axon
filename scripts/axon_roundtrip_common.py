@@ -26,7 +26,7 @@ class RoundtripResult:
 
 
 def default_axon_paths() -> list[Path]:
-    roots = [Path("brainsurgery/synapse/builtins"), Path("brainsurgery/synapse/models")]
+    roots = [Path("synapse/builtins"), Path("synapse/models")]
     return [path for root in roots for path in sorted(root.rglob("*.axon"))]
 
 

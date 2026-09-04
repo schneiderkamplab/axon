@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from brainsurgery.synapse import run_axon_benchmark
+from synapse import run_axon_benchmark
 
 LOG_DIR = Path("log/gemma4-31b-test-axon-vs-hf")
 
@@ -13,7 +13,7 @@ def main() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     run_axon_benchmark(
         axon_files=[
-            Path("brainsurgery/synapse/models/gemma4/Gemma4-Dense-Test.axon"),
+            Path("synapse/models/gemma4/Gemma4-Dense-Test.axon"),
         ],
         device="cuda",
         processes=1,

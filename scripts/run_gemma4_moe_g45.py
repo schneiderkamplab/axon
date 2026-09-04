@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from brainsurgery.synapse import run_axon_benchmark
+from synapse import run_axon_benchmark
 
 
 def main() -> None:
     log_dir = Path("log-gemma4-moe-derived-experts-g45")
     run_axon_benchmark(
         axon_files=[
-            Path("brainsurgery/synapse/models/gemma4/generic-gemma-4-moe.axon"),
-            Path("brainsurgery/synapse/models/gemma4/gemma-4-26B-A4B.axon"),
+            Path("synapse/models/gemma4/generic-gemma-4-moe.axon"),
+            Path("synapse/models/gemma4/gemma-4-26B-A4B.axon"),
         ],
         device="cuda",
         processes=2,

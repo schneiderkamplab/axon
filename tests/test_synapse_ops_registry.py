@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from brainsurgery.synapse.ops import OP_MODULES, get_op_module
+from synapse.ops import OP_MODULES, get_op_module
 
 
 def test_synapse_ops_registry_discovery_has_expected_core_ops() -> None:

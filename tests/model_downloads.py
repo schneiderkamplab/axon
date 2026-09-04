@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse import matrix_models as _matrix_models
+from synapse import matrix_models as _matrix_models
 
 MATRIX_AXON_MODEL_DIRS = _matrix_models.MATRIX_AXON_MODEL_DIRS
 MATRIX_AXON_MODEL_DIR_PAIRS = _matrix_models.MATRIX_AXON_MODEL_DIR_PAIRS

@@ -8,12 +8,12 @@ from typing import Any
 import pytest
 import torch
 
-from brainsurgery.synapse.axon_benchmark import run_axon_benchmark
+from synapse.axon_benchmark import run_axon_benchmark
 from tests.test_flags import LONG_TEST_ENV, run_long_tests_enabled
 
 
 def _generic_axon_paths(repo_root: Path) -> list[Path]:
-    return sorted((repo_root / "brainsurgery" / "synapse" / "models").glob("**/generic-*.axon"))
+    return sorted((repo_root / "synapse" / "models").glob("**/generic-*.axon"))
 
 
 def _result_top1_ok(value: Any) -> bool:

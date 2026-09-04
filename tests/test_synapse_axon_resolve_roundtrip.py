@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import render_axon_file
-from brainsurgery.synapse.axon.parse import parse_axon_program
-from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.validate import validate_closed_axon_file
+from synapse.axon.ast import render_axon_file
+from synapse.axon.parse import parse_axon_program
+from synapse.axon.resolve import resolve_axon_program_from_path
+from synapse.axon.validate import validate_closed_axon_file
 from scripts.axon_resolve_roundtrip import resolve_roundtrip_path
 
 
 def _model_axon_paths() -> list[Path]:
-    return sorted(Path("brainsurgery/synapse/models").glob("**/*.axon"))
+    return sorted(Path("synapse/models").glob("**/*.axon"))
 
 
 @pytest.mark.parametrize("axon_path", _model_axon_paths(), ids=lambda path: path.as_posix())

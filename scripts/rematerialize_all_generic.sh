@@ -3,7 +3,7 @@ set -euo pipefail
 
 PARALLEL="${PARALLEL:-24}"
 MODELS_ROOT="${MODELS_ROOT:-models}"
-SEARCH_ROOT="${SEARCH_ROOT:-brainsurgery/synapse/models}"
+SEARCH_ROOT="${SEARCH_ROOT:-synapse/models}"
 
 if ! [[ "$PARALLEL" =~ ^[0-9]+$ ]] || [ "$PARALLEL" -lt 1 ]; then
   echo "PARALLEL must be a positive integer, got: $PARALLEL" >&2
@@ -38,7 +38,7 @@ printf "%s\0" "${GENERIC_DIRS[@]}" \
       find "$dir" -maxdepth 1 -type f -name "generic-*.axon" -print0 \
         | sort -z \
         | while IFS= read -r -d "" file; do
-            if out="$(brainsurgery synapse axon-materialize "$file" --models-root "$MODELS_ROOT" 2>&1)"; then
+            if out="$(synapse axon-materialize "$file" --models-root "$MODELS_ROOT" 2>&1)"; then
               printf "OK\t%s\n" "$file"
             else
               printf "FAIL\t%s\n%s\n" "$file" "$out" >&2

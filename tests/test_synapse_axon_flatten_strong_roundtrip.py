@@ -8,7 +8,7 @@ from scripts.axon_flatten_strong_roundtrip import flatten_strong_roundtrip_path
 
 
 def _model_axon_paths() -> list[Path]:
-    return sorted(Path("brainsurgery/synapse/models").glob("**/*.axon"))
+    return sorted(Path("synapse/models").glob("**/*.axon"))
 
 
 @pytest.mark.parametrize("axon_path", _model_axon_paths(), ids=lambda path: path.as_posix())

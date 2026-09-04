@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from brainsurgery.cli.synapse_materialize import run_axon_materialize_workflow
-from brainsurgery.synapse import (
+from synapse.cli.synapse_materialize import run_axon_materialize_workflow
+from synapse import (
     ast_equal,
     load_materialize_context,
     materialize_axon_file,
@@ -14,10 +14,10 @@ from brainsurgery.synapse import (
 
 
 def test_gemma3_materialize_reads_checkpoint_pragma_and_groups_variants(tmp_path: Path) -> None:
-    axon_dir = tmp_path / "brainsurgery" / "synapse" / "models" / "gemma" / "gemma3"
+    axon_dir = tmp_path / "synapse" / "models" / "gemma" / "gemma3"
     axon_dir.mkdir(parents=True)
     axon_path = axon_dir / "gemma3.axon"
-    source = Path("brainsurgery/synapse/models/gemma3/generic-gemma-3.axon").read_text(
+    source = Path("synapse/models/gemma3/generic-gemma-3.axon").read_text(
         encoding="utf-8"
     )
     source = source.replace(

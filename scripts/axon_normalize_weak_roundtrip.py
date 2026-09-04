@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from brainsurgery.synapse.axon import normalize_closed_axon_file, parse_axon_program
-from brainsurgery.synapse.axon import render_axon_file, resolve_axon_program_from_path
-from brainsurgery.synapse.axon.validate import validate_normalized_axon_file
+from synapse.axon import normalize_closed_axon_file, parse_axon_program
+from synapse.axon import render_axon_file, resolve_axon_program_from_path
+from synapse.axon.validate import validate_normalized_axon_file
 
 from scripts.axon_roundtrip_common import (
     RoundtripResult,

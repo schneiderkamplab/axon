@@ -302,7 +302,7 @@ def _paired_backend_ratio_summary(rows: list[dict[str, str]]) -> list[str] | Non
 
 
 def _normalize_axon_path(raw: str) -> str:
-    marker = "/brainsurgery/synapse/models/"
+    marker = "/synapse/models/"
     if marker in raw:
         return raw.split(marker, 1)[1]
     return raw

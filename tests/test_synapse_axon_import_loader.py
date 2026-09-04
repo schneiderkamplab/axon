@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     AxonBind,
     AxonExprCall,
     AxonExprDo,
@@ -14,10 +14,10 @@ from brainsurgery.synapse.axon.ast import (
     ast_equal,
     render_axon_file,
 )
-from brainsurgery.synapse.axon.load import load_axon_files_from_path
-from brainsurgery.synapse.axon.load import resolve_import_path
-from brainsurgery.synapse.axon.parse import parse_axon_program_from_path
-from brainsurgery.synapse.axon.resolve import (
+from synapse.axon.load import load_axon_files_from_path
+from synapse.axon.load import resolve_import_path
+from synapse.axon.parse import parse_axon_program_from_path
+from synapse.axon.resolve import (
     resolve_axon_program_from_path,
     resolve_axon_program_to_source,
 )
@@ -126,7 +126,7 @@ def test_builtin_overlay_imports_check_multiple_overlays_in_order(tmp_path: Path
 
 
 def test_builtin_overlay_files_are_partial_overlays(tmp_path: Path) -> None:
-    import brainsurgery.synapse.axon.load.core as load_core
+    import synapse.axon.load.core as load_core
 
     _write(
         tmp_path / "Cache.axon",

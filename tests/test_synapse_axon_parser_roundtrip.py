@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import ast_equal, render_axon_file
-from brainsurgery.synapse.axon.parse import parse_axon_program
+from synapse.axon.ast import ast_equal, render_axon_file
+from synapse.axon.parse import parse_axon_program
 from scripts.axon_parse_roundtrip import parse_roundtrip_path
 
 
 def _axon_paths() -> list[Path]:
-    roots = (Path("brainsurgery/synapse/models"), Path("brainsurgery/synapse/builtins"))
+    roots = (Path("synapse/models"), Path("synapse/builtins"))
     paths: list[Path] = []
     for root in roots:
         paths.extend(sorted(root.glob("**/*.axon")))

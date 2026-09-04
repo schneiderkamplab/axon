@@ -8,7 +8,7 @@ from scripts.axon_typecheck2_strong_roundtrip import typecheck2_strong_roundtrip
 
 
 def _typecheck2_roundtrip_paths() -> list[Path]:
-    return sorted(Path("brainsurgery/synapse/models").glob("**/*.axon"))
+    return sorted(Path("synapse/models").glob("**/*.axon"))
 
 
 @pytest.mark.parametrize("axon_path", _typecheck2_roundtrip_paths(), ids=lambda path: path.as_posix())

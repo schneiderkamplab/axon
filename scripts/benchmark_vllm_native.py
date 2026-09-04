@@ -14,7 +14,7 @@ import sys, os, csv, time, json, shutil, tempfile, traceback, importlib.util
 from pathlib import Path
 from typing import Any
 
-REPO = "/work/dfm/jacobwashere/brainsurgery"
+REPO = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, REPO)
 os.environ.setdefault("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -42,7 +42,7 @@ CSV_FIELDS = [
 
 def _generate_model_code(axon_file: Path, model_dir: Path) -> tuple[str, dict[str, Any] | None, Any | None]:
     """Run the Axon codegen pipeline to generate vLLM model code."""
-    from brainsurgery.synapse.axon import (
+    from synapse.axon import (
         resolve_axon_program_from_path,
         normalize_closed_axon_file,
         elaborate_closed_axon_file,
@@ -53,8 +53,8 @@ def _generate_model_code(axon_file: Path, model_dir: Path) -> tuple[str, dict[st
         optimize_graph_program,
         GraphOptimizeConfig,
     )
-    from brainsurgery.synapse.axon.codegen2_vllm import emit_model_code_from_graph_ir
-    from brainsurgery.synapse.axon_test import (
+    from synapse.axon.codegen2_vllm import emit_model_code_from_graph_ir
+    from synapse.axon_test import (
         _resolve_safetensors_paths,
         _load_model_config,
         _normalize_config_keys,

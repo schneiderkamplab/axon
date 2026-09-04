@@ -12,7 +12,7 @@ Phase 2 (run in `g4vllm` conda env):
 Usage:
     # Phase 1: generate code (run in bs env)
     python scripts/benchmark_vllm_throughput.py generate \
-        --axon brainsurgery/synapse/models/gemma3/gemma-3-270m.axon \
+        --axon synapse/models/gemma3/gemma-3-270m.axon \
         --output /tmp/opencode/generated_vllm_model.py
 
     # Phase 2: run benchmark (run in g4vllm env)
@@ -41,7 +41,7 @@ from pathlib import Path
 def run_generate(args: argparse.Namespace) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    from brainsurgery.synapse.axon import (
+    from synapse.axon import (
         elaborate_closed_axon_file,
         flatten_closed_axon_file,
         lower_axon_program_to_graph_ir,
@@ -51,7 +51,7 @@ def run_generate(args: argparse.Namespace) -> None:
         typecheck2_flat_axon_file,
         GraphOptimizeConfig,
     )
-    from brainsurgery.synapse.axon.codegen2_vllm import emit_model_code_from_graph_ir
+    from synapse.axon.codegen2_vllm import emit_model_code_from_graph_ir
 
     axon_file = Path(args.axon)
     resolved = resolve_axon_program_from_path(axon_file).ast
@@ -62,7 +62,7 @@ def run_generate(args: argparse.Namespace) -> None:
     graph_program = lower_axon_program_to_graph_ir(typed)
 
     # Extract embedding scale from pre-optimization graph (lost by optimizer)
-    from brainsurgery.synapse.axon.graph_ir.core import GraphLiteral, GraphValueRef
+    from synapse.axon.graph_ir.core import GraphLiteral, GraphValueRef
 
     def _resolve_literal(gp, ref):
         """Follow GraphValueRef chain to find a literal value."""

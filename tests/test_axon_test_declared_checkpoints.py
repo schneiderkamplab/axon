@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import brainsurgery.synapse.axon_benchmark as axon_benchmark_module
-import brainsurgery.synapse.axon_test as axon_test_module
+import synapse.axon_benchmark as axon_benchmark_module
+import synapse.axon_test as axon_test_module
 
 KNOWN_DECLARED_PRAGMA_REGRESSION = pytest.mark.xfail(
     reason="known CHECKPOINTS/TOKENIZER pragma resolution regression outside tests",

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import safetensors.torch
 import torch
 
-from brainsurgery.synapse import axon_test as axon_test_mod
+from synapse import axon_test as axon_test_mod
 
 
 def test_extract_logits_accepts_namespace_logits() -> None:

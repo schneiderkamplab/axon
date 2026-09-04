@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from brainsurgery.synapse.axon import MaterializeContext, materialize_axon_file, parse_axon_program
-from brainsurgery.synapse.axon.ast import render_axon_file
+from synapse.axon import MaterializeContext, materialize_axon_file, parse_axon_program
+from synapse.axon.ast import render_axon_file
 
 
 def test_materialize_stage_rewrites_only_config_calls_and_preserves_structure() -> None:

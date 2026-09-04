@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.synapse import (
+from synapse import (
     AxonDefinition,
     parse_axon_program,
     validate_axon_program,

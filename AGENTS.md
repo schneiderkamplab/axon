@@ -5,11 +5,11 @@ Detailed local rules live in subfolder `AGENTS.md` files.
 
 Related local policies:
 
-- `brainsurgery/AGENTS.md`: package-wide Python import/export boundaries.
+- `AGENTS.md`: package-wide Python import/export boundaries.
 - `wiki/AGENTS.md`: LLM wiki memory/process for this repo.
 - `docs/AGENTS.md`: co-maintenance rules for user + agent docs work.
 - `scripts/AGENTS.md`: benchmark/run execution conventions.
-- `brainsurgery/synapse/*/AGENTS.md`: local boundaries for compiler/runtime/model work.
+- `synapse/*/AGENTS.md`: local boundaries for compiler/runtime/model work.
 - `tests/AGENTS.md`: test-fix contract and escalation policy.
 
 ## Model Special-Casing Policy
@@ -18,11 +18,10 @@ Related local policies:
 - Do not add model-specific branches to parser, typechecker, lowering, codegen, runtime, or core builtins unless explicitly approved.
 - If any such special casing is detected, report it and provide a concrete elimination plan (target module, refactor path, risk, validation).
 - Allowed HF/model-quirk integration files are limited to loading/integration entrypoints:
-  - `brainsurgery/synapse/axon_test.py`
-  - `brainsurgery/synapse/axon/tokenization.py`
-  - `brainsurgery/transforms/infer_runtime.py`
+  - `synapse/axon_test.py`
+  - `synapse/axon/tokenization.py`
   - (and explicit future additions approved in review)
-- Runtime/compiler layers (`brainsurgery/synapse/axon/*`, `runtime.py`, `pipeline_*`, `codegen.py`, `builtins/*.axon`) must not carry HF namespace quirks or model-family routing.
+- Runtime/compiler layers (`synapse/axon/*`, `runtime.py`, `pipeline_*`, `codegen.py`, `builtins/*.axon`) must not carry HF namespace quirks or model-family routing.
 - Builtins must not use model-specific absolute default paths (`@@...`) in signatures.
 - Do not infer Axon semantics from ordinary definition names in compiler,
   optimizer, lowering, codegen, runtime, or core builtins. Definition names are
@@ -62,7 +61,7 @@ Related local policies:
 
 ## Change Discipline
 
-- If a change alters behavior in `brainsurgery/*`, get approval before landing substantial semantic changes.
+- If a change alters behavior in `synapse/*`, get approval before landing substantial semantic changes.
 - Keep edits minimal, conservative, and evidence-backed.
 - Avoid compatibility shims unless explicitly requested.
 - Prefer generic reusable implementations and avoid duplicated logic.

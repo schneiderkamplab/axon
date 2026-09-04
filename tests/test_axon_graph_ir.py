@@ -7,15 +7,15 @@ import numpy as np
 import pytest
 import torch
 
-from brainsurgery.synapse import lower_axon_program_to_graph_ir, parse_axon_program
-from brainsurgery.synapse.axon import (
+from synapse import lower_axon_program_to_graph_ir, parse_axon_program
+from synapse.axon import (
     elaborate_closed_axon_file,
     flatten_closed_axon_file,
     normalize_closed_axon_file,
     resolve_axon_program_from_path,
     typecheck2_flat_axon_file,
 )
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     Constraint,
     DimExprBinary,
     TypeAny,
@@ -33,21 +33,21 @@ from brainsurgery.synapse.axon.ast import (
     TypeVar,
     render_axon_file,
 )
-from brainsurgery.synapse.axon.codegen2_torch import Codegen2GraphModel, emit_model_code_from_graph_ir
-from brainsurgery.synapse.axon.codegen2_tinygrad import (
+from synapse.axon.codegen2_torch import Codegen2GraphModel, emit_model_code_from_graph_ir
+from synapse.axon.codegen2_tinygrad import (
     emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir,
     tinygrad_op_table_markdown,
 )
-from brainsurgery.synapse.axon.codegen2_mlx import (
+from synapse.axon.codegen2_mlx import (
     emit_model_code_from_graph_ir as emit_mlx_model_code_from_graph_ir,
     mlx_op_table_markdown,
     torch_state_dict_to_mlx,
 )
-from brainsurgery.synapse.axon.codegen2_triton import (
+from synapse.axon.codegen2_triton import (
     emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir,
 )
-from brainsurgery.synapse.axon.analysis import infer_axon_definition_effects, op_effect
-from brainsurgery.synapse.axon.graph_ir import (
+from synapse.axon.analysis import infer_axon_definition_effects, op_effect
+from synapse.axon.graph_ir import (
     GraphDomainAnalysis,
     GraphDomainFact,
     GraphLiteral,
@@ -79,7 +79,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     validate_graph_domain_analysis,
     validate_graph_program,
 )
-from brainsurgery.synapse.axon.graph_ir.substitute import (
+from synapse.axon.graph_ir.substitute import (
     substitute_dim_token,
     substitute_graph_operand_dims,
 )
@@ -586,7 +586,7 @@ def test_graph_ir_validator_rejects_unbound_path_template_symbol() -> None:
 
 
 def test_topk_variadic_wrapper_does_not_collapse_prefix_shape() -> None:
-    from brainsurgery.synapse.ops.topk import type_rule
+    from synapse.ops.topk import type_rule
 
     class Helpers:
         @staticmethod
@@ -5886,7 +5886,7 @@ main cond x = do
 
 def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
 
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
@@ -5899,7 +5899,7 @@ def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> Non
 
 def test_codegen2_tinygrad_emits_gpt2_source() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
 
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
@@ -5920,7 +5920,7 @@ def test_codegen2_tinygrad_emits_gpt2_source() -> None:
 
 def test_codegen2_triton_emits_gpt2_source() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
 
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
@@ -8478,7 +8478,7 @@ def test_codegen2_tinygrad_materializes_final_logits_bias_flat_alias() -> None:
 def test_codegen2_mlx_emits_gpt2_source() -> None:
     pytest.importorskip("mlx")
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
 
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
@@ -8678,7 +8678,7 @@ def test_codegen2_mlx_torch_state_dict_conversion() -> None:
 
 def test_graph_ir_preserves_list_destructuring_outputs() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
+        Path("synapse/models/gpt2/gpt2.axon")
     ).ast
     typed = _typed(program, main_module="gpt2")
 

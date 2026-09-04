@@ -34,7 +34,7 @@ from tempfile import TemporaryDirectory
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING)
-logging.getLogger("brainsurgery").setLevel(logging.ERROR)
+logging.getLogger("synapse").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,7 +46,7 @@ CLASS_NAME = "GeneratedModel"
 # ---------------------------------------------------------------------------
 
 def _find_axon_file(checkpoint_id: str) -> Path:
-    models_root = REPO_ROOT / "brainsurgery" / "synapse" / "models"
+    models_root = REPO_ROOT / "synapse" / "models"
     parts = checkpoint_id.split("/")
     name = parts[-1] if len(parts) >= 2 else parts[0]
     for model_dir in sorted(models_root.iterdir()):
@@ -109,7 +109,7 @@ def compile_and_load_axon_jax(
     dtype: str = "float32",
 ) -> object:
     """Compile axon -> graph IR -> codegen2-jax -> load model class + state dict."""
-    from brainsurgery.synapse.axon import (
+    from synapse.axon import (
         elaborate_closed_axon_file,
         flatten_closed_axon_file,
         lower_axon_program_to_graph_ir,
@@ -119,7 +119,7 @@ def compile_and_load_axon_jax(
         typecheck2_flat_axon_file,
         GraphOptimizeConfig,
     )
-    from brainsurgery.synapse.axon.codegen2_jax import (
+    from synapse.axon.codegen2_jax import (
         emit_model_code_from_graph_ir as emit_jax,
     )
 

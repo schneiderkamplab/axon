@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     AxonBind,
     AxonExprCall,
     AxonExprDo,
@@ -15,7 +15,7 @@ from brainsurgery.synapse.axon.ast import (
     AxonScopeBind,
     AxonYield,
 )
-from brainsurgery.synapse.axon.parse import parse_axon_program
+from synapse.axon.parse import parse_axon_program
 
 
 def _parse_rhs_do(source: str) -> AxonExprDo:

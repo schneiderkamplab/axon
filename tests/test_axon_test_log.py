@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from brainsurgery.synapse.axon_test_log import render_axon_benchmark_log
+from synapse.axon_test_log import render_axon_benchmark_log
 
 
 def _write(path: Path, text: str) -> None:

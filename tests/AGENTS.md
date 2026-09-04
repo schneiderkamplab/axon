@@ -17,7 +17,7 @@ Global policy: `../AGENTS.md`
 
 ## Requires Approval
 
-- Any main-package (`brainsurgery/*`) change made to satisfy failing tests.
+- Any main-package (`synapse/*`) change made to satisfy failing tests.
 - Broad test-suite policy shifts (mass skips, loosened quality gates).
 
 ## Quality Rules

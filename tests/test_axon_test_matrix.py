@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import brainsurgery.synapse.axon_test_matrix as matrix_mod
-from brainsurgery.synapse.axon_test_matrix import run_axon_test_matrix
+import synapse.axon_test_matrix as matrix_mod
+from synapse.axon_test_matrix import run_axon_test_matrix
 
 
 def _write_fixture_pair(root: Path, name: str, *, model_dir_name: str | None = None) -> None:

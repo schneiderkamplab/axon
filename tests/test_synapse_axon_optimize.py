@@ -4,26 +4,26 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.elaborate import elaborate_closed_axon_file
-from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
-from brainsurgery.synapse.axon.graph_ir import lower_axon_program_to_graph_ir, validate_graph_program
-from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
-from brainsurgery.synapse.axon.optimize import (
+from synapse.axon.elaborate import elaborate_closed_axon_file
+from synapse.axon.flatten import flatten_closed_axon_file
+from synapse.axon.graph_ir import lower_axon_program_to_graph_ir, validate_graph_program
+from synapse.axon.normalize import normalize_closed_axon_file
+from synapse.axon.optimize import (
     optimize_flat_typed_axon_file,
     optimize_safe_flat_typed_axon_file,
 )
-from brainsurgery.synapse.axon.parse import parse_axon_program
-from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
-from brainsurgery.synapse.axon.validate import validate_typed_axon_file
+from synapse.axon.parse import parse_axon_program
+from synapse.axon.resolve import resolve_axon_program_from_path
+from synapse.axon.typecheck2 import typecheck2_flat_axon_file
+from synapse.axon.validate import validate_typed_axon_file
 
 
 def _representative_model_paths() -> tuple[Path, ...]:
     return (
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon"),
-        Path("brainsurgery/synapse/models/bert/bert-base-uncased.axon"),
-        Path("brainsurgery/synapse/models/llama4/generic-llama4.axon"),
-        Path("brainsurgery/synapse/models/olmoe/generic-olmoe.axon"),
+        Path("synapse/models/gpt2/generic-gpt2.axon"),
+        Path("synapse/models/bert/bert-base-uncased.axon"),
+        Path("synapse/models/llama4/generic-llama4.axon"),
+        Path("synapse/models/olmoe/generic-olmoe.axon"),
     )
 
 
@@ -391,7 +391,7 @@ main flag keep x = do
 
 def test_optimize_rewrites_list_destructuring_to_index_binds() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
+        Path("synapse/models/gpt2/gpt2.axon")
     ).ast
     normalized = normalize_closed_axon_file(resolved, main_module="gpt2")
     elaborated = elaborate_closed_axon_file(normalized, main_module="gpt2")
@@ -405,7 +405,7 @@ def test_optimize_rewrites_list_destructuring_to_index_binds() -> None:
 
 def test_optimize_reapplies_structural_passes_until_fixpoint_on_generic_gpt2() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     normalized = normalize_closed_axon_file(resolved, main_module="gpt2")
     elaborated = elaborate_closed_axon_file(normalized, main_module="gpt2")

@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from brainsurgery.synapse.axon import ast_equal, parse_axon_program, parse_axon_program_from_path
-from brainsurgery.synapse.axon import render_axon_file
+from synapse.axon import ast_equal, parse_axon_program, parse_axon_program_from_path
+from synapse.axon import render_axon_file
 
 from scripts.axon_roundtrip_common import (
     RoundtripResult,

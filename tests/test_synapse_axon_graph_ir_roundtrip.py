@@ -9,16 +9,16 @@ from scripts.axon_graph_ir_weak_roundtrip import graph_ir_weak_roundtrip_path
 
 
 def _graph_ir_roundtrip_paths() -> list[Path]:
-    return sorted(Path("brainsurgery/synapse/models").glob("**/*.axon"))
+    return sorted(Path("synapse/models").glob("**/*.axon"))
 
 
 def _graph_optimize_roundtrip_paths() -> list[Path]:
     return [
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon"),
-        Path("brainsurgery/synapse/models/bert/bert-base-uncased.axon"),
-        Path("brainsurgery/synapse/models/llama4/generic-llama4.axon"),
-        Path("brainsurgery/synapse/models/olmoe/generic-olmoe.axon"),
-        Path("brainsurgery/synapse/models/phi3small/generic-phi3small.axon"),
+        Path("synapse/models/gpt2/generic-gpt2.axon"),
+        Path("synapse/models/bert/bert-base-uncased.axon"),
+        Path("synapse/models/llama4/generic-llama4.axon"),
+        Path("synapse/models/olmoe/generic-olmoe.axon"),
+        Path("synapse/models/phi3small/generic-phi3small.axon"),
     ]
 
 

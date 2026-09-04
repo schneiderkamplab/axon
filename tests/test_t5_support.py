@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 import tests.conftest as test_fixtures
-from brainsurgery.synapse.axon_test import _infer_model_task
-from brainsurgery.synapse.axon_test_matrix import (
+from synapse.axon_test import _infer_model_task
+from synapse.axon_test_matrix import (
     _Pair,
     _resolve_model_task_for_pair,
     run_axon_test_matrix,
@@ -49,12 +49,12 @@ def test_t5_small_is_registered_in_download_specs_and_matrix() -> None:
 
 def test_t5gemma_family_files_are_split_by_checkpoint_family(repo_root: Path) -> None:
     t5gemma = (
-        repo_root / "brainsurgery/synapse/models/t5gemma/generic-t5gemma-ul2.axon"
+        repo_root / "synapse/models/t5gemma/generic-t5gemma-ul2.axon"
     ).read_text(encoding="utf-8")
     t5gemma_prefixlm = (
-        repo_root / "brainsurgery/synapse/models/t5gemma/generic-t5gemma-prefixlm.axon"
+        repo_root / "synapse/models/t5gemma/generic-t5gemma-prefixlm.axon"
     ).read_text(encoding="utf-8")
-    t5gemma2 = (repo_root / "brainsurgery/synapse/models/t5gemma/generic-t5gemma-2.axon").read_text(
+    t5gemma2 = (repo_root / "synapse/models/t5gemma/generic-t5gemma-2.axon").read_text(
         encoding="utf-8"
     )
 
@@ -67,7 +67,7 @@ def test_t5gemma_family_files_are_split_by_checkpoint_family(repo_root: Path) ->
 
 def test_generic_t5gemma_ul2_uses_mask_independent_position_ids(repo_root: Path) -> None:
     t5gemma = (
-        repo_root / "brainsurgery/synapse/models/t5gemma/generic-t5gemma-ul2.axon"
+        repo_root / "synapse/models/t5gemma/generic-t5gemma-ul2.axon"
     ).read_text(encoding="utf-8")
 
     assert "enc_pos_ids <- position_ids input_ids" in t5gemma
@@ -75,7 +75,7 @@ def test_generic_t5gemma_ul2_uses_mask_independent_position_ids(repo_root: Path)
 
 
 def test_axon_test_auto_infers_seq2seq_for_generic_t5gemma(repo_root: Path) -> None:
-    axon = repo_root / "brainsurgery/synapse/models/t5gemma/generic-t5gemma-ul2.axon"
+    axon = repo_root / "synapse/models/t5gemma/generic-t5gemma-ul2.axon"
     weights = repo_root / "models/google/t5gemma-s-s-ul2"
     assert _infer_model_task(axon_file=axon, weights=weights) == "seq2seq_lm"
 

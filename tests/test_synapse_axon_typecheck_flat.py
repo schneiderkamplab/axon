@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from brainsurgery.synapse.axon.ast import (
+from synapse.axon.ast import (
     AxonBind,
     AxonExprCall,
     AxonExprInt,
@@ -24,17 +24,17 @@ from brainsurgery.synapse.axon.ast import (
     TypeTuple,
     TypeVar,
 )
-from brainsurgery.synapse.axon.ast.render import render_axon_file
-from brainsurgery.synapse.axon.elaborate import elaborate_closed_axon_file
-from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
-from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
-from brainsurgery.synapse.axon.parse import parse_axon_program
-from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.typecheck_shared import _TcCtx, _is_generic_named_type, _scoped_typevars
-from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
-from brainsurgery.synapse.axon.lowering import lower_axon_program_to_graph_ir
-from brainsurgery.synapse.axon.codegen2_torch import make_runtime2_model_class
-from brainsurgery.synapse.axon.validate import validate_typed_axon_file
+from synapse.axon.ast.render import render_axon_file
+from synapse.axon.elaborate import elaborate_closed_axon_file
+from synapse.axon.flatten import flatten_closed_axon_file
+from synapse.axon.normalize import normalize_closed_axon_file
+from synapse.axon.parse import parse_axon_program
+from synapse.axon.resolve import resolve_axon_program_from_path
+from synapse.axon.typecheck_shared import _TcCtx, _is_generic_named_type, _scoped_typevars
+from synapse.axon.typecheck2 import typecheck2_flat_axon_file
+from synapse.axon.lowering import lower_axon_program_to_graph_ir
+from synapse.axon.codegen2_torch import make_runtime2_model_class
+from synapse.axon.validate import validate_typed_axon_file
 
 
 def _flat(program, *, main_module: str):
@@ -189,7 +189,7 @@ main = do
 
 def test_typecheck_flat_unifies_embedding_dim_from_add() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     flat = _flat(resolved, main_module="gpt2")
     typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
@@ -359,7 +359,7 @@ main x = do
 
 def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+        Path("synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     flat = _flat(resolved, main_module="gpt2")
     typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
@@ -614,7 +614,7 @@ main x = floor x
 
 def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/mamba/generic-mamba.axon")
+        Path("synapse/models/mamba/generic-mamba.axon")
     ).ast
     flat = _flat(resolved, main_module="mamba_2_8b")
     typed = typecheck2_flat_axon_file(flat, main_module="mamba_2_8b")

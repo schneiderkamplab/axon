@@ -247,7 +247,7 @@ def _row_priority(row: dict[str, str]) -> int:
 
 
 def _relative_axon(row: dict[str, str]) -> str:
-    marker = "/brainsurgery/synapse/models/"
+    marker = "/synapse/models/"
     axon = row["axon"]
     if marker in axon:
         return axon.split(marker, 1)[1]

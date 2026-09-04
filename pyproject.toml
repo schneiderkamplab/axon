@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "brainsurgery"
-version = "0.2.12"
+name = "synapse"
+version = "0.1.0"
 authors = [
   { name = "Peter Schneider-Kamp" }
 ]
 
-description = "swiss army knife of scripts for performing brain surgery on artificial brains."
+description = "Axon: a domain-specific language and compiler for neural network model definitions."
 readme = "README.md"
 requires-python = ">=3.13"
 classifiers = [
@@ -24,9 +24,7 @@ dependencies = [
     'mltiming',
     'numpy',
     'omegaconf',
-    'pyaml',
     'pytest',
-    'rich',
     'safetensors',
     'sentencepiece',
     'torch',
@@ -42,19 +40,21 @@ mlx = ["mlx"]
 dev = ["build", "mypy", "pre-commit", "pytest-xdist", "ruff", "twine", "mlx"]
 
 [project.urls]
-"Homepage" = "https://github.com/schneiderkamplab/brainsurgery"
-"Bug Tracker" = "https://github.com/schneiderkamplab/brainsurgery/issues"
+"Homepage" = "https://github.com/schneiderkamplab/synapse"
+"Bug Tracker" = "https://github.com/schneiderkamplab/synapse/issues"
 
 [tool.hatch.build]
 include = [
-    'brainsurgery',
-    'brainsurgery/synapse/builtins/*.axon',
+    'synapse',
+    'synapse/builtins/*.axon',
+    'synapse/builtins/static/*.axon',
+    'synapse/models',
     'LICENSE',
     'README.md',
 ]
 
 [project.scripts]
-brainsurgery = "brainsurgery:main"
+synapse = "synapse.cli.synapse:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -78,7 +78,7 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["brainsurgery"]
+files = ["synapse"]
 exclude = "^(tests/|examples/|test_.*\\.py$|axon\\.py$)"
 ignore_missing_imports = true
 warn_unused_ignores = true
