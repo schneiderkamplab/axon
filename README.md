@@ -3,11 +3,11 @@
 </style>
 
 
-<p align="center">
-  <img src="docs/logos/axon-logo.png" alt="axon" width="300" />
+<p align="center" style="margin-bottom: 0.25rem;">
+  <img src="docs/logos/axon-logo.png" alt="axon" width="250" />
 </p>
 
-<h3 align="center" style="font-family: 'Roboto Mono', monospace; font-size: 3rem;">axon</h3>
+<h3 align="center" style="font-family: 'Roboto Mono', monospace; font-size: 6rem; margin-top: 0;">axon</h3>
 
 <p align="center">
   A typed declarative DSL and compiler for neural network model definitions.<br/>
