@@ -4646,6 +4646,8 @@ def _has_torch_selected_expert_intrinsic_candidates(graph: GraphProgram) -> bool
     # code.
     # Do not filter on module names or higher-level helper definitions.
     names = _graph_op_names(graph)
+    if "__torch_weighted_topk_sum" in names and "__torch_expert_packed_swiglu_ffn" in names:
+        return True
     return "_where_indices" in names and ("_expert_linear" in names or "_linear" in names)
 
 
