@@ -3091,6 +3091,192 @@ def _prefix_loop_paths_statements(
     return tuple(out)
 
 
+_RECUR_HELPER_COUNTER = 0
+
+
+def _fresh_recur_helper_name(prefix: str) -> str:
+    global _RECUR_HELPER_COUNTER
+    _RECUR_HELPER_COUNTER += 1
+    return f"{prefix}_{_RECUR_HELPER_COUNTER}"
+
+
+def _convert_step_loops_to_recursive(program: AxonFile) -> AxonFile:
+    module_names = {m.name for m in program.modules}
+    modules_by_name = {m.name: m for m in program.modules}
+    new_helper_modules: list[AxonDefinition] = []
+    changed = False
+
+    for module in program.modules:
+        new_statements: list[AxonStatement] = []
+        for stmt in module.statements:
+            if not isinstance(stmt, AxonRepeat):
+                new_statements.append(stmt)
+                continue
+            normalized = stmt
+            if not normalized.body or not isinstance(normalized.body[-1], AxonYield):
+                new_statements.append(stmt)
+                continue
+            if normalized.carry is None:
+                new_statements.append(stmt)
+                continue
+            yield_values = normalized.body[-1].values
+            yield_expr = yield_values[0] if len(yield_values) == 1 else AxonExprTuple(items=yield_values)
+            if not isinstance(yield_expr, AxonExprCall):
+                new_statements.append(stmt)
+                continue
+            step_helper_name = yield_expr.callee
+            if step_helper_name not in module_names:
+                new_statements.append(stmt)
+                continue
+            step_helper = modules_by_name[step_helper_name]
+            carry_names = tuple(normalized.carry)
+            call_args = list(yield_expr.args)
+            if len(call_args) < 1 + len(carry_names):
+                new_statements.append(stmt)
+                continue
+            free_args = call_args[1 + len(carry_names) :]
+            free_names = tuple(
+                arg.name if isinstance(arg, AxonExprName) else f"__free_{i}"
+                for i, arg in enumerate(free_args)
+            )
+            loop_scope = _loop_helper_scope(step_helper)
+            loop_name = loop_scope[0] if loop_scope else normalized.var
+            helper_prefix = f"{module.name}__loop_{loop_name}_recur"
+            helper_name = _fresh_recur_helper_name(helper_prefix)
+            continue_name = _fresh_recur_helper_name(f"{helper_prefix}_continue")
+            to_name = "__loop_to"
+            step_name = "__loop_step"
+            step_params = step_helper.params
+            carry_param_types = tuple(
+                p.type_expr for p in step_params[1 : 1 + len(carry_names)]
+            )
+            free_param_types = tuple(
+                p.type_expr for p in step_params[1 + len(carry_names) :]
+            )
+            recur_params = (
+                AxonParam(name=normalized.var, optional=False, type_expr=TypeDim(), default_expr=None),
+                AxonParam(name=to_name, optional=False, type_expr=TypeDim(), default_expr=None),
+                AxonParam(name=step_name, optional=False, type_expr=TypeDim(), default_expr=None),
+                *(
+                    AxonParam(name=name, optional=False, type_expr=tp, default_expr=None)
+                    for name, tp in zip(carry_names, carry_param_types, strict=True)
+                ),
+                *(
+                    AxonParam(name=name, optional=False, type_expr=tp, default_expr=None)
+                    for name, tp in zip(free_names, free_param_types, strict=True)
+                ),
+            )
+            step_positive = AxonExprBinary(op=">", left=AxonExprName(name=step_name), right=AxonExprInt(value=0))
+            done_pos = AxonExprBinary(op=">=", left=AxonExprName(name=normalized.var), right=AxonExprName(name=to_name))
+            done_neg = AxonExprBinary(op="<=", left=AxonExprName(name=normalized.var), right=AxonExprName(name=to_name))
+            done_cond = AxonExprTernary(cond=step_positive, true_expr=done_pos, false_expr=done_neg)
+            step_call_args = (
+                AxonExprName(name=normalized.var),
+                *[AxonExprName(name=name) for name in carry_names],
+                *[AxonExprName(name=name) for name in free_names],
+            )
+            step_call = AxonExprCall(callee=step_helper_name, args=step_call_args, kwargs={})
+            next_i = "__loop_next_i"
+            recur_call_args = (
+                AxonExprName(name=next_i),
+                AxonExprName(name=to_name),
+                AxonExprName(name=step_name),
+                *[AxonExprName(name=name) for name in carry_names],
+                *[AxonExprName(name=name) for name in free_names],
+            )
+            recur_call = AxonExprCall(callee=helper_name, args=recur_call_args, kwargs={})
+            continue_body: list[AxonStatement] = [
+                AxonBind(targets=carry_names, expr=step_call),
+                AxonBind(
+                    targets=(next_i,),
+                    expr=AxonExprBinary(op="+", left=AxonExprName(name=normalized.var), right=AxonExprName(name=step_name)),
+                ),
+                AxonBind(targets=carry_names, expr=recur_call),
+                AxonReturn(values=tuple(AxonExprName(name=name) for name in carry_names)),
+            ]
+            continue_module = AxonDefinition(
+                name=continue_name,
+                path_param=None,
+                params=tuple(recur_params),
+                returns=(),
+                statements=tuple(continue_body),
+                body_expr=None,
+                path_params=(),
+                imports=(),
+                imported_members=None,
+                exports=(),
+                symbols=None,
+                pragmas=None,
+                type_aliases=None,
+                return_type_expr=(
+                    carry_param_types[0]
+                    if len(carry_param_types) == 1
+                    else TypeTuple(items=carry_param_types)
+                ),
+                constraints=None,
+            )
+            true_values = tuple(AxonExprName(name=name) for name in carry_names)
+            true_expr = true_values[0] if len(true_values) == 1 else AxonExprTuple(items=true_values)
+            continue_call_args = (
+                AxonExprName(name=normalized.var),
+                AxonExprName(name=to_name),
+                AxonExprName(name=step_name),
+                *[AxonExprName(name=name) for name in carry_names],
+                *[AxonExprName(name=name) for name in free_names],
+            )
+            continue_call = AxonExprCall(callee=continue_name, args=continue_call_args, kwargs={})
+            helper_body: list[AxonStatement] = [
+                AxonBind(
+                    targets=carry_names,
+                    expr=AxonExprTernary(cond=done_cond, true_expr=true_expr, false_expr=continue_call),
+                ),
+                AxonReturn(values=tuple(AxonExprName(name=name) for name in carry_names)),
+            ]
+            return_type = (
+                carry_param_types[0]
+                if len(carry_param_types) == 1
+                else TypeTuple(items=carry_param_types)
+            )
+            helper_module = AxonDefinition(
+                name=helper_name,
+                path_param=None,
+                params=tuple(recur_params),
+                returns=(),
+                statements=tuple(helper_body),
+                body_expr=None,
+                path_params=(),
+                imports=(),
+                imported_members=None,
+                exports=(),
+                symbols=None,
+                pragmas=None,
+                type_aliases=None,
+                return_type_expr=return_type,
+                constraints=None,
+            )
+            new_helper_modules.append(continue_module)
+            new_helper_modules.append(helper_module)
+            initial_call = AxonExprCall(
+                callee=helper_name,
+                args=(
+                    normalized.from_expr,
+                    normalized.to_expr,
+                    normalized.step_expr,
+                    *[AxonExprName(name=name) for name in carry_names],
+                    *free_args,
+                ),
+                kwargs={},
+            )
+            new_statements.append(AxonBind(targets=tuple(normalized.targets or carry_names), expr=initial_call))
+            changed = True
+        module_statements = tuple(new_statements)
+        modules_by_name[module.name] = replace(module, statements=module_statements)
+
+    if not changed:
+        return program
+    return replace(program, modules=tuple(m for m in modules_by_name.values()) + tuple(new_helper_modules))
+
+
 def _prefix_loop_helper_paths(program: AxonFile) -> AxonFile:
     modules: list[AxonDefinition] = []
     changed = False
@@ -4022,6 +4208,7 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
                 for module in current.modules
             )
         current = replace(current, modules=constraint_folded_modules)
+        current = _convert_step_loops_to_recursive(current)
         specialized = _specialize_modules_by_constant_params(current)
         try:
             validate_flat_axon_file(specialized, main_module=main_module)
