@@ -8737,7 +8737,10 @@ def _refresh_graph_module_types(
     if module.return_type_expr is None:
         return_type_expr = inferred_return_type
     elif not _module_return_type_needs_body_inference(module):
-        return_type_expr = module.return_type_expr
+        if _type_contains_inference_var(inferred_return_type):
+            return_type_expr = module.return_type_expr
+        else:
+            return_type_expr = inferred_return_type
     elif (
         _type_contains_inference_var(inferred_return_type)
         or _type_contains_unbound_dim(inferred_return_type, _module_bound_dim_names(module))
