@@ -2469,7 +2469,7 @@ def test_graph_ir_optimizer_specialization_substitutes_dim_metadata() -> None:
 
     specialized = next(module for module in optimized.modules if module.name == "helper")
     assert specialized.inputs == (GraphValue("x", tensor_actual),)
-    assert specialized.outputs == (GraphValueRef("x", tensor_actual),)
+    assert specialized.outputs == (GraphValueRef("x", tensor_actual, dims=tensor_actual.dims),)
     assert specialized.return_type_expr == tensor_actual
 
 
@@ -9518,8 +9518,8 @@ def test_graph_ir_optimizer_rewrites_fill_scatter_unit_slice_for_torch_backend()
     assert "_assign_slice" in ops
     assign = next(node for node in optimized_main.nodes if node.op.name == "_assign_slice")
     assert assign.inputs == (
-        GraphValueRef("y_all", tensor_t),
-        GraphValueRef("y_step", step_t),
+        GraphValueRef("y_all", tensor_t, dims=tensor_t.dims),
+        GraphValueRef("y_step", step_t, dims=step_t.dims),
         GraphLiteral(1, dim_t),
         GraphValueRef("t", TypeInt()),
         GraphExpr(
