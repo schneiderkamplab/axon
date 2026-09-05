@@ -2503,6 +2503,70 @@ def _walk_stmt_calls(statements: tuple[AxonStatement, ...]):
             yield from _walk_stmt_calls(stmt.body)
 
 
+def _walk_expr_names(expr: AxonExpr):
+    if isinstance(expr, AxonExprName):
+        yield expr
+        return
+    if isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            yield from _walk_expr_names(arg)
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                yield from _walk_expr_names(value)
+        return
+    if isinstance(expr, AxonExprBinary):
+        yield from _walk_expr_names(expr.left)
+        yield from _walk_expr_names(expr.right)
+        return
+    if isinstance(expr, AxonExprBind):
+        yield from _walk_expr_names(expr.value)
+        yield from _walk_expr_names(expr.body)
+        return
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        yield from _walk_expr_names(expr.cond)
+        yield from _walk_expr_names(expr.true_expr)
+        yield from _walk_expr_names(expr.false_expr)
+        return
+    if isinstance(expr, AxonExprLambda):
+        yield from _walk_expr_names(expr.body)
+        return
+    if isinstance(expr, AxonExprAscribe):
+        yield from _walk_expr_names(expr.expr)
+        return
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            yield from _walk_expr_names(item)
+        return
+    if isinstance(expr, AxonExprParen):
+        yield from _walk_expr_names(expr.inner)
+        return
+    if isinstance(expr, AxonExprDo):
+        yield from _walk_stmt_names(expr.body)
+
+
+def _walk_stmt_names(statements: tuple[AxonStatement, ...]):
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            yield from _walk_expr_names(stmt.expr)
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                yield from _walk_expr_names(value)
+        elif isinstance(stmt, AxonCond):
+            yield from _walk_expr_names(stmt.cond)
+            yield from _walk_stmt_names(stmt.true_body)
+            yield from _walk_stmt_names(stmt.false_body)
+        elif isinstance(stmt, AxonRepeat):
+            yield from _walk_expr_names(stmt.from_expr)
+            yield from _walk_expr_names(stmt.to_expr)
+            yield from _walk_expr_names(stmt.step_expr)
+            yield from _walk_stmt_names(stmt.body)
+        elif isinstance(stmt, AxonScopeBind):
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    yield from _walk_expr_names(raw_value)
+            yield from _walk_stmt_names(stmt.body)
+
+
 def _module_call_graph(program: AxonFile) -> dict[str, set[str]]:
     module_names = {module.name for module in program.modules}
     graph: dict[str, set[str]] = {module.name: set() for module in program.modules}
@@ -2510,6 +2574,9 @@ def _module_call_graph(program: AxonFile) -> dict[str, set[str]]:
         for call in _walk_stmt_calls(module.statements):
             if call.callee in module_names:
                 graph[module.name].add(call.callee)
+        for name in _walk_stmt_names(module.statements):
+            if name.name in module_names:
+                graph[module.name].add(name.name)
     return graph
 
 
