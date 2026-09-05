@@ -432,8 +432,6 @@ def _materialize_config_call(
     if evaluated is _NOT_EVALUABLE:
         return materialized_call
     literal = _expr_from_scalar(evaluated)
-    if callee_base == "Config.dim":
-        return AxonExprAscribe(expr=literal, type_expr=TypeDim())
     return literal
 
 
