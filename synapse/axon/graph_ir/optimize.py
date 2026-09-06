@@ -163,6 +163,7 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_swiglu_activation",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
+        "__torch_cross_entropy_loss",
     }
 )
 _VLLM_BACKEND_INTRINSICS = frozenset(

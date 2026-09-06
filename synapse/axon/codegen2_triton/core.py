@@ -287,6 +287,59 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
         add(lines, 8, "_axon_triton_debug_count('selected_expert_packed_swiglu_ffn')")
         add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _cross_entropy_loss(self, logits, labels, softcap=0.0, logit_scale=1.0):")
+        add(lines, 8, "if triton is None or _axon_triton_ce_forward_kernel is None or not torch.is_tensor(logits) or not torch.is_tensor(labels) or not logits.is_cuda or not labels.is_cuda:")
+        add(lines, 12, "raise RuntimeError('__triton_cross_entropy_loss requires Triton and CUDA tensors')")
+        add(lines, 8, "logits = logits if logits.is_contiguous() else logits.contiguous()")
+        add(lines, 8, "labels = labels if labels.is_contiguous() else labels.contiguous()")
+        add(lines, 8, "if logits.ndim != 2:")
+        add(lines, 12, "raise ValueError('__triton_cross_entropy_loss expects logits of shape (batch, vocab)')")
+        add(lines, 8, "if labels.ndim != 1:")
+        add(lines, 12, "raise ValueError('__triton_cross_entropy_loss expects labels of shape (batch,)')")
+        add(lines, 8, "batch, vocab_size = logits.shape")
+        add(lines, 8, "if labels.shape[0] != batch:")
+        add(lines, 12, "raise ValueError('__triton_cross_entropy_loss label batch mismatch')")
+        add(lines, 8, "loss = torch.empty(batch, dtype=torch.float32, device=logits.device)")
+        add(lines, 8, "logsumexp = torch.empty(batch, dtype=torch.float32, device=logits.device)")
+        add(lines, 8, "block_size = triton.next_power_of_2(vocab_size)")
+        add(lines, 8, "if block_size > 65536:")
+        add(lines, 12, "block_size = 65536")
+        add(lines, 8, "do_softcapping = 1 if softcap > 0 else 0")
+        add(lines, 8, "do_logit_scaling = 1 if abs(logit_scale - 1.0) > 1e-6 else 0")
+        add(lines, 8, "_axon_triton_debug_count('cross_entropy_loss')")
+        add(lines, 8, "_axon_triton_ce_forward_kernel[(batch,)](logits, logits.stride(0), loss, logsumexp, labels, VOCAB_SIZE=vocab_size, BLOCK_SIZE=block_size, DO_SOFTCAPPING=do_softcapping, SOFTCAP=float(softcap), DO_LOGIT_SCALING=do_logit_scaling, LOGIT_SCALE=float(logit_scale))")
+        add(lines, 8, "n_valid = (labels != -100).sum()")
+        add(lines, 8, "if n_valid > 0:")
+        add(lines, 12, "return loss.sum() / n_valid")
+        add(lines, 8, "return loss.sum()")
+        add(lines, 4, "")
+        add(lines, 4, "def _cross_entropy_loss_backward(self, logits, labels, dloss, softcap=0.0, logit_scale=1.0):")
+        add(lines, 8, "if triton is None or _axon_triton_ce_backward_kernel is None or not torch.is_tensor(logits) or not torch.is_tensor(labels) or not logits.is_cuda or not labels.is_cuda:")
+        add(lines, 12, "raise RuntimeError('__triton_cross_entropy_loss_backward requires Triton and CUDA tensors')")
+        add(lines, 8, "logits = logits if logits.is_contiguous() else logits.contiguous()")
+        add(lines, 8, "labels = labels if labels.is_contiguous() else labels.contiguous()")
+        add(lines, 8, "if logits.ndim != 2:")
+        add(lines, 12, "raise ValueError('__triton_cross_entropy_loss_backward expects logits of shape (batch, vocab)')")
+        add(lines, 8, "batch, vocab_size = logits.shape")
+        add(lines, 8, "if labels.shape[0] != batch:")
+        add(lines, 12, "raise ValueError('__triton_cross_entropy_loss_backward label batch mismatch')")
+        add(lines, 8, "if dloss.ndim == 0:")
+        add(lines, 12, "dloss = dloss.expand(batch)")
+        add(lines, 8, "dloss = dloss if dloss.is_contiguous() else dloss.contiguous()")
+        add(lines, 8, "logsumexp = torch.empty(batch, dtype=torch.float32, device=logits.device)")
+        add(lines, 8, "block_size = triton.next_power_of_2(vocab_size)")
+        add(lines, 8, "if block_size > 65536:")
+        add(lines, 12, "block_size = 65536")
+        add(lines, 8, "n_blocks = triton.cdiv(vocab_size, block_size)")
+        add(lines, 8, "do_softcapping = 1 if softcap > 0 else 0")
+        add(lines, 8, "do_logit_scaling = 1 if abs(logit_scale - 1.0) > 1e-6 else 0")
+        add(lines, 8, "_axon_triton_ce_forward_kernel[(batch,)](logits, logits.stride(0), torch.empty(batch, dtype=torch.float32, device=logits.device), logsumexp, labels, VOCAB_SIZE=vocab_size, BLOCK_SIZE=block_size, DO_SOFTCAPPING=do_softcapping, SOFTCAP=float(softcap), DO_LOGIT_SCALING=do_logit_scaling, LOGIT_SCALE=float(logit_scale))")
+        add(lines, 8, "_axon_triton_debug_count('cross_entropy_loss_backward')")
+        add(lines, 8, "grad = torch.empty_like(logits)")
+        add(lines, 8, "grad.copy_(logits)")
+        add(lines, 8, "_axon_triton_ce_backward_kernel[(batch, n_blocks)](grad, grad.stride(0), dloss, dloss.stride(0), logsumexp, labels, VOCAB_SIZE=vocab_size, BLOCK_SIZE=block_size, DO_SOFTCAPPING=do_softcapping, SOFTCAP=float(softcap), DO_LOGIT_SCALING=do_logit_scaling, LOGIT_SCALE=float(logit_scale))")
+        add(lines, 8, "return grad")
 
     def _primitive_expr(self, primitive: str, node: Any, *, local: set[str], symbols_dict: str) -> str:
         if primitive == "_triton_sdpa":
@@ -336,6 +389,25 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
                 else:
                     interleaved = args[4]
             return f"self._rope_pair_apply_factors({args[0]}, {args[1]}, {args[2]}, {args[3]}, {interleaved})"
+        if primitive == "_torch_cross_entropy_loss":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if len(args) < 2:
+                raise ValueError("__torch_cross_entropy_loss expects logits and labels")
+            softcap = "0.0"
+            logit_scale = "1.0"
+            if len(node.inputs) >= 3:
+                v = getattr(node.inputs[2], "value", None)
+                if isinstance(v, (int, float)):
+                    softcap = repr(float(v))
+                else:
+                    softcap = args[2]
+            if len(node.inputs) >= 4:
+                v = getattr(node.inputs[3], "value", None)
+                if isinstance(v, (int, float)):
+                    logit_scale = repr(float(v))
+                else:
+                    logit_scale = args[3]
+            return f"self._cross_entropy_loss({args[0]}, {args[1]}, softcap={softcap}, logit_scale={logit_scale})"
         return super()._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
 
 
@@ -509,6 +581,59 @@ def emit_model_code_from_graph_ir(
             "            w = tl.load(w_ptr + expert * IN_DIM * OUT_DIM + k[:, None] * OUT_DIM + cols[None, :], mask=(k[:, None] < IN_DIM) & (cols[None, :] < OUT_DIM), other=0.0)",
             "            acc += tl.dot(x, w)",
             "        tl.store(y_ptr + (start + rows)[:, None] * OUT_DIM + cols[None, :], acc, mask=(rows[:, None] < count) & (cols[None, :] < OUT_DIM))",
+            "    @triton.jit",
+            "    def _axon_triton_ce_forward_kernel(logits_ptr, logits_row_stride, loss_ptr, logsumexp_ptr, labels_ptr, VOCAB_SIZE: tl.constexpr, BLOCK_SIZE: tl.constexpr, DO_SOFTCAPPING: tl.constexpr, SOFTCAP: tl.constexpr, DO_LOGIT_SCALING: tl.constexpr, LOGIT_SCALE: tl.constexpr):",
+            "        row_idx = tl.program_id(0)",
+            "        logits_ptr += row_idx * tl.cast(logits_row_stride, tl.int64)",
+            "        col_offsets = tl.arange(0, BLOCK_SIZE)",
+            "        mask = col_offsets < VOCAB_SIZE",
+            "        label_idx = tl.load(labels_ptr + row_idx).to(tl.int32)",
+            "        logits = tl.load(logits_ptr + col_offsets, mask=mask, other=-float('inf')).to(tl.float32)",
+            "        if DO_LOGIT_SCALING:",
+            "            logits = LOGIT_SCALE * logits",
+            "        if DO_SOFTCAPPING:",
+            "            logits = SOFTCAP * (2.0 * tl.sigmoid(2.0 * logits / SOFTCAP) - 1.0)",
+            "        c = tl.max(logits, 0)",
+            "        logsumexp = c + tl.log(tl.sum(tl.exp(logits - c), 0))",
+            "        if label_idx != -100:",
+            "            x = tl.load(logits_ptr + label_idx).to(tl.float32)",
+            "            if DO_LOGIT_SCALING:",
+            "                x = LOGIT_SCALE * x",
+            "            if DO_SOFTCAPPING:",
+            "                x = SOFTCAP * (2.0 * tl.sigmoid(2.0 * x / SOFTCAP) - 1.0)",
+            "            loss = logsumexp - x",
+            "        else:",
+            "            loss = 0.0",
+            "        tl.store(logsumexp_ptr + row_idx, logsumexp)",
+            "        tl.store(loss_ptr + row_idx, loss)",
+            "    @triton.jit",
+            "    def _axon_triton_ce_backward_kernel(logits_ptr, logits_row_stride, dloss_ptr, dloss_row_stride, logsumexp_ptr, labels_ptr, VOCAB_SIZE: tl.constexpr, BLOCK_SIZE: tl.constexpr, DO_SOFTCAPPING: tl.constexpr, SOFTCAP: tl.constexpr, DO_LOGIT_SCALING: tl.constexpr, LOGIT_SCALE: tl.constexpr):",
+            "        row_idx = tl.program_id(0)",
+            "        block_idx = tl.program_id(1)",
+            "        logits_ptr += row_idx * tl.cast(logits_row_stride, tl.int64)",
+            "        dloss_ptr += row_idx * dloss_row_stride",
+            "        col_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)",
+            "        mask = col_offsets < VOCAB_SIZE",
+            "        label_idx = tl.load(labels_ptr + row_idx).to(tl.int32)",
+            "        if label_idx != -100:",
+            "            dloss = tl.load(dloss_ptr)",
+            "        else:",
+            "            dloss = 0.0",
+            "        x = tl.load(logits_ptr + col_offsets, mask=mask, other=-float('inf')).to(tl.float32)",
+            "        if DO_LOGIT_SCALING:",
+            "            x = x * LOGIT_SCALE",
+            "        partial = x",
+            "        if DO_SOFTCAPPING:",
+            "            partial = 2.0 * tl.sigmoid(2.0 * x / SOFTCAP) - 1.0",
+            "            x = SOFTCAP * partial",
+            "        logsumexp = tl.load(logsumexp_ptr + row_idx)",
+            "        y = tl.exp(x - logsumexp)",
+            "        y = tl.where(col_offsets == label_idx, y - 1.0, y)",
+            "        if DO_LOGIT_SCALING:",
+            "            y = y * LOGIT_SCALE",
+            "        if DO_SOFTCAPPING:",
+            "            y = y * (1.0 - partial * partial)",
+            "        tl.store(logits_ptr + col_offsets, dloss * y, mask=mask)",
             "else:",
             "    _axon_triton_rmsnorm_noscale_kernel = None",
             "    _axon_triton_rmsnorm_scaled_kernel = None",
@@ -518,6 +643,8 @@ def emit_model_code_from_graph_ir(
             "    _axon_triton_swiglu_kernel = None",
             "    _axon_triton_geglu_tanh_kernel = None",
             "    _axon_triton_grouped_mm_kernel = None",
+            "    _axon_triton_ce_forward_kernel = None",
+            "    _axon_triton_ce_backward_kernel = None",
             "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters",
             "from synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",
