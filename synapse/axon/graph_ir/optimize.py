@@ -137,6 +137,7 @@ _MLX_BACKEND_INTRINSICS = frozenset(
         "__mlx_sdpa",
         "__mlx_rmsnorm_scaled",
         "__mlx_rope",
+        "__mlx_weighted_topk_sum",
     }
 )
 _JAX_BACKEND_INTRINSICS = frozenset(
@@ -15237,6 +15238,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="mlx_expert_packed_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_weighted_topk_sum_intrinsics(current, op_name="__mlx_weighted_topk_sum")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_weighted_topk_sum")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_weighted_topk_sum_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-jax":
             jax_sub_start = time.perf_counter() if debug_timings else 0.0

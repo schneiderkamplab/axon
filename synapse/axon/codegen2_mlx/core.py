@@ -100,6 +100,7 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "_mlx_rmsnorm_scaled",
     "_mlx_expert_swiglu_ffn",
     "_mlx_expert_packed_swiglu_ffn",
+    "_mlx_weighted_topk_sum",
 })
 
 NON_OBVIOUS_MLX_OPS: dict[str, str] = {}
@@ -1534,6 +1535,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             if len(args) < 5:
                 raise ValueError("__mlx_expert_packed_swiglu_ffn expects input, expert indices, gate-up/down weight paths, and transpose")
             return f"self._expert_packed_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, transpose=bool({args[4]}))"
+        if primitive == "_mlx_weighted_topk_sum":
+            if len(args) < 2:
+                raise ValueError("__mlx_weighted_topk_sum expects expert values and top-k scores")
+            return f"mx.sum({args[0]} * mx.expand_dims({args[1]}.astype({args[0]}.dtype), -1), axis=2)"
         if primitive == "_mlx_sdpa":
             if len(args) < 6:
                 raise ValueError("__mlx_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
