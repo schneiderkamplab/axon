@@ -98,6 +98,8 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "_mlx_sdpa_banded",
     "_mlx_rope",
     "_mlx_rmsnorm_scaled",
+    "_mlx_expert_swiglu_ffn",
+    "_mlx_expert_packed_swiglu_ffn",
 })
 
 NON_OBVIOUS_MLX_OPS: dict[str, str] = {}
@@ -1119,6 +1121,18 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "inv_sort = mx.argsort(sort_idx)")
         add(lines, 8, "return y_sorted[inv_sort].reshape(leading + (-1,))")
         add(lines, 4, "")
+        add(lines, 4, "def _expert_swiglu_ffn(self, x, expert_idx, gate_weight_path, up_weight_path, down_weight_path):")
+        add(lines, 8, "gate = self._expert_linear(gate_weight_path, x, expert_idx, bias=False, transpose=False, weight_leaf='')")
+        add(lines, 8, "up = self._expert_linear(up_weight_path, x, expert_idx, bias=False, transpose=False, weight_leaf='')")
+        add(lines, 8, "hidden = (mx.sigmoid(gate) * gate) * up")
+        add(lines, 8, "return self._expert_linear(down_weight_path, hidden, expert_idx, bias=False, transpose=False, weight_leaf='')")
+        add(lines, 4, "")
+        add(lines, 4, "def _expert_packed_swiglu_ffn(self, x, expert_idx, gate_up_weight_path, down_weight_path, transpose=False):")
+        add(lines, 8, "gate_up = self._expert_linear(gate_up_weight_path, x, expert_idx, bias=False, transpose=transpose, weight_leaf='')")
+        add(lines, 8, "gate, up = mx.split(gate_up, 2, axis=-1)")
+        add(lines, 8, "hidden = (mx.sigmoid(gate) * gate) * up")
+        add(lines, 8, "return self._expert_linear(down_weight_path, hidden, expert_idx, bias=False, transpose=transpose, weight_leaf='')")
+        add(lines, 4, "")
         add(lines, 4, "def _sdpa_banded(self, q, k, v, band_idx, keep, scale, sinks):")
         add(lines, 8, "S = band_idx.shape[0]")
         add(lines, 8, "k_range = mx.arange(S, dtype=band_idx.dtype)")
@@ -1512,6 +1526,14 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias=bool({bias}), transpose=bool({transpose}), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
+        if primitive == "_mlx_expert_swiglu_ffn":
+            if len(args) < 5:
+                raise ValueError("__mlx_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
+            return f"self._expert_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
+        if primitive == "_mlx_expert_packed_swiglu_ffn":
+            if len(args) < 5:
+                raise ValueError("__mlx_expert_packed_swiglu_ffn expects input, expert indices, gate-up/down weight paths, and transpose")
+            return f"self._expert_packed_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, transpose=bool({args[4]}))"
         if primitive == "_mlx_sdpa":
             if len(args) < 6:
                 raise ValueError("__mlx_sdpa expects q, k, v, additive_mask, scale, enable_gqa")

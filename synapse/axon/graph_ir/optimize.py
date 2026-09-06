@@ -132,6 +132,8 @@ _TINYGRAD_BACKEND_INTRINSICS = frozenset(
 )
 _MLX_BACKEND_INTRINSICS = frozenset(
     {
+        "__mlx_expert_packed_swiglu_ffn",
+        "__mlx_expert_swiglu_ffn",
         "__mlx_sdpa",
         "__mlx_rmsnorm_scaled",
         "__mlx_rope",
@@ -15215,6 +15217,26 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="mlx_rmsnorm_scaled_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_expert_swiglu_ffn_intrinsics(current, op_name="__mlx_expert_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_expert_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_expert_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(current, op_name="__mlx_expert_packed_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_expert_packed_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_expert_packed_swiglu_ffn_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-jax":
             jax_sub_start = time.perf_counter() if debug_timings else 0.0
