@@ -1522,7 +1522,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 return (
                     f"mx.fast.scaled_dot_product_attention("
                     f"{args[0]}, {args[1]}, {args[2]}, "
-                    f"mask={args[3]}, scale=1.0)"
+                    f"mask={args[3]}, scale=1.0/({args[0]}.shape[-1]**0.5))"
                 )
             return (
                 f"mx.fast.scaled_dot_product_attention("
