@@ -33,15 +33,18 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "if last_dim <= 0:")
         add(lines, 12, "return torch.empty_like(x)")
         add(lines, 8, "x_in = x if x.is_contiguous() else x.contiguous()")
+        add(lines, 8, "x_in = x_in.reshape(-1, last_dim)")
         add(lines, 8, "out = torch.empty_like(x_in)")
-        add(lines, 8, "rows = out.numel() // last_dim")
+        add(lines, 8, "rows = out.shape[0]")
         add(lines, 8, "if rows == 0:")
         add(lines, 12, "return out.reshape(x.shape)")
+        add(lines, 8, "r = torch.empty(rows, dtype=torch.float32, device=x_in.device)")
         add(lines, 8, "block = triton.next_power_of_2(last_dim)")
         add(lines, 8, "if block > 32768:")
         add(lines, 12, "raise ValueError('__triton_rmsnorm_noscale last dimension is too large for the Triton kernel')")
+        add(lines, 8, "num_warps = 4 if block < 512 else 8")
         add(lines, 8, "_axon_triton_debug_count('rmsnorm_noscale')")
-        add(lines, 8, "_axon_triton_rmsnorm_noscale_kernel[(rows,)](x_in, out, rows, last_dim, float(eps), BLOCK=block)")
+        add(lines, 8, "_axon_triton_rmsnorm_noscale_kernel[(rows,)](x_in, out, r, x_in.stride(0), rows, last_dim, float(eps), BLOCK=block, num_warps=num_warps)")
         add(lines, 8, "return out.reshape(x.shape)")
         add(lines, 4, "")
         add(lines, 4, "def _rmsnorm_scaled(self, x, scale, eps=1e-6, dim=None, cast_float=False):")
@@ -59,17 +62,20 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "if int(scale.numel()) != last_dim:")
         add(lines, 12, "raise ValueError('__triton_rmsnorm_scaled requires scale.numel() == x.shape[-1]')")
         add(lines, 8, "x_in = x if x.is_contiguous() else x.contiguous()")
+        add(lines, 8, "x_in = x_in.reshape(-1, last_dim)")
         add(lines, 8, "scale_in = scale.reshape(-1)")
         add(lines, 8, "scale_in = scale_in if scale_in.is_contiguous() else scale_in.contiguous()")
         add(lines, 8, "out = torch.empty_like(x_in)")
-        add(lines, 8, "rows = out.numel() // last_dim")
+        add(lines, 8, "rows = out.shape[0]")
         add(lines, 8, "if rows == 0:")
         add(lines, 12, "return out.reshape(x.shape)")
+        add(lines, 8, "r = torch.empty(rows, dtype=torch.float32, device=x_in.device)")
         add(lines, 8, "block = triton.next_power_of_2(last_dim)")
         add(lines, 8, "if block > 32768:")
         add(lines, 12, "raise ValueError('__triton_rmsnorm_scaled last dimension is too large for the Triton kernel')")
+        add(lines, 8, "num_warps = 4 if block < 512 else 8")
         add(lines, 8, "_axon_triton_debug_count('rmsnorm_scaled')")
-        add(lines, 8, "_axon_triton_rmsnorm_scaled_kernel[(rows,)](x_in, scale_in, out, rows, last_dim, float(eps), BLOCK=block)")
+        add(lines, 8, "_axon_triton_rmsnorm_scaled_kernel[(rows,)](x_in, scale_in, out, r, x_in.stride(0), rows, last_dim, float(eps), BLOCK=block, num_warps=num_warps)")
         add(lines, 8, "return out.reshape(x.shape)")
         add(lines, 4, "")
         add(lines, 4, "def _rmsnorm_unit_offset_scaled(self, x, scale, eps=1e-6, dim=None, cast_float=False):")
@@ -87,17 +93,20 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "if int(scale.numel()) != last_dim:")
         add(lines, 12, "raise ValueError('__triton_rmsnorm_unit_offset_scaled requires scale.numel() == x.shape[-1]')")
         add(lines, 8, "x_in = x if x.is_contiguous() else x.contiguous()")
+        add(lines, 8, "x_in = x_in.reshape(-1, last_dim)")
         add(lines, 8, "scale_in = scale.reshape(-1)")
         add(lines, 8, "scale_in = scale_in if scale_in.is_contiguous() else scale_in.contiguous()")
         add(lines, 8, "out = torch.empty_like(x_in)")
-        add(lines, 8, "rows = out.numel() // last_dim")
+        add(lines, 8, "rows = out.shape[0]")
         add(lines, 8, "if rows == 0:")
         add(lines, 12, "return out.reshape(x.shape)")
+        add(lines, 8, "r = torch.empty(rows, dtype=torch.float32, device=x_in.device)")
         add(lines, 8, "block = triton.next_power_of_2(last_dim)")
         add(lines, 8, "if block > 32768:")
         add(lines, 12, "raise ValueError('__triton_rmsnorm_unit_offset_scaled last dimension is too large for the Triton kernel')")
+        add(lines, 8, "num_warps = 4 if block < 512 else 8")
         add(lines, 8, "_axon_triton_debug_count('rmsnorm_unit_offset_scaled')")
-        add(lines, 8, "_axon_triton_rmsnorm_unit_offset_scaled_kernel[(rows,)](x_in, scale_in, out, rows, last_dim, float(eps), BLOCK=block)")
+        add(lines, 8, "_axon_triton_rmsnorm_unit_offset_scaled_kernel[(rows,)](x_in, scale_in, out, r, x_in.stride(0), rows, last_dim, float(eps), BLOCK=block, num_warps=num_warps)")
         add(lines, 8, "return out.reshape(x.shape)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
@@ -199,7 +208,7 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "block = 1024")
         add(lines, 8, "grid = (triton.cdiv(n_elements, block),)")
         add(lines, 8, "_axon_triton_debug_count('swiglu_activation')")
-        add(lines, 8, "_axon_triton_swiglu_kernel[grid](gate_in, up_in, out, n_elements, BLOCK=block)")
+        add(lines, 8, "_axon_triton_swiglu_kernel[grid](gate_in, up_in, out, n_elements, BLOCK=block, LONG_INDEXING=0 if n_elements <= (2**31 - 1024 * 4) else 1)")
         add(lines, 8, "return out.reshape(gate.shape)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
@@ -217,7 +226,7 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "block = 1024")
         add(lines, 8, "grid = (triton.cdiv(n_elements, block),)")
         add(lines, 8, "_axon_triton_debug_count('geglu_tanh_activation')")
-        add(lines, 8, "_axon_triton_geglu_tanh_kernel[grid](gate_in, up_in, out, n_elements, BLOCK=block)")
+        add(lines, 8, "_axon_triton_geglu_tanh_kernel[grid](gate_in, up_in, out, n_elements, BLOCK=block, LONG_INDEXING=0 if n_elements <= (2**31 - 1024 * 4) else 1)")
         add(lines, 8, "return out.reshape(gate.shape)")
         add(lines, 4, "")
         add(lines, 4, "# Deprecated experimental path: real Qwen3-MoE-30B measurements showed this")
@@ -379,37 +388,46 @@ def emit_model_code_from_graph_ir(
             "    tl = None",
             "if triton is not None:",
             "    @triton.jit",
-            "    def _axon_triton_rmsnorm_noscale_kernel(x_ptr, out_ptr, rows, last_dim: tl.constexpr, eps: tl.constexpr, BLOCK: tl.constexpr):",
+            "    def _axon_triton_rmsnorm_noscale_kernel(x_ptr, out_ptr, r_ptr, x_row_stride, rows, last_dim: tl.constexpr, eps: tl.constexpr, BLOCK: tl.constexpr):",
             "        row = tl.program_id(0)",
             "        cols = tl.arange(0, BLOCK)",
             "        mask = cols < last_dim",
-            "        offsets = row * last_dim + cols",
-            "        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        x = tl.load(x_ptr + row * x_row_stride + cols, mask=mask, other=0.0).to(tl.float32)",
             "        variance = tl.sum(x * x, axis=0) / last_dim",
-            "        y = x * tl.rsqrt(variance + eps)",
-            "        tl.store(out_ptr + offsets, y, mask=mask)",
+            "        eps_f32 = tl.full((), eps, tl.float32)",
+            "        inv_var = tl.math.rsqrt(variance + eps_f32)",
+            "        tl.store(r_ptr + row, inv_var)",
+            "        y = x * inv_var",
+            "        tl.store(out_ptr + row * x_row_stride + cols, y, mask=mask)",
             "    @triton.jit",
-            "    def _axon_triton_rmsnorm_scaled_kernel(x_ptr, scale_ptr, out_ptr, rows, last_dim: tl.constexpr, eps: tl.constexpr, BLOCK: tl.constexpr):",
+            "    def _axon_triton_rmsnorm_scaled_kernel(x_ptr, scale_ptr, out_ptr, r_ptr, x_row_stride, rows, last_dim: tl.constexpr, eps: tl.constexpr, BLOCK: tl.constexpr):",
             "        row = tl.program_id(0)",
             "        cols = tl.arange(0, BLOCK)",
             "        mask = cols < last_dim",
-            "        offsets = row * last_dim + cols",
-            "        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
-            "        scale = tl.load(scale_ptr + cols, mask=mask, other=0.0).to(tl.float32)",
+            "        x = tl.load(x_ptr + row * x_row_stride + cols, mask=mask, other=0.0).to(tl.float32)",
+            "        w = tl.load(scale_ptr + cols, mask=mask, other=0.0)",
             "        variance = tl.sum(x * x, axis=0) / last_dim",
-            "        y = x * tl.rsqrt(variance + eps) * scale",
-            "        tl.store(out_ptr + offsets, y, mask=mask)",
+            "        eps_f32 = tl.full((), eps, tl.float32)",
+            "        inv_var = tl.math.rsqrt(variance + eps_f32)",
+            "        tl.store(r_ptr + row, inv_var)",
+            "        normed = x * inv_var",
+            "        normed = normed.to(w.dtype)",
+            "        y = normed * w",
+            "        tl.store(out_ptr + row * x_row_stride + cols, y, mask=mask)",
             "    @triton.jit",
-            "    def _axon_triton_rmsnorm_unit_offset_scaled_kernel(x_ptr, scale_ptr, out_ptr, rows, last_dim: tl.constexpr, eps: tl.constexpr, BLOCK: tl.constexpr):",
+            "    def _axon_triton_rmsnorm_unit_offset_scaled_kernel(x_ptr, scale_ptr, out_ptr, r_ptr, x_row_stride, rows, last_dim: tl.constexpr, eps: tl.constexpr, BLOCK: tl.constexpr):",
             "        row = tl.program_id(0)",
             "        cols = tl.arange(0, BLOCK)",
             "        mask = cols < last_dim",
-            "        offsets = row * last_dim + cols",
-            "        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
-            "        scale = tl.load(scale_ptr + cols, mask=mask, other=0.0).to(tl.float32)",
+            "        x = tl.load(x_ptr + row * x_row_stride + cols, mask=mask, other=0.0).to(tl.float32)",
+            "        w = tl.load(scale_ptr + cols, mask=mask, other=0.0).to(tl.float32)",
             "        variance = tl.sum(x * x, axis=0) / last_dim",
-            "        y = x * tl.rsqrt(variance + eps) * (scale + 1.0)",
-            "        tl.store(out_ptr + offsets, y, mask=mask)",
+            "        eps_f32 = tl.full((), eps, tl.float32)",
+            "        inv_var = tl.math.rsqrt(variance + eps_f32)",
+            "        tl.store(r_ptr + row, inv_var)",
+            "        normed = x * inv_var",
+            "        y = normed * (w + 1.0)",
+            "        tl.store(out_ptr + row * x_row_stride + cols, y, mask=mask)",
             "    @triton.jit",
             "    def _axon_triton_rope_apply_kernel(x_ptr, sin_ptr, cos_ptr, out_ptr, n_elements, rotary_dim: tl.constexpr, BLOCK: tl.constexpr):",
             "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
@@ -443,21 +461,35 @@ def emit_model_code_from_graph_ir(
             "        k_cos = tl.load(cos_k_ptr + offsets, mask=k_mask, other=0.0)",
             "        tl.store(k_out_ptr + offsets, k * k_cos + k_rotated * k_sin * sign, mask=k_mask)",
             "    @triton.jit",
-            "    def _axon_triton_swiglu_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):",
-            "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
+            "    def _axon_triton_swiglu_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr, LONG_INDEXING: tl.constexpr):",
+            "        block_idx = tl.program_id(0)",
+            "        if LONG_INDEXING:",
+            "            offsets = block_idx.to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)",
+            "            n_elements = tl.cast(n_elements, tl.int64)",
+            "        else:",
+            "            offsets = block_idx * BLOCK + tl.arange(0, BLOCK)",
             "        mask = offsets < n_elements",
             "        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
             "        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)",
-            "        tl.store(out_ptr + offsets, gate * tl.sigmoid(gate) * up, mask=mask)",
+            "        f = gate * tl.sigmoid(gate)",
+            "        f = f.to(up.dtype)",
+            "        h = f * up",
+            "        tl.store(out_ptr + offsets, h, mask=mask)",
             "    @triton.jit",
-            "    def _axon_triton_geglu_tanh_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):",
-            "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
+            "    def _axon_triton_geglu_tanh_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr, LONG_INDEXING: tl.constexpr):",
+            "        block_idx = tl.program_id(0)",
+            "        if LONG_INDEXING:",
+            "            offsets = block_idx.to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)",
+            "            n_elements = tl.cast(n_elements, tl.int64)",
+            "        else:",
+            "            offsets = block_idx * BLOCK + tl.arange(0, BLOCK)",
             "        mask = offsets < n_elements",
             "        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
             "        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)",
             "        inner = 0.7978845608028654 * (gate + 0.044715 * gate * gate * gate)",
             "        tanh_inner = 2.0 * tl.sigmoid(2.0 * inner) - 1.0",
             "        activated = 0.5 * gate * (1.0 + tanh_inner)",
+            "        activated = activated.to(up.dtype)",
             "        tl.store(out_ptr + offsets, activated * up, mask=mask)",
             "    @triton.jit",
             "    def _axon_triton_grouped_mm_kernel(x_ptr, w_ptr, y_ptr, offsets_ptr, IN_DIM: tl.constexpr, OUT_DIM: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):",

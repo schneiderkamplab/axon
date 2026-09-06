@@ -161,6 +161,8 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
         "__triton_swiglu_activation",
+        "__torch_rope_apply_factors",
+        "__torch_rope_pair_apply_factors",
     }
 )
 _VLLM_BACKEND_INTRINSICS = frozenset(
@@ -15318,6 +15320,19 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="jax_weighted_topk_sum_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-triton":
+            candidate = (
+                _rewrite_torch_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
+                if (
+                    _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_apply_factors")
+                    or _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_pair_apply_factors")
+                )
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_rope_intrinsics")
+                current = candidate
             candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__triton_sdpa")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sdpa")
