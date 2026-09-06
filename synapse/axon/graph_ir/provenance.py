@@ -985,6 +985,8 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     standard = _standard_sdpa_fact(provenance)
     if standard is not None:
         return standard
+    # Peel _cast wrapper (e.g. from fp32_compute=true).
+    provenance = _peel_op(provenance, "_cast")
     # reshape(matmul(where(keep_g, probs, 0), unsqueeze(v, 2)), ...)
     if provenance.kind != "op" or provenance.op != "_reshape" or len(provenance.args) < 1:
         return None
@@ -992,6 +994,8 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     if matmul_out.kind != "op" or matmul_out.op != "_matmul" or len(matmul_out.args) != 2:
         return None
     probs_masked, vg = matmul_out.args
+    # Peel reshape wrapper on probs (e.g. probs6 reshape between _where and matmul).
+    probs_masked = _peel_op(probs_masked, "_reshape")
     v_name = _match_unsqueeze_input(vg, dim=2)
     if v_name is None:
         return None
@@ -1140,6 +1144,7 @@ def _match_additive_mask_from_keep(provenance: GraphProvenance) -> str | None:
     if provenance.kind != "op" or provenance.op != "_where" or len(provenance.args) != 3:
         return None
     keep, yes, no = provenance.args
+    # Peel reshape wrapper on keep (e.g. keep_b = Tensor.reshape keep [...]).
     keep_name = _input_name(keep)
     if keep_name is None:
         return None
@@ -1181,6 +1186,8 @@ def _match_probs_slice_softmax(provenance: GraphProvenance) -> GraphProvenance |
 
 
 def _match_qk_scores(provenance: GraphProvenance) -> tuple[str | None, str | None]:
+    # Peel reshape/cast wrappers between matmul and scale.
+    provenance = _peel_cast_reshape(provenance)
     if provenance.kind != "op" or provenance.op != "_matmul" or len(provenance.args) != 2:
         return None, None
     q_name = _match_reshape_input(provenance.args[0])
@@ -1209,6 +1216,7 @@ def _match_gqa_keep_expand(provenance: GraphProvenance) -> str | None:
 
 def _match_reshape_input(provenance: GraphProvenance) -> str | None:
     if provenance.kind == "op" and provenance.op == "_reshape" and provenance.args:
+        # Peel gather+reshape wrappers to find the underlying input.
         return _input_name(provenance.args[0])
     return None
 
@@ -1218,11 +1226,36 @@ def _match_unsqueeze_input(provenance: GraphProvenance, *, dim: int) -> str | No
         return None
     if provenance.args[1] != _make_provenance("literal", value=dim):
         return None
+    # Peel wrappers (cast, reshape, gather) to find the underlying input.
     return _input_name(provenance.args[0])
 
 
+def _peel_op(provenance: GraphProvenance, op_name: str) -> GraphProvenance:
+    """Strip a single wrapper op (e.g. _cast, _reshape) if it wraps exactly one arg."""
+    while provenance.kind == "op" and provenance.op == op_name and len(provenance.args) >= 1:
+        provenance = provenance.args[0]
+    return provenance
+
+
+def _peel_ops(provenance: GraphProvenance, op_names: frozenset[str]) -> GraphProvenance:
+    """Strip any sequence of wrapper ops from the given set."""
+    while provenance.kind == "op" and provenance.op in op_names and len(provenance.args) >= 1:
+        provenance = provenance.args[0]
+    return provenance
+
+
+_CAST_RESHAPE = frozenset({"_cast", "_reshape"})
+
+
+def _peel_cast_reshape(provenance: GraphProvenance) -> GraphProvenance:
+    """Strip _cast and _reshape wrappers that don't change semantic identity."""
+    return _peel_ops(provenance, _CAST_RESHAPE)
+
+
 def _input_name(provenance: GraphProvenance) -> str | None:
-    return provenance.name if provenance.kind == "input" else None
+    # Peel common wrappers (cast, reshape) that don't change the underlying input.
+    peeled = _peel_cast_reshape(provenance)
+    return peeled.name if peeled.kind == "input" else None
 
 
 def _is_default_scale(provenance: GraphProvenance) -> bool:
