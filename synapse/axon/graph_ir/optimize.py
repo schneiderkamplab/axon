@@ -415,6 +415,43 @@ def _maybe_rewrite_node_to_backend_sdpa(
     return None
 
 
+def _maybe_rewrite_banded_sdpa(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    modules_by_name: Mapping[str, GraphModule],
+    op_name: str,
+) -> GraphNode | None:
+    if len(node.outputs) != 1 or node.attrs or node.op.name not in modules_by_name:
+        return None
+    callee = modules_by_name[node.op.name]
+    if callee.name != "Attention.attention_gqa_banded":
+        return None
+    if len(node.inputs) != len(callee.inputs):
+        return None
+    formal_to_actual = {
+        formal.name: actual
+        for formal, actual in zip(callee.inputs, node.inputs, strict=False)
+    }
+    try:
+        q = formal_to_actual["q"]
+        k = formal_to_actual["k"]
+        v = formal_to_actual["v"]
+        band_idx = formal_to_actual["band_idx"]
+        keep = formal_to_actual["keep"]
+        scale = formal_to_actual["scale"]
+        sink_logits = formal_to_actual["sink_logits"]
+    except KeyError:
+        return None
+    sdpa_inputs = (q, k, v, band_idx, keep, scale, sink_logits)
+    return replace(
+        node,
+        op=GraphOp(op_name),
+        inputs=sdpa_inputs,
+        attrs={},
+    )
+
+
 def _maybe_rewrite_node_to_torch_rope_apply_factors(
     node: GraphNode,
     *,
@@ -5819,6 +5856,13 @@ def _rewrite_backend_sdpa_intrinsics(graph: GraphProgram, *, op_name: str) -> Gr
                 provenance=provenance,
                 op_name=op_name,
             )
+            if rewritten is None and op_name == "__mlx_sdpa":
+                rewritten = _maybe_rewrite_banded_sdpa(
+                    node,
+                    module=module,
+                    modules_by_name=modules_by_name,
+                    op_name="__mlx_sdpa_banded",
+                )
             if rewritten is None:
                 new_nodes.append(node)
             else:

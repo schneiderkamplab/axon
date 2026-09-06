@@ -95,6 +95,7 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "activations_xielu",
     "cumsum",
     "_mlx_sdpa",
+    "_mlx_sdpa_banded",
     "_mlx_rope",
     "_mlx_rmsnorm_scaled",
 })
@@ -1118,6 +1119,27 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "inv_sort = mx.argsort(sort_idx)")
         add(lines, 8, "return y_sorted[inv_sort].reshape(leading + (-1,))")
         add(lines, 4, "")
+        add(lines, 4, "def _sdpa_banded(self, q, k, v, band_idx, keep, scale, sinks):")
+        add(lines, 8, "S = band_idx.shape[0]")
+        add(lines, 8, "k_range = mx.arange(S, dtype=band_idx.dtype)")
+        add(lines, 8, "banded = (band_idx[:, :, None] == k_range[None, None, :])")
+        add(lines, 8, "mask_bool = (keep[:, :, :, None] & banded[None, :, :, :]).any(axis=2)")
+        add(lines, 8, "mask = mx.where(mask_bool, mx.array(0.0, dtype=q.dtype), mx.array(float('-inf'), dtype=q.dtype))")
+        add(lines, 8, "mask = mask[:, None, :, :]")
+        add(lines, 8, "if scale is None:")
+        add(lines, 12, "scale = 1.0 / (q.shape[-1] ** 0.5)")
+        add(lines, 8, "scale = float(scale)")
+        add(lines, 8, "if sinks is not None:")
+        add(lines, 12, "if sinks.ndim > 1:")
+        add(lines, 16, "n_heads = q.shape[1]")
+        add(lines, 16, "axes = tuple(i for i in range(sinks.ndim) if i != 1 and sinks.shape[i] != 1)")
+        add(lines, 16, "if axes:")
+        add(lines, 20, "sinks = sinks.mean(axis=axes)")
+        add(lines, 16, "sinks = sinks.reshape(-1)[:n_heads]")
+        add(lines, 12, "sinks = sinks.astype(q.dtype)")
+        add(lines, 12, "return mx.fast.scaled_dot_product_attention(q, k, v, mask=mask, scale=scale, sinks=sinks)")
+        add(lines, 8, "return mx.fast.scaled_dot_product_attention(q, k, v, mask=mask, scale=scale)")
+        add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _gegelu(x, limit=None):")
         add(lines, 8, "if x.shape[-1] % 2 != 0: raise ValueError('gegelu requires even last dimension')")
@@ -1507,6 +1529,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 f"{args[0]}, {args[1]}, {args[2]}, "
                 f"mask={args[3]}, scale={scale})"
             )
+        if primitive == "_mlx_sdpa_banded":
+            if len(args) < 7:
+                raise ValueError("__mlx_sdpa_banded expects q, k, v, band_idx, keep, scale, sink_logits")
+            return f"self._sdpa_banded({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]})"
         if primitive == "layernorm":
             path_operand = node.inputs[0]
             attr_expr = self._param_expr_for_mlx_attr(path_operand, local=local, symbols_dict=symbols_dict)
