@@ -101,6 +101,7 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "_mlx_expert_swiglu_ffn",
     "_mlx_expert_packed_swiglu_ffn",
     "_mlx_weighted_topk_sum",
+    "_mlx_swiglu_activation",
 })
 
 NON_OBVIOUS_MLX_OPS: dict[str, str] = {}
@@ -1539,6 +1540,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             if len(args) < 2:
                 raise ValueError("__mlx_weighted_topk_sum expects expert values and top-k scores")
             return f"mx.sum({args[0]} * mx.expand_dims({args[1]}.astype({args[0]}.dtype), -1), axis=2)"
+        if primitive == "_mlx_swiglu_activation":
+            if len(args) < 2:
+                raise ValueError("__mlx_swiglu_activation expects gate and up")
+            return f"(mx.sigmoid({args[0]}) * {args[0]} * {args[1]})"
         if primitive == "_mlx_sdpa":
             if len(args) < 6:
                 raise ValueError("__mlx_sdpa expects q, k, v, additive_mask, scale, enable_gqa")

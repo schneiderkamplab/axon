@@ -137,6 +137,7 @@ _MLX_BACKEND_INTRINSICS = frozenset(
         "__mlx_sdpa",
         "__mlx_rmsnorm_scaled",
         "__mlx_rope",
+        "__mlx_swiglu_activation",
         "__mlx_weighted_topk_sum",
     }
 )
@@ -2100,6 +2101,45 @@ def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphPr
                 replace(
                     mul_node,
                     op=GraphOp("__triton_swiglu_activation"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 1
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_mlx_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            node = module.nodes[index]
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_swiglu_activation_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            mul_node = node
+            changed = True
+            new_nodes.append(
+                replace(
+                    mul_node,
+                    op=GraphOp("__mlx_swiglu_activation"),
                     inputs=inputs,
                     attrs={},
                 )
@@ -15248,6 +15288,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="mlx_weighted_topk_sum_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_mlx_swiglu_activation_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_swiglu_activation")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_swiglu_activation_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-jax":
             jax_sub_start = time.perf_counter() if debug_timings else 0.0
