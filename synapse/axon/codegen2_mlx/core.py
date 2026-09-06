@@ -782,6 +782,38 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "del state_dict[scale_key]")
         add(lines, 8, "return state_dict")
         add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _materialize_int8_quantized(state_dict):")
+        add(lines, 8, "# W8A16 export layout: keep weights quantized in MLX's uint32 packed")
+        add(lines, 8, "# format with per-group scales/biases for use with mx.quantized_matmul,")
+        add(lines, 8, "# instead of dequantizing to bf16 on load.  Re-quantizes from W8A16")
+        add(lines, 8, "# (per-channel symmetric) to MLX's per-group affine format.")
+        add(lines, 8, "for key in list(state_dict.keys()):")
+        add(lines, 12, "k = str(key)")
+        add(lines, 12, "if not k.endswith('.int8'):")
+        add(lines, 16, "continue")
+        add(lines, 12, "base = k[: -len('.int8')]")
+        add(lines, 12, "scale_key = f'{base}.scale'")
+        add(lines, 12, "if scale_key not in state_dict or base in state_dict:")
+        add(lines, 16, "continue")
+        add(lines, 12, "q = state_dict[key]")
+        add(lines, 12, "if not isinstance(q, mx.array):")
+        add(lines, 16, "q = mx.array(q)")
+        add(lines, 12, "scale = state_dict[scale_key]")
+        add(lines, 12, "if not isinstance(scale, mx.array):")
+        add(lines, 16, "scale = mx.array(scale)")
+        add(lines, 12, "w = q.astype(mx.float32) * mx.expand_dims(scale.astype(mx.float32), 1)")
+        add(lines, 12, "if w.ndim == 2 and w.shape[-1] % 64 == 0:")
+        add(lines, 16, "w_q, scales_mlx, biases_mlx = mx.quantize(w, group_size=64, bits=8)")
+        add(lines, 16, "state_dict[key] = w_q")
+        add(lines, 16, "state_dict[scale_key] = scales_mlx")
+        add(lines, 16, "state_dict[f'{base}.qbias'] = biases_mlx")
+        add(lines, 12, "else:")
+        add(lines, 16, "state_dict[base] = w.astype(mx.bfloat16)")
+        add(lines, 16, "del state_dict[key]")
+        add(lines, 16, "del state_dict[scale_key]")
+        add(lines, 8, "return state_dict")
+        add(lines, 4, "")
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
@@ -1083,6 +1115,48 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def _linear(base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "raise RuntimeError('internal MLX _linear helper should not be called directly')")
         add(lines, 4, "")
+        add(lines, 4, "def _is_quantized_path(self, path):")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "return f'{key}.int8' in self._flat_tensors and f'{key}.scale' in self._flat_tensors")
+        add(lines, 4, "")
+        add(lines, 4, "def _quantized_matmul(self, path, x, bias=None, transpose=True):")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "int8_key = f'{key}.int8'")
+        add(lines, 8, "scale_key = f'{key}.scale'")
+        add(lines, 8, "qbias_key = f'{key}.qbias'")
+        add(lines, 8, "if int8_key not in self._flat_tensors or scale_key not in self._flat_tensors:")
+        add(lines, 12, "w = self._param(path)")
+        add(lines, 12, "if transpose:")
+        add(lines, 16, "w = w.swapaxes(-1, -2)")
+        add(lines, 12, "if bias is not None:")
+        add(lines, 16, "return mx.addmm(bias, x, w)")
+        add(lines, 12, "return x @ w")
+        add(lines, 8, "q_weight = self._flat_tensors[int8_key]")
+        add(lines, 8, "scales = self._flat_tensors[scale_key]")
+        add(lines, 8, "biases = self._flat_tensors.get(qbias_key)")
+        add(lines, 8, "if biases is None:")
+        add(lines, 12, "biases = mx.zeros(scales.shape, dtype=scales.dtype)")
+        add(lines, 8, "result = mx.quantized_matmul(x, q_weight, scales, biases=biases, transpose=transpose, group_size=64, bits=8)")
+        add(lines, 8, "if bias is not None:")
+        add(lines, 12, "result = result + bias")
+        add(lines, 8, "return result")
+        add(lines, 4, "")
+        add(lines, 4, "def _linear_matmul(self, path, x, bias=None, transpose=False):")
+        add(lines, 8, "# transpose=False: weight stored as (out, in), needs swap for matmul")
+        add(lines, 8, "# transpose=True:  weight stored as (in, out), no swap needed")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "int8_key = f'{key}.int8'")
+        add(lines, 8, "scale_key = f'{key}.scale'")
+        add(lines, 8, "if int8_key in self._flat_tensors and scale_key in self._flat_tensors:")
+        add(lines, 12, "# mx.quantized_matmul transpose=True means x @ w.T (w stored as (out, in))")
+        add(lines, 12, "return self._quantized_matmul(path, x, bias=bias, transpose=not transpose)")
+        add(lines, 8, "w = self._param(path)")
+        add(lines, 8, "if not transpose:")
+        add(lines, 12, "w = w.swapaxes(-1, -2)")
+        add(lines, 8, "if bias is not None:")
+        add(lines, 12, "return mx.addmm(bias, x, w)")
+        add(lines, 8, "return x @ w")
+        add(lines, 4, "")
         add(lines, 4, "def _expert_linear(self, base, x, expert_idx, bias=False, transpose=False, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "# Group-by-expert matmul: sort tokens by expert index, do per-expert")
         add(lines, 8, "# 2D matmuls on contiguous slices, then unsort.  This avoids gathering")
@@ -1178,13 +1252,18 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
 
     def _emit_load_state_dict(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, dtype=None):")
-        add(lines, 8, "state_dict = self._materialize_int8_aliases(dict(state_dict))")
+        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, quantized=False, dtype=None):")
+        add(lines, 8, "if quantized:")
+        add(lines, 12, "state_dict = self._materialize_int8_quantized(dict(state_dict))")
+        add(lines, 8, "else:")
+        add(lines, 12, "state_dict = self._materialize_int8_aliases(dict(state_dict))")
         add(lines, 8, "state_dict = self._materialize_state_aliases(state_dict)")
         add(lines, 8, "target = self._dtype_from_name(dtype) if dtype else None")
         add(lines, 8, "tensors = {}")
         add(lines, 8, "for k, v in state_dict.items():")
-        add(lines, 12, "if isinstance(v, mx.array):")
+        add(lines, 12, "if quantized and (str(k).endswith('.int8') or str(k).endswith('.scale') or str(k).endswith('.qbias')):")
+        add(lines, 16, "tensors[str(k)] = v if isinstance(v, mx.array) else self._from_numpy(v)")
+        add(lines, 12, "elif isinstance(v, mx.array):")
         add(lines, 16, "tensors[str(k)] = v.astype(target) if target is not None else v")
         add(lines, 12, "else:")
         add(lines, 16, "arr = self._from_numpy(v)")
@@ -1218,6 +1297,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 add(lines, 8, "")
         self._emitted_module_attrs = [_path_to_safe_attr(p) for p in self._static_param_ops]
         add(lines, 8, "self._flat_tensors = tensors")
+        add(lines, 8, "if quantized:")
+        add(lines, 12, "self._quantized = True")
         add(lines, 8, "")
         add(lines, 8, "object.__setattr__(self, '_symbols', self._eval_symbols())")
         add(lines, 8, "")
@@ -1502,18 +1583,16 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             if expert == "None":
                 if weight_leaf == "'weight'":
-                    w_expr = f"self._param(self._compose_path({args[0]}, {weight_leaf}))"
+                    path_expr = f"self._compose_path({args[0]}, {weight_leaf})"
                 else:
-                    w_expr = f"self._param({weight_leaf})"
-                if transpose == "False":
-                    w_expr = f"{w_expr}.swapaxes(-1, -2)"
+                    path_expr = weight_leaf
                 if bias == "False":
-                    return f"({args[1]} @ {w_expr})"
+                    return f"self._linear_matmul({path_expr}, {args[1]}, transpose=bool({transpose}))"
                 if bias_leaf == "'bias'":
                     b_expr = f"self._optional_param(self._compose_path({args[0]}, {bias_leaf}))"
                 else:
                     b_expr = f"self._optional_param({bias_leaf})"
-                return f"(lambda _b: (mx.addmm(_b, {args[1]}, {w_expr}) if _b is not None else ({args[1]} @ {w_expr})))({b_expr})"
+                return f"self._linear_matmul({path_expr}, {args[1]}, bias={b_expr}, transpose=bool({transpose}))"
             return (
                 f"(lambda _w, _b: "
                 f"(mx.addmm(_b, {args[1]}, _w.swapaxes(-1, -2)) if _b is not None else ({args[1]} @ _w.swapaxes(-1, -2)))"
