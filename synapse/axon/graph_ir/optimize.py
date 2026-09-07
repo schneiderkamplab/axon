@@ -166,6 +166,8 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
         "__triton_swiglu_activation",
+        "__torch_rope_apply_factors",
+        "__torch_rope_pair_apply_factors",
     }
 )
 _VLLM_BACKEND_INTRINSICS = frozenset(
@@ -6126,6 +6128,57 @@ def _rewrite_backend_sdpa_intrinsics(graph: GraphProgram, *, op_name: str) -> Gr
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
+def _eliminate_gqa_repeat_for_sdpa(graph: GraphProgram) -> GraphProgram:
+    """Eliminate Tensor.repeat(k, ratio, dim=1) when K/V feed into __torch_sdpa/__triton_sdpa with enable_gqa=True.
+
+    When enable_gqa=True, SDPA handles different q/k/v head counts natively.
+    A preceding Tensor.repeat (repeat_interleave) that expands KV heads is redundant.
+    """
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        # Map output value names to the repeat node's source operand.
+        repeat_sources: dict[str, GraphOperand] = {}
+        for node in module.nodes:
+            if node.op.name.startswith("Tensor.repeat") and len(node.inputs) >= 1:
+                for out in node.outputs:
+                    repeat_sources[out.name] = node.inputs[0]
+        if not repeat_sources:
+            new_modules.append(module)
+            continue
+        # Track which repeat outputs are still referenced after rewiring.
+        eliminated_outputs: set[str] = set()
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if "sdpa" in node.op.name and len(node.inputs) >= 6:
+                enable_gqa = node.inputs[5]
+                if isinstance(enable_gqa, GraphLiteral) and enable_gqa.value is True:
+                    new_inputs = list(node.inputs)
+                    replaced = False
+                    for idx in (1, 2):  # k=1, v=2
+                        inp = new_inputs[idx]
+                        if isinstance(inp, GraphValueRef) and inp.name in repeat_sources:
+                            eliminated_outputs.add(inp.name)
+                            new_inputs[idx] = repeat_sources[inp.name]
+                            replaced = True
+                    if replaced:
+                        node = replace(node, inputs=tuple(new_inputs))
+                        changed = True
+            new_nodes.append(node)
+        # Remove dead Tensor.repeat nodes whose only consumer was the SDPA.
+        if eliminated_outputs:
+            new_nodes = [
+                n for n in new_nodes
+                if not (
+                    n.op.name.startswith("Tensor.repeat")
+                    and all(o.name in eliminated_outputs for o in n.outputs)
+                    and len(n.outputs) >= 1
+                )
+            ]
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
 def _canonical_specialization_operand(
     operand: GraphOperand,
     *,
@@ -11071,6 +11124,19 @@ def _node_replacement(
         typed_null_fold = _fold_typed_null_comparison(node.op.name, left, right)
         if typed_null_fold is not None:
             return typed_null_fold
+        if (
+            node.op.name == "core.binary.-"
+            and isinstance(left, GraphValueRef)
+            and isinstance(right, GraphValueRef)
+            and left.name == right.name
+        ):
+            return GraphExpr(
+                op=GraphOp("_zeros_like"),
+                inputs=(left,),
+                attrs={},
+                type_expr=node.outputs[0].type_expr,
+                dims=node.outputs[0].dims,
+            )
         if isinstance(left, GraphLiteral) and isinstance(right, GraphLiteral):
             return _fold_graph_binary(node.op.name, left, right, node)
         dim_fold = _fold_dim_binary_operand(
@@ -15347,6 +15413,11 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_sdpa_intrinsics")
+                candidate = _eliminate_gqa_repeat_for_sdpa(candidate)
+                if candidate != current:
+                    candidate = _alpha_rename_shadowed_type_dims(candidate)
+                    candidate = _sanitize_graph_constraints(candidate)
+                    _validate_optimizer_graph(candidate, phase="gqa_repeat_elimination")
                 current = candidate
             candidate = (
                 _rewrite_torch_swiglu_ffn_intrinsics(current)
@@ -15438,6 +15509,11 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="tinygrad_sdpa_intrinsics")
+                candidate = _eliminate_gqa_repeat_for_sdpa(candidate)
+                if candidate != current:
+                    candidate = _alpha_rename_shadowed_type_dims(candidate)
+                    candidate = _sanitize_graph_constraints(candidate)
+                    _validate_optimizer_graph(candidate, phase="tinygrad_gqa_repeat_elimination")
                 current = candidate
         if backend_intrinsic_target == "codegen2-mlx":
             candidate = (
@@ -15449,6 +15525,11 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="mlx_sdpa_intrinsics")
+                candidate = _eliminate_gqa_repeat_for_sdpa(candidate)
+                if candidate != current:
+                    candidate = _alpha_rename_shadowed_type_dims(candidate)
+                    candidate = _sanitize_graph_constraints(candidate)
+                    _validate_optimizer_graph(candidate, phase="mlx_gqa_repeat_elimination")
                 current = candidate
             candidate = (
                 _rewrite_mlx_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
@@ -15539,6 +15620,11 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_sdpa_intrinsics")
+                candidate = _eliminate_gqa_repeat_for_sdpa(candidate)
+                if candidate != current:
+                    candidate = _alpha_rename_shadowed_type_dims(candidate)
+                    candidate = _sanitize_graph_constraints(candidate)
+                    _validate_optimizer_graph(candidate, phase="jax_gqa_repeat_elimination")
                 current = candidate
             jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
@@ -15667,6 +15753,19 @@ def optimize_graph_program(
                 current = candidate
         if backend_intrinsic_target == "codegen2-triton":
             candidate = (
+                _rewrite_torch_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
+                if (
+                    _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_apply_factors")
+                    or _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_pair_apply_factors")
+                )
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_rope_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__triton_sdpa")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sdpa")
                 else current
@@ -15675,6 +15774,11 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_sdpa_intrinsics")
+                candidate = _eliminate_gqa_repeat_for_sdpa(candidate)
+                if candidate != current:
+                    candidate = _alpha_rename_shadowed_type_dims(candidate)
+                    candidate = _sanitize_graph_constraints(candidate)
+                    _validate_optimizer_graph(candidate, phase="triton_gqa_repeat_elimination")
                 current = candidate
             candidate = (
                 _rewrite_triton_rmsnorm_scaled_intrinsics(current)
