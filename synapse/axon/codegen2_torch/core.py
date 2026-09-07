@@ -2479,8 +2479,7 @@ class Codegen2GraphModel(nn.Module):
             if primitive == "activations_gelu":
                 out(F.gelu(x))
             else:
-                x_f = x.float() if x.is_floating_point() else x
-                out((0.5 * x_f * (1.0 + torch.tanh(0.7978845608028654 * (x_f + 0.044715 * x_f * x_f * x_f)))).to(dtype=x.dtype))
+                out(F.gelu(x, approximate='tanh'))
             return True
         if primitive == "activations_tanh":
             out(torch.tanh(args[0]))
@@ -5209,13 +5208,13 @@ class _DirectTorchEmitter:
             self._add(lines, indent, f"{x_name} = {args[1]}")
         if transpose_literal is True:
             if bias_literal is False:
-                op_expr = f"torch.matmul({x_name}, {weight_name})"
+                op_expr = f"F.linear({x_name}, {weight_name}.t())"
             else:
-                op_expr = f"torch.matmul({x_name}, {weight_name}) + ({bias_arg} if {bias_arg} is not None else 0)"
+                op_expr = f"F.linear({x_name}, {weight_name}.t(), {bias_arg})"
         elif transpose_literal is False:
             op_expr = f"F.linear({x_name}, {weight_name}, {bias_arg})"
         else:
-            op_expr = f"(torch.matmul({x_name}, {weight_name}) + ({bias_arg} if {bias_arg} is not None else 0) if {transpose_expr} else F.linear({x_name}, {weight_name}, {bias_arg}))"
+            op_expr = f"(F.linear({x_name}, {weight_name}.t(), {bias_arg}) if {transpose_expr} else F.linear({x_name}, {weight_name}, {bias_arg}))"
         if self.profile:
             self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {op_expr})")
         else:
@@ -6191,8 +6190,8 @@ class _DirectTorchEmitter:
             "activations_relu": lambda: f"F.relu({args[0]})",
             "activations_relu2": lambda: f"(F.relu({args[0]}) * F.relu({args[0]}))",
             "activations_gelu": lambda: f"F.gelu({args[0]})",
-            "activations_gelu_new": lambda: f"(0.5 * {args[0]}.float() * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]}.float() + 0.044715 * {args[0]}.float() * {args[0]}.float() * {args[0]}.float())))).to(dtype={args[0]}.dtype)",
-            "activations_gelu_pytorch_tanh": lambda: f"(0.5 * {args[0]}.float() * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]}.float() + 0.044715 * {args[0]}.float() * {args[0]}.float() * {args[0]}.float())))).to(dtype={args[0]}.dtype)",
+            "activations_gelu_new": lambda: f"F.gelu({args[0]}, approximate='tanh')",
+            "activations_gelu_pytorch_tanh": lambda: f"F.gelu({args[0]}, approximate='tanh')",
             "activations_gegelu": lambda: f"self._gegelu({args[0]}, {args[1] if len(args) > 1 else 'None'})",
             "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",
