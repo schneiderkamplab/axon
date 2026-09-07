@@ -161,6 +161,8 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
         "__triton_swiglu_activation",
+        "__torch_rope_apply_factors",
+        "__torch_rope_pair_apply_factors",
     }
 )
 _VLLM_BACKEND_INTRINSICS = frozenset(
@@ -10868,6 +10870,19 @@ def _node_replacement(
         typed_null_fold = _fold_typed_null_comparison(node.op.name, left, right)
         if typed_null_fold is not None:
             return typed_null_fold
+        if (
+            node.op.name == "core.binary.-"
+            and isinstance(left, GraphValueRef)
+            and isinstance(right, GraphValueRef)
+            and left.name == right.name
+        ):
+            return GraphExpr(
+                op=GraphOp("_zeros_like"),
+                inputs=(left,),
+                attrs={},
+                type_expr=node.outputs[0].type_expr,
+                dims=node.outputs[0].dims,
+            )
         if isinstance(left, GraphLiteral) and isinstance(right, GraphLiteral):
             return _fold_graph_binary(node.op.name, left, right, node)
         dim_fold = _fold_dim_binary_operand(
@@ -15433,6 +15448,19 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="jax_weighted_topk_sum_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-triton":
+            candidate = (
+                _rewrite_torch_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
+                if (
+                    _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_apply_factors")
+                    or _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_pair_apply_factors")
+                )
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_rope_intrinsics")
+                current = candidate
             candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__triton_sdpa")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sdpa")
