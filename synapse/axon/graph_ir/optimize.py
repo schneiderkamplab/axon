@@ -138,6 +138,7 @@ _MLX_BACKEND_INTRINSICS = frozenset(
         "__mlx_rmsnorm_scaled",
         "__mlx_rope",
         "__mlx_swiglu_activation",
+        "__mlx_gegelu_activation",
         "__mlx_weighted_topk_sum",
     }
 )
@@ -487,7 +488,7 @@ def _maybe_rewrite_node_to_torch_rope_apply_factors(
     operands = _match_rope_apply_factors_operands(node, value_to_node=value_to_node)
     if operands is None:
         return None
-    x, sin, cos = operands
+    x, sin, cos, _interleaved = operands
     return replace(
         node,
         op=GraphOp("__torch_rope_apply_factors"),
@@ -506,6 +507,7 @@ def _maybe_rewrite_call_to_torch_rope_apply_factors(
     *,
     modules_by_name: Mapping[str, GraphModule],
     provenance,
+    allow_interleaved: bool = False,
 ) -> GraphNode | None:
     callee = modules_by_name.get(node.op.name)
     if callee is None or node.attrs or len(node.inputs) != len(callee.inputs):
@@ -522,6 +524,8 @@ def _maybe_rewrite_call_to_torch_rope_apply_factors(
     ):
         fact = output_facts[0]
         assert fact is not None
+        if not allow_interleaved and fact.interleaved:
+            return None
         actuals = _rope_fact_actuals(fact, callee=callee, node=node)
         if actuals is None:
             return None
@@ -533,13 +537,15 @@ def _maybe_rewrite_call_to_torch_rope_apply_factors(
                 x,
                 sin,
                 cos,
-                GraphLiteral(value=False, type_expr=TypeBool()),
+                GraphLiteral(value=fact.interleaved, type_expr=TypeBool()),
             ),
             attrs={},
         )
     if len(node.outputs) == 2 and len(output_facts) >= 2:
         first, second = output_facts[:2]
         if first is None or second is None:
+            return None
+        if not allow_interleaved and (first.interleaved or second.interleaved):
             return None
         first_actuals = _rope_fact_actuals(first, callee=callee, node=node)
         second_actuals = _rope_fact_actuals(second, callee=callee, node=node)
@@ -557,7 +563,7 @@ def _maybe_rewrite_call_to_torch_rope_apply_factors(
                 k,
                 sin_a,
                 cos_a,
-                GraphLiteral(value=False, type_expr=TypeBool()),
+                GraphLiteral(value=first.interleaved, type_expr=TypeBool()),
             ),
             attrs={},
         )
@@ -5323,6 +5329,135 @@ def _rewrite_packed_gegelu_intrinsics(graph: GraphProgram) -> GraphProgram:
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
+def _match_split_halves_clamped_channels(
+    gate: GraphProvenance,
+    up: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    if gate.kind != "op" or gate.op != "_clamp" or len(gate.args) < 3:
+        return None
+    if up.kind != "op" or up.op != "_clamp" or len(up.args) < 3:
+        return None
+    gate_raw, gate_min, gate_max = gate.args[:3]
+    up_raw, up_min, up_max = up.args[:3]
+    if not _is_literal_provenance_value(gate_min, None):
+        return None
+    if gate_max != up_max:
+        return None
+    if not _match_limit_negation(up_min, gate_max):
+        if not (
+            up_min.kind == "literal"
+            and gate_max.kind == "literal"
+            and isinstance(up_min.value, (int, float))
+            and isinstance(gate_max.value, (int, float))
+            and up_min.value == -gate_max.value
+        ):
+            return None
+    chunk_match = _match_chunk_output_pair(gate_raw, up_raw)
+    if chunk_match is None:
+        return None
+    source, _parts = chunk_match
+    return source, gate_max
+
+
+def _match_split_halves_gegelu_activation(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    outer_mul_args = _provenance_binary_args(provenance, "core.binary.*", "_mul")
+    if outer_mul_args is None:
+        return None
+    for up_plus_one, gate_term in (outer_mul_args, outer_mul_args[::-1]):
+        add_args = _provenance_binary_args(up_plus_one, "core.binary.+", "_add")
+        if add_args is None:
+            continue
+        up_candidate: GraphProvenance | None = None
+        if _is_literal_number_provenance_value(add_args[0], 1.0):
+            up_candidate = add_args[1]
+        elif _is_literal_number_provenance_value(add_args[1], 1.0):
+            up_candidate = add_args[0]
+        if up_candidate is None:
+            continue
+        gate_term_args = _provenance_binary_args(gate_term, "core.binary.*", "_mul")
+        if gate_term_args is None:
+            continue
+        for gate_candidate, sigmoid_candidate in (gate_term_args, gate_term_args[::-1]):
+            if (
+                sigmoid_candidate.kind != "op"
+                or sigmoid_candidate.op != "_activations_sigmoid"
+                or len(sigmoid_candidate.args) != 1
+            ):
+                continue
+            sigmoid_input_args = _provenance_binary_args(
+                sigmoid_candidate.args[0], "core.binary.*", "_mul"
+            )
+            if sigmoid_input_args is None:
+                continue
+            alpha: GraphProvenance | None = None
+            if sigmoid_input_args[0] == gate_candidate:
+                alpha = sigmoid_input_args[1]
+            elif sigmoid_input_args[1] == gate_candidate:
+                alpha = sigmoid_input_args[0]
+            if alpha is None:
+                continue
+            if not _is_literal_number_provenance_value(alpha, 1.702):
+                continue
+            matched = _match_split_halves_clamped_channels(gate_candidate, up_candidate)
+            if matched is not None:
+                source, limit = matched
+                return source, limit
+    return None
+
+
+def _rewrite_mlx_gegelu_activation_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if len(node.outputs) != 1:
+                new_nodes.append(node)
+                continue
+            output_provenance = local_provenance.get(node.outputs[0].name)
+            if output_provenance is None:
+                new_nodes.append(node)
+                continue
+            matched = _match_split_halves_gegelu_activation(output_provenance)
+            if matched is None:
+                new_nodes.append(node)
+                continue
+            source_provenance, limit_provenance = matched
+            source_operand = _provenance_to_graph_operand(
+                source_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            limit_operand = _provenance_to_graph_operand(
+                limit_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if source_operand is None or limit_operand is None:
+                new_nodes.append(node)
+                continue
+            if not _packed_gegelu_type_shape_matches(source_operand, node.outputs[0].type_expr):
+                new_nodes.append(node)
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp("__mlx_gegelu_activation"),
+                    inputs=(source_operand, limit_operand),
+                    attrs={},
+                )
+            )
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
 def _provenance_to_graph_operand(
     provenance: GraphProvenance,
     *,
@@ -5360,7 +5495,6 @@ def _single_rope_apply_fact(
         for fact in facts
         if fact.kind == "rope_apply_factors"
         and isinstance(fact.value, GraphRopeApplyFactorsFact)
-        and not fact.value.interleaved
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -5431,14 +5565,22 @@ def _maybe_rewrite_node_to_mlx_rope(
         node,
         modules_by_name=modules_by_name,
         provenance=provenance,
+        allow_interleaved=True,
     )
     if call_rewrite is not None:
-        x = call_rewrite.inputs[0]
-        interleaved = call_rewrite.inputs[3]
+        if call_rewrite.op.name == "__torch_rope_pair_apply_factors":
+            q, k, sin, cos, interleaved = call_rewrite.inputs
+            return replace(
+                node,
+                op=GraphOp("__mlx_rope"),
+                inputs=(q, k, interleaved, sin, cos),
+                attrs={},
+            )
+        x, sin, cos, interleaved = call_rewrite.inputs
         return replace(
             node,
             op=GraphOp("__mlx_rope"),
-            inputs=(x, interleaved),
+            inputs=(x, interleaved, sin, cos),
             attrs={},
         )
     if len(node.outputs) != 1:
@@ -5450,20 +5592,19 @@ def _maybe_rewrite_node_to_mlx_rope(
     if not any(
         fact.kind == "rope_apply_factors"
         and isinstance(fact.value, GraphRopeApplyFactorsFact)
-        and not fact.value.interleaved
         for fact in graph_provenance_facts(output_provenance)
     ):
         return None
     operands = _match_rope_apply_factors_operands(node, value_to_node=value_to_node)
     if operands is None:
         return None
-    x, sin, cos = operands
+    x, sin, cos, interleaved = operands
     return replace(
         node,
         op=GraphOp("__mlx_rope"),
         inputs=(
             x,
-            GraphLiteral(value=False, type_expr=TypeBool()),
+            GraphLiteral(value=interleaved, type_expr=TypeBool()),
             sin,
             cos,
         ),
@@ -5547,7 +5688,7 @@ def _maybe_rewrite_node_to_jax_rope(
     operands = _match_rope_apply_factors_operands(node, value_to_node=value_to_node)
     if operands is None:
         return None
-    x, sin, cos = operands
+    x, sin, cos, _interleaved = operands
     return replace(
         node,
         op=GraphOp("__jax_rope"),
@@ -5757,7 +5898,7 @@ def _match_rope_apply_factors_operands(
     node: GraphNode,
     *,
     value_to_node: Mapping[str, GraphNode] | None = None,
-) -> tuple[GraphOperand, GraphOperand, GraphOperand] | None:
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, bool] | None:
     if node.attrs:
         return None
     left, right = _match_graph_binary(node.op.name, node.inputs, "core.binary.+")
@@ -5767,12 +5908,12 @@ def _match_rope_apply_factors_operands(
     second = _match_rope_scaled_operand(right, value_to_node=value_to_node)
     if first is None or second is None:
         return None
-    x_a, factor_a, rotated_a = first
-    x_b, factor_b, rotated_b = second
+    x_a, factor_a, rotated_a, interleaved_a = first
+    x_b, factor_b, rotated_b, interleaved_b = second
     if not rotated_a and rotated_b and x_a == x_b:
-        return x_a, factor_b, factor_a
+        return x_a, factor_b, factor_a, interleaved_b
     if not rotated_b and rotated_a and x_a == x_b:
-        return x_a, factor_a, factor_b
+        return x_a, factor_a, factor_b, interleaved_a
     return None
 
 
@@ -5780,20 +5921,26 @@ def _match_rope_scaled_operand(
     operand: GraphOperand,
     *,
     value_to_node: Mapping[str, GraphNode] | None = None,
-) -> tuple[GraphOperand, GraphOperand, bool] | None:
+) -> tuple[GraphOperand, GraphOperand, bool, bool] | None:
     left, right = _match_graph_expr_binary(operand, "core.binary.*")
     if left is None or right is None:
         return None
     left_rot = _match_rope_rotate_half_noninterleaved_operand(left, value_to_node=value_to_node)
     if left_rot is not None:
-        return left_rot, right, True
+        return left_rot, right, True, False
     right_rot = _match_rope_rotate_half_noninterleaved_operand(right, value_to_node=value_to_node)
     if right_rot is not None:
-        return right_rot, left, True
+        return right_rot, left, True, False
+    left_rot_i = _match_rope_rotate_half_interleaved_operand(left, value_to_node=value_to_node)
+    if left_rot_i is not None:
+        return left_rot_i, right, True, True
+    right_rot_i = _match_rope_rotate_half_interleaved_operand(right, value_to_node=value_to_node)
+    if right_rot_i is not None:
+        return right_rot_i, left, True, True
     if _is_expand_operand(right, value_to_node=value_to_node):
-        return left, right, False
+        return left, right, False, False
     if _is_expand_operand(left, value_to_node=value_to_node):
-        return right, left, False
+        return right, left, False, False
     return None
 
 
@@ -5825,6 +5972,70 @@ def _match_rope_rotate_half_noninterleaved_operand(
     if hi_start != lo_end:
         return None
     return x_hi
+
+
+def _peel_reshape_operand_once(
+    operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
+) -> GraphOperand | None:
+    operand = _resolve_value_ref(operand, value_to_node)
+    if not isinstance(operand, GraphExpr) or operand.op.name != "_reshape" or not operand.inputs:
+        return None
+    return operand.inputs[0]
+
+
+def _match_rope_rotate_half_interleaved_operand(
+    operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
+) -> GraphOperand | None:
+    operand = _resolve_value_ref(operand, value_to_node)
+    outer = _peel_reshape_operand_once(operand, value_to_node=value_to_node)
+    if outer is None:
+        return None
+    outer = _resolve_value_ref(outer, value_to_node)
+    if not isinstance(outer, GraphExpr) or outer.op.name != "_concat" or len(outer.inputs) < 3:
+        return None
+    first, second, dim = outer.inputs[:3]
+    if not _is_literal_value(dim, -1):
+        return None
+    first_inner = _peel_reshape_operand_once(first, value_to_node=value_to_node)
+    if first_inner is None:
+        return None
+    neg_left, neg_right = _match_graph_expr_binary(
+        _resolve_value_ref(first_inner, value_to_node), "core.binary.-"
+    )
+    if not _is_literal_value(neg_left, 0) or neg_right is None:
+        return None
+    neg_right_peeled = _peel_reshape_operand_once(neg_right, value_to_node=value_to_node)
+    if neg_right_peeled is None:
+        neg_right_peeled = neg_right
+    odd_slice = _match_slice_operand(neg_right_peeled, value_to_node=value_to_node)
+    if odd_slice is None:
+        return None
+    x_odd_reshaped, odd_dim, odd_start, odd_end = odd_slice
+    second_inner = _peel_reshape_operand_once(second, value_to_node=value_to_node)
+    if second_inner is None:
+        second_inner = second
+    second_inner2 = _peel_reshape_operand_once(second_inner, value_to_node=value_to_node)
+    even_slice = None
+    if second_inner2 is not None:
+        even_slice = _match_slice_operand(second_inner2, value_to_node=value_to_node)
+    if even_slice is None:
+        even_slice = _match_slice_operand(second_inner, value_to_node=value_to_node)
+    if even_slice is None:
+        return None
+    x_even_reshaped, even_dim, even_start, even_end = even_slice
+    if x_odd_reshaped != x_even_reshaped:
+        return None
+    if not _is_literal_value(odd_dim, -1) or not _is_literal_value(even_dim, -1):
+        return None
+    if not _is_literal_value(odd_start, 1) or not _is_literal_value(odd_end, 2):
+        return None
+    if not _is_literal_value(even_start, 0) or not _is_literal_value(even_end, 1):
+        return None
+    return x_odd_reshaped
 
 
 def _match_negated_slice_operand(
@@ -15298,6 +15509,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="mlx_swiglu_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_mlx_gegelu_activation_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_gegelu_activation")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_gegelu_activation_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-jax":
             jax_sub_start = time.perf_counter() if debug_timings else 0.0
