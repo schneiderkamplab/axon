@@ -95,13 +95,8 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "activations_xielu",
     "cumsum",
     "_mlx_sdpa",
-    "_mlx_sdpa_banded",
     "_mlx_rope",
     "_mlx_rmsnorm_scaled",
-    "_mlx_expert_swiglu_ffn",
-    "_mlx_expert_packed_swiglu_ffn",
-    "_mlx_weighted_topk_sum",
-    "_mlx_swiglu_activation",
 })
 
 NON_OBVIOUS_MLX_OPS: dict[str, str] = {}
@@ -782,38 +777,6 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "del state_dict[scale_key]")
         add(lines, 8, "return state_dict")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _materialize_int8_quantized(state_dict):")
-        add(lines, 8, "# W8A16 export layout: keep weights quantized in MLX's uint32 packed")
-        add(lines, 8, "# format with per-group scales/biases for use with mx.quantized_matmul,")
-        add(lines, 8, "# instead of dequantizing to bf16 on load.  Re-quantizes from W8A16")
-        add(lines, 8, "# (per-channel symmetric) to MLX's per-group affine format.")
-        add(lines, 8, "for key in list(state_dict.keys()):")
-        add(lines, 12, "k = str(key)")
-        add(lines, 12, "if not k.endswith('.int8'):")
-        add(lines, 16, "continue")
-        add(lines, 12, "base = k[: -len('.int8')]")
-        add(lines, 12, "scale_key = f'{base}.scale'")
-        add(lines, 12, "if scale_key not in state_dict or base in state_dict:")
-        add(lines, 16, "continue")
-        add(lines, 12, "q = state_dict[key]")
-        add(lines, 12, "if not isinstance(q, mx.array):")
-        add(lines, 16, "q = mx.array(q)")
-        add(lines, 12, "scale = state_dict[scale_key]")
-        add(lines, 12, "if not isinstance(scale, mx.array):")
-        add(lines, 16, "scale = mx.array(scale)")
-        add(lines, 12, "w = q.astype(mx.float32) * mx.expand_dims(scale.astype(mx.float32), 1)")
-        add(lines, 12, "if w.ndim == 2 and w.shape[-1] % 64 == 0:")
-        add(lines, 16, "w_q, scales_mlx, biases_mlx = mx.quantize(w, group_size=64, bits=8)")
-        add(lines, 16, "state_dict[key] = w_q")
-        add(lines, 16, "state_dict[scale_key] = scales_mlx")
-        add(lines, 16, "state_dict[f'{base}.qbias'] = biases_mlx")
-        add(lines, 12, "else:")
-        add(lines, 16, "state_dict[base] = w.astype(mx.bfloat16)")
-        add(lines, 16, "del state_dict[key]")
-        add(lines, 16, "del state_dict[scale_key]")
-        add(lines, 8, "return state_dict")
-        add(lines, 4, "")
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
@@ -1115,120 +1078,23 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def _linear(base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "raise RuntimeError('internal MLX _linear helper should not be called directly')")
         add(lines, 4, "")
-        add(lines, 4, "def _is_quantized_path(self, path):")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "return f'{key}.int8' in self._flat_tensors and f'{key}.scale' in self._flat_tensors")
-        add(lines, 4, "")
-        add(lines, 4, "def _quantized_matmul(self, path, x, bias=None, transpose=True):")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "int8_key = f'{key}.int8'")
-        add(lines, 8, "scale_key = f'{key}.scale'")
-        add(lines, 8, "qbias_key = f'{key}.qbias'")
-        add(lines, 8, "if int8_key not in self._flat_tensors or scale_key not in self._flat_tensors:")
-        add(lines, 12, "w = self._param(path)")
-        add(lines, 12, "if transpose:")
-        add(lines, 16, "w = w.swapaxes(-1, -2)")
-        add(lines, 12, "if bias is not None:")
-        add(lines, 16, "return mx.addmm(bias, x, w)")
-        add(lines, 12, "return x @ w")
-        add(lines, 8, "q_weight = self._flat_tensors[int8_key]")
-        add(lines, 8, "scales = self._flat_tensors[scale_key]")
-        add(lines, 8, "biases = self._flat_tensors.get(qbias_key)")
-        add(lines, 8, "if biases is None:")
-        add(lines, 12, "biases = mx.zeros(scales.shape, dtype=scales.dtype)")
-        add(lines, 8, "result = mx.quantized_matmul(x, q_weight, scales, biases=biases, transpose=transpose, group_size=64, bits=8)")
-        add(lines, 8, "if bias is not None:")
-        add(lines, 12, "result = result + bias")
-        add(lines, 8, "return result")
-        add(lines, 4, "")
-        add(lines, 4, "def _linear_matmul(self, path, x, bias=None, transpose=False):")
-        add(lines, 8, "# transpose=False: weight stored as (out, in), needs swap for matmul")
-        add(lines, 8, "# transpose=True:  weight stored as (in, out), no swap needed")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "int8_key = f'{key}.int8'")
-        add(lines, 8, "scale_key = f'{key}.scale'")
-        add(lines, 8, "if int8_key in self._flat_tensors and scale_key in self._flat_tensors:")
-        add(lines, 12, "# mx.quantized_matmul transpose=True means x @ w.T (w stored as (out, in))")
-        add(lines, 12, "return self._quantized_matmul(path, x, bias=bias, transpose=not transpose)")
-        add(lines, 8, "w = self._param(path)")
-        add(lines, 8, "if not transpose:")
-        add(lines, 12, "w = w.swapaxes(-1, -2)")
-        add(lines, 8, "if bias is not None:")
-        add(lines, 12, "return mx.addmm(bias, x, w)")
-        add(lines, 8, "return x @ w")
-        add(lines, 4, "")
         add(lines, 4, "def _expert_linear(self, base, x, expert_idx, bias=False, transpose=False, weight_leaf='weight', bias_leaf='bias'):")
-        add(lines, 8, "# Group-by-expert matmul: sort tokens by expert index, do per-expert")
-        add(lines, 8, "# 2D matmuls on contiguous slices, then unsort.  This avoids gathering")
-        add(lines, 8, "# the full [B,S,EPT,D,D'] weight bank (~839 MB/layer for the privacy-")
-        add(lines, 8, "# filter) which dominates memory bandwidth and causes OOM at 512 tokens.")
+        add(lines, 8, "# MLX's fused gather-matmul silently corrupts rows past flat index")
+        add(lines, 8, "# ~1310 when the LHS is a stride-0 broadcast view (e.g. an expanded")
+        add(lines, 8, "# token replicated across expert slots); materialize it first.")
+        add(lines, 8, "x = mx.contiguous(x)")
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
-        add(lines, 8, "E = weight.shape[0]")
-        add(lines, 8, "leading = tuple(x.shape[:-1])")
-        add(lines, 8, "N = 1")
-        add(lines, 8, "for _d in leading: N *= _d")
-        add(lines, 8, "D_IN = x.shape[-1]")
-        add(lines, 8, "x_flat = mx.contiguous(x).reshape(N, D_IN)")
-        add(lines, 8, "flat_idx = (expert_idx.astype(mx.int32) if isinstance(expert_idx, mx.array) else mx.array(expert_idx, dtype=mx.int32)).reshape(N)")
-        add(lines, 8, "sort_idx = mx.argsort(flat_idx)")
-        add(lines, 8, "x_sorted = x_flat[sort_idx]")
-        add(lines, 8, "idx_sorted = flat_idx[sort_idx]")
-        add(lines, 8, "mx.eval(idx_sorted)")
-        add(lines, 8, "idx_list = idx_sorted.tolist()")
-        add(lines, 8, "counts = [0] * E")
-        add(lines, 8, "for _i in idx_list: counts[_i] += 1")
-        add(lines, 8, "w = weight if transpose else weight.swapaxes(-1, -2)")
+        add(lines, 8, "idx = expert_idx.astype(mx.int64) if isinstance(expert_idx, mx.array) else expert_idx")
+        add(lines, 8, "selected_weight = weight[idx]")
         add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
-        add(lines, 8, "pieces = []")
-        add(lines, 8, "offset = 0")
-        add(lines, 8, "for e in range(E):")
-        add(lines, 12, "c = counts[e]")
-        add(lines, 12, "if c > 0:")
-        add(lines, 16, "x_e = x_sorted[offset:offset + c]")
-        add(lines, 16, "y_e = x_e @ w[e]")
-        add(lines, 16, "if y_e.dtype != x.dtype: y_e = y_e.astype(x.dtype)")
-        add(lines, 16, "if bias_value is not None:")
-        add(lines, 20, "b_e = bias_value[e]")
-        add(lines, 20, "if b_e.dtype != x.dtype: b_e = b_e.astype(x.dtype)")
-        add(lines, 20, "y_e = y_e + b_e")
-        add(lines, 16, "pieces.append(y_e)")
-        add(lines, 16, "offset += c")
-        add(lines, 8, "y_sorted = mx.concatenate(pieces, axis=0)")
-        add(lines, 8, "inv_sort = mx.argsort(sort_idx)")
-        add(lines, 8, "return y_sorted[inv_sort].reshape(leading + (-1,))")
-        add(lines, 4, "")
-        add(lines, 4, "def _expert_swiglu_ffn(self, x, expert_idx, gate_weight_path, up_weight_path, down_weight_path):")
-        add(lines, 8, "gate = self._expert_linear(gate_weight_path, x, expert_idx, bias=False, transpose=False, weight_leaf='')")
-        add(lines, 8, "up = self._expert_linear(up_weight_path, x, expert_idx, bias=False, transpose=False, weight_leaf='')")
-        add(lines, 8, "hidden = (mx.sigmoid(gate) * gate) * up")
-        add(lines, 8, "return self._expert_linear(down_weight_path, hidden, expert_idx, bias=False, transpose=False, weight_leaf='')")
-        add(lines, 4, "")
-        add(lines, 4, "def _expert_packed_swiglu_ffn(self, x, expert_idx, gate_up_weight_path, down_weight_path, transpose=False):")
-        add(lines, 8, "gate_up = self._expert_linear(gate_up_weight_path, x, expert_idx, bias=False, transpose=transpose, weight_leaf='')")
-        add(lines, 8, "gate, up = mx.split(gate_up, 2, axis=-1)")
-        add(lines, 8, "hidden = (mx.sigmoid(gate) * gate) * up")
-        add(lines, 8, "return self._expert_linear(down_weight_path, hidden, expert_idx, bias=False, transpose=transpose, weight_leaf='')")
-        add(lines, 4, "")
-        add(lines, 4, "def _sdpa_banded(self, q, k, v, band_idx, keep, scale, sinks):")
-        add(lines, 8, "S = band_idx.shape[0]")
-        add(lines, 8, "k_range = mx.arange(S, dtype=band_idx.dtype)")
-        add(lines, 8, "banded = (band_idx[:, :, None] == k_range[None, None, :])")
-        add(lines, 8, "mask_bool = (keep[:, :, :, None] & banded[None, :, :, :]).any(axis=2)")
-        add(lines, 8, "mask = mx.where(mask_bool, mx.array(0.0, dtype=q.dtype), mx.array(float('-inf'), dtype=q.dtype))")
-        add(lines, 8, "mask = mask[:, None, :, :]")
-        add(lines, 8, "if scale is None:")
-        add(lines, 12, "scale = 1.0 / (q.shape[-1] ** 0.5)")
-        add(lines, 8, "scale = float(scale)")
-        add(lines, 8, "if sinks is not None:")
-        add(lines, 12, "if sinks.ndim > 1:")
-        add(lines, 16, "n_heads = q.shape[1]")
-        add(lines, 16, "axes = tuple(i for i in range(sinks.ndim) if i != 1 and sinks.shape[i] != 1)")
-        add(lines, 16, "if axes:")
-        add(lines, 20, "sinks = sinks.mean(axis=axes)")
-        add(lines, 16, "sinks = sinks.reshape(-1)[:n_heads]")
-        add(lines, 12, "sinks = sinks.astype(q.dtype)")
-        add(lines, 12, "return mx.fast.scaled_dot_product_attention(q, k, v, mask=mask, scale=scale, sinks=sinks)")
-        add(lines, 8, "return mx.fast.scaled_dot_product_attention(q, k, v, mask=mask, scale=scale)")
+        add(lines, 8, "selected_bias = bias_value[idx] if bias_value is not None else None")
+        add(lines, 8, "weight_run = selected_weight.astype(x.dtype) if x.dtype != selected_weight.dtype and x.dtype in (mx.float32, mx.float16, mx.bfloat16) else selected_weight")
+        add(lines, 8, "bias_run = selected_bias.astype(x.dtype) if selected_bias is not None and x.dtype != selected_bias.dtype else selected_bias")
+        add(lines, 8, "if transpose:")
+        add(lines, 12, "y = (x[..., None, :] @ weight_run).squeeze(-2)")
+        add(lines, 8, "else:")
+        add(lines, 12, "y = (x[..., None, :] @ weight_run.swapaxes(-1, -2)).squeeze(-2)")
+        add(lines, 8, "return y + bias_run if bias_run is not None else y")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _gegelu(x, limit=None):")
@@ -1252,18 +1118,13 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
 
     def _emit_load_state_dict(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, quantized=False, dtype=None):")
-        add(lines, 8, "if quantized:")
-        add(lines, 12, "state_dict = self._materialize_int8_quantized(dict(state_dict))")
-        add(lines, 8, "else:")
-        add(lines, 12, "state_dict = self._materialize_int8_aliases(dict(state_dict))")
+        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, dtype=None):")
+        add(lines, 8, "state_dict = self._materialize_int8_aliases(dict(state_dict))")
         add(lines, 8, "state_dict = self._materialize_state_aliases(state_dict)")
         add(lines, 8, "target = self._dtype_from_name(dtype) if dtype else None")
         add(lines, 8, "tensors = {}")
         add(lines, 8, "for k, v in state_dict.items():")
-        add(lines, 12, "if quantized and (str(k).endswith('.int8') or str(k).endswith('.scale') or str(k).endswith('.qbias')):")
-        add(lines, 16, "tensors[str(k)] = v if isinstance(v, mx.array) else self._from_numpy(v)")
-        add(lines, 12, "elif isinstance(v, mx.array):")
+        add(lines, 12, "if isinstance(v, mx.array):")
         add(lines, 16, "tensors[str(k)] = v.astype(target) if target is not None else v")
         add(lines, 12, "else:")
         add(lines, 16, "arr = self._from_numpy(v)")
@@ -1297,8 +1158,6 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 add(lines, 8, "")
         self._emitted_module_attrs = [_path_to_safe_attr(p) for p in self._static_param_ops]
         add(lines, 8, "self._flat_tensors = tensors")
-        add(lines, 8, "if quantized:")
-        add(lines, 12, "self._quantized = True")
         add(lines, 8, "")
         add(lines, 8, "object.__setattr__(self, '_symbols', self._eval_symbols())")
         add(lines, 8, "")
@@ -1583,16 +1442,18 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             if expert == "None":
                 if weight_leaf == "'weight'":
-                    path_expr = f"self._compose_path({args[0]}, {weight_leaf})"
+                    w_expr = f"self._param(self._compose_path({args[0]}, {weight_leaf}))"
                 else:
-                    path_expr = weight_leaf
+                    w_expr = f"self._param({weight_leaf})"
+                if transpose == "False":
+                    w_expr = f"{w_expr}.swapaxes(-1, -2)"
                 if bias == "False":
-                    return f"self._linear_matmul({path_expr}, {args[1]}, transpose=bool({transpose}))"
+                    return f"({args[1]} @ {w_expr})"
                 if bias_leaf == "'bias'":
                     b_expr = f"self._optional_param(self._compose_path({args[0]}, {bias_leaf}))"
                 else:
                     b_expr = f"self._optional_param({bias_leaf})"
-                return f"self._linear_matmul({path_expr}, {args[1]}, bias={b_expr}, transpose=bool({transpose}))"
+                return f"(lambda _b: (mx.addmm(_b, {args[1]}, {w_expr}) if _b is not None else ({args[1]} @ {w_expr})))({b_expr})"
             return (
                 f"(lambda _w, _b: "
                 f"(mx.addmm(_b, {args[1]}, _w.swapaxes(-1, -2)) if _b is not None else ({args[1]} @ _w.swapaxes(-1, -2)))"
@@ -1607,22 +1468,6 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias=bool({bias}), transpose=bool({transpose}), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
-        if primitive == "_mlx_expert_swiglu_ffn":
-            if len(args) < 5:
-                raise ValueError("__mlx_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
-            return f"self._expert_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
-        if primitive == "_mlx_expert_packed_swiglu_ffn":
-            if len(args) < 5:
-                raise ValueError("__mlx_expert_packed_swiglu_ffn expects input, expert indices, gate-up/down weight paths, and transpose")
-            return f"self._expert_packed_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, transpose=bool({args[4]}))"
-        if primitive == "_mlx_weighted_topk_sum":
-            if len(args) < 2:
-                raise ValueError("__mlx_weighted_topk_sum expects expert values and top-k scores")
-            return f"mx.sum({args[0]} * mx.expand_dims({args[1]}.astype({args[0]}.dtype), -1), axis=2)"
-        if primitive == "_mlx_swiglu_activation":
-            if len(args) < 2:
-                raise ValueError("__mlx_swiglu_activation expects gate and up")
-            return f"(mx.sigmoid({args[0]}) * {args[0]} * {args[1]})"
         if primitive == "_mlx_sdpa":
             if len(args) < 6:
                 raise ValueError("__mlx_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
@@ -1633,17 +1478,13 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 return (
                     f"mx.fast.scaled_dot_product_attention("
                     f"{args[0]}, {args[1]}, {args[2]}, "
-                    f"mask={args[3]}, scale=1.0/({args[0]}.shape[-1]**0.5))"
+                    f"mask={args[3]}, scale=1.0)"
                 )
             return (
                 f"mx.fast.scaled_dot_product_attention("
                 f"{args[0]}, {args[1]}, {args[2]}, "
                 f"mask={args[3]}, scale={scale})"
             )
-        if primitive == "_mlx_sdpa_banded":
-            if len(args) < 7:
-                raise ValueError("__mlx_sdpa_banded expects q, k, v, band_idx, keep, scale, sink_logits")
-            return f"self._sdpa_banded({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]})"
         if primitive == "layernorm":
             path_operand = node.inputs[0]
             attr_expr = self._param_expr_for_mlx_attr(path_operand, local=local, symbols_dict=symbols_dict)
