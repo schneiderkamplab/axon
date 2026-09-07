@@ -1275,45 +1275,53 @@ def _rope_apply_factors_fact(provenance: GraphProvenance) -> GraphRopeApplyFacto
     second = _match_rope_scaled_term(right)
     if first is None or second is None:
         return None
-    x_a, factor_a, rotated_a = first
-    x_b, factor_b, rotated_b = second
+    x_a, factor_a, rotated_a, interleaved_a = first
+    x_b, factor_b, rotated_b, interleaved_b = second
     if not rotated_a and rotated_b and x_a == x_b:
         return GraphRopeApplyFactorsFact(
             x=x_a,
             cos=factor_a,
             sin=factor_b,
-            interleaved=False,
+            interleaved=interleaved_b,
         )
     if not rotated_b and rotated_a and x_a == x_b:
         return GraphRopeApplyFactorsFact(
             x=x_a,
             cos=factor_b,
             sin=factor_a,
-            interleaved=False,
+            interleaved=interleaved_a,
         )
     return None
 
 
 def _match_rope_scaled_term(
     provenance: GraphProvenance,
-) -> tuple[GraphProvenance, GraphProvenance, bool] | None:
+) -> tuple[GraphProvenance, GraphProvenance, bool, bool] | None:
     left, right = _match_binary_op(provenance, "core.binary.*")
     if left is None or right is None:
         return None
     left_rot = _match_rope_rotate_half_noninterleaved(left)
     if left_rot is not None:
         factor = _match_expand_source(right)
-        return (left_rot, factor, True) if factor is not None else None
+        return (left_rot, factor, True, False) if factor is not None else None
     right_rot = _match_rope_rotate_half_noninterleaved(right)
     if right_rot is not None:
         factor = _match_expand_source(left)
-        return (right_rot, factor, True) if factor is not None else None
+        return (right_rot, factor, True, False) if factor is not None else None
+    left_rot_i = _match_rope_rotate_half_interleaved(left)
+    if left_rot_i is not None:
+        factor = _match_expand_source(right)
+        return (left_rot_i, factor, True, True) if factor is not None else None
+    right_rot_i = _match_rope_rotate_half_interleaved(right)
+    if right_rot_i is not None:
+        factor = _match_expand_source(left)
+        return (right_rot_i, factor, True, True) if factor is not None else None
     factor = _match_expand_source(right)
     if factor is not None:
-        return left, factor, False
+        return (left, factor, False, False)
     factor = _match_expand_source(left)
     if factor is not None:
-        return right, factor, False
+        return (right, factor, False, False)
     return None
 
 
@@ -1347,6 +1355,60 @@ def _match_rope_rotate_half_noninterleaved(
         return None
     # hi_end is the last shape symbol and is intentionally not name-matched.
     return x_hi
+
+
+def _peel_reshape_once(provenance: GraphProvenance) -> GraphProvenance | None:
+    if provenance.kind == "op" and provenance.op == "_reshape" and provenance.args:
+        return provenance.args[0]
+    return None
+
+
+def _match_rope_rotate_half_interleaved(
+    provenance: GraphProvenance,
+) -> GraphProvenance | None:
+    outer = _peel_reshape_once(provenance)
+    if outer is None:
+        return None
+    if outer.kind != "op" or outer.op != "_concat" or len(outer.args) < 3:
+        return None
+    first, second, dim = outer.args[:3]
+    if dim != _make_provenance("literal", value=-1):
+        return None
+    first_inner = _peel_reshape_once(first)
+    if first_inner is None:
+        return None
+    neg_left, neg_right = _match_binary_op(first_inner, "core.binary.-")
+    if neg_left != _make_provenance("literal", value=0) or neg_right is None:
+        return None
+    neg_right_inner = _peel_reshape_once(neg_right)
+    if neg_right_inner is None:
+        neg_right_inner = neg_right
+    odd_slice = _match_slice(neg_right_inner)
+    if odd_slice is None:
+        return None
+    x_odd_reshaped, odd_dim, odd_start, odd_end = odd_slice
+    second_inner = _peel_reshape_once(second)
+    if second_inner is None:
+        second_inner = second
+    second_inner2 = _peel_reshape_once(second_inner)
+    even_slice = None
+    if second_inner2 is not None:
+        even_slice = _match_slice(second_inner2)
+    if even_slice is None:
+        even_slice = _match_slice(second_inner)
+    if even_slice is None:
+        return None
+    x_even_reshaped, even_dim, even_start, even_end = even_slice
+    if x_odd_reshaped != x_even_reshaped:
+        return None
+    if odd_dim != _make_provenance("literal", value=-1) or even_dim != _make_provenance("literal", value=-1):
+        return None
+    if odd_start != _make_provenance("literal", value=1) or odd_end != _make_provenance("literal", value=2):
+        return None
+    if even_start != _make_provenance("literal", value=0) or even_end != _make_provenance("literal", value=1):
+        return None
+    x_original = _peel_reshape_once(x_odd_reshaped)
+    return x_original if x_original is not None else x_odd_reshaped
 
 
 def _match_negated_slice(
