@@ -4,6 +4,7 @@ from typing import Any
 
 from ..codegen2_torch.core import _DirectTorchEmitter
 from ..graph_ir import GraphProgram, validate_graph_program
+from ..ast import TypeBool
 
 
 def triton_op_table_markdown(_graph: GraphProgram) -> str:
@@ -278,6 +279,37 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
         add(lines, 8, "_axon_triton_debug_count('selected_expert_packed_swiglu_ffn')")
         add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _triton_linear(self, x, weight, bias=None, transpose=False):")
+        add(lines, 8, "if triton is None or _axon_triton_linear_kernel is None or not torch.is_tensor(x) or not torch.is_tensor(weight) or not x.is_cuda or not weight.is_cuda:")
+        add(lines, 12, "if transpose:")
+        add(lines, 16, "return torch.matmul(x, weight) + (bias if bias is not None else 0)")
+        add(lines, 12, "return F.linear(x, weight, bias)")
+        add(lines, 8, "orig_shape = x.shape")
+        add(lines, 8, "x_2d = x.reshape(-1, x.shape[-1]) if x.ndim != 2 else x")
+        add(lines, 8, "x_2d = x_2d if x_2d.is_contiguous() else x_2d.contiguous()")
+        add(lines, 8, "weight = weight if weight.is_contiguous() else weight.contiguous()")
+        add(lines, 8, "M, K = x_2d.shape")
+        add(lines, 8, "if transpose:")
+        add(lines, 12, "N = weight.shape[1]")
+        add(lines, 8, "else:")
+        add(lines, 12, "N = weight.shape[0]")
+        add(lines, 8, "if M == 0 or N == 0 or K == 0:")
+        add(lines, 12, "return x_2d.new_empty(M, N).reshape(*orig_shape[:-1], N)")
+        add(lines, 8, "out = torch.empty(M, N, device=x_2d.device, dtype=x_2d.dtype)")
+        add(lines, 8, "has_bias = bias is not None and bias.numel() == N")
+        add(lines, 8, "if has_bias:")
+        add(lines, 12, "bias = bias if bias.is_contiguous() else bias.contiguous()")
+        add(lines, 8, "x_row_stride = x_2d.stride(0)")
+        add(lines, 8, "if transpose:")
+        add(lines, 12, "w_row_stride = weight.stride(0)")
+        add(lines, 12, "w_col_stride = weight.stride(1)")
+        add(lines, 8, "else:")
+        add(lines, 12, "w_row_stride = weight.stride(0)")
+        add(lines, 12, "w_col_stride = weight.stride(1)")
+        add(lines, 8, "_axon_triton_debug_count('linear')")
+        add(lines, 8, "_axon_triton_linear_kernel[lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))](x_2d, weight, out, bias if has_bias else x_2d, x_row_stride, w_row_stride, w_col_stride, M, N, K, HAS_BIAS=has_bias, W_TRANSPOSE=transpose)")
+        add(lines, 8, "return out.reshape(*orig_shape[:-1], N)")
 
     def _primitive_expr(self, primitive: str, node: Any, *, local: set[str], symbols_dict: str) -> str:
         if primitive == "_triton_sdpa":
@@ -477,6 +509,45 @@ def emit_model_code_from_graph_ir(
             "            w = tl.load(w_ptr + expert * IN_DIM * OUT_DIM + k[:, None] * OUT_DIM + cols[None, :], mask=(k[:, None] < IN_DIM) & (cols[None, :] < OUT_DIM), other=0.0)",
             "            acc += tl.dot(x, w)",
             "        tl.store(y_ptr + (start + rows)[:, None] * OUT_DIM + cols[None, :], acc, mask=(rows[:, None] < count) & (cols[None, :] < OUT_DIM))",
+            "    _axon_triton_linear_configs = [",
+            "        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 64, 'BLOCK_K': 128}, num_warps=4, num_stages=3),",
+            "        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128, 'BLOCK_K': 64}, num_warps=4, num_stages=3),",
+            "        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 128, 'BLOCK_K': 128}, num_warps=4, num_stages=4),",
+            "        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 64, 'BLOCK_K': 64}, num_warps=4, num_stages=3),",
+            "        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': 32}, num_warps=4, num_stages=3),",
+            "        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 32}, num_warps=4, num_stages=3),",
+            "        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 32}, num_warps=4, num_stages=3),",
+            "        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32}, num_warps=8, num_stages=3),",
+            "    ]",
+            "    @triton.autotune(configs=_axon_triton_linear_configs, key=['M', 'N', 'K', 'HAS_BIAS', 'W_TRANSPOSE'])",
+            "    @triton.jit",
+            "    def _axon_triton_linear_kernel(x_ptr, w_ptr, out_ptr, bias_ptr, x_row_stride, w_row_stride, w_col_stride, M, N, K, HAS_BIAS: tl.constexpr, W_TRANSPOSE: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):",
+            "        pid_m = tl.program_id(0)",
+            "        pid_n = tl.program_id(1)",
+            "        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)",
+            "        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)",
+            "        offs_k = tl.arange(0, BLOCK_K)",
+            "        x_ptrs = x_ptr + offs_m[:, None] * x_row_stride + offs_k[None, :]",
+            "        if W_TRANSPOSE:",
+            "            w_ptrs = w_ptr + offs_k[:, None] * w_row_stride + offs_n[None, :] * w_col_stride",
+            "        else:",
+            "            w_ptrs = w_ptr + offs_k[:, None] * w_col_stride + offs_n[None, :] * w_row_stride",
+            "        acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)",
+            "        for k0 in range(0, K, BLOCK_K):",
+            "            x = tl.load(x_ptrs, mask=(offs_m[:, None] < M) & (k0 + offs_k[None, :] < K), other=0.0)",
+            "            w = tl.load(w_ptrs, mask=(k0 + offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0)",
+            "            acc += tl.dot(x, w)",
+            "            x_ptrs += BLOCK_K",
+            "            if W_TRANSPOSE:",
+            "                w_ptrs += BLOCK_K * w_row_stride",
+            "            else:",
+            "                w_ptrs += BLOCK_K * w_col_stride",
+            "        if HAS_BIAS:",
+            "            bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0).to(tl.float32)",
+            "            acc = acc + bias[None, :]",
+            "        out = acc.to(x_ptr.dtype.element_ty)",
+            "        out_ptrs = out_ptr + offs_m[:, None] * N + offs_n[None, :]",
+            "        tl.store(out_ptrs, out, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))",
             "else:",
             "    _axon_triton_rmsnorm_noscale_kernel = None",
             "    _axon_triton_rmsnorm_scaled_kernel = None",
@@ -486,6 +557,7 @@ def emit_model_code_from_graph_ir(
             "    _axon_triton_swiglu_kernel = None",
             "    _axon_triton_geglu_tanh_kernel = None",
             "    _axon_triton_grouped_mm_kernel = None",
+            "    _axon_triton_linear_kernel = None",
             "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters",
             "from synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",
