@@ -3131,6 +3131,7 @@ class _DirectTorchEmitter:
         self._inline_stack: set[str] = set()
         self._emitted_defs_stack: list[dict[str, Any]] = []
         self._emitted_aliases_stack: list[dict[str, GraphOperand]] = []
+        self._int_locals: set[str] = set()
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -4898,6 +4899,8 @@ class _DirectTorchEmitter:
                 self._add(lines, indent, f"{temp_name} = {expr}")
                 self._record_emitted_alias(temp_name, operand)
                 inline_local.add(temp_name)
+                if isinstance(graph_operand_type(operand), TypeInt):
+                    self._int_locals.add(temp_name)
                 subst[param.name] = GraphValueRef(
                     name=temp_name,
                     type_expr=graph_operand_type(operand),
@@ -5473,6 +5476,8 @@ class _DirectTorchEmitter:
             lines.append(" " * indent + f"{temp_name} = {expr}")
             self._record_emitted_alias(temp_name, operand)
             inline_local.add(temp_name)
+            if isinstance(graph_operand_type(operand), TypeInt):
+                self._int_locals.add(temp_name)
             subst[param.name] = GraphValueRef(
                 name=temp_name,
                 type_expr=graph_operand_type(operand),
@@ -6392,7 +6397,10 @@ class _DirectTorchEmitter:
             pieces.append(template[cursor:match.start()].replace("{", "{{").replace("}", "}}"))
             name = match.group(1)
             expr = _py_ident(name) if name in local else f"{symbols_dict}[{name!r}]"
-            pieces.append("{self._path_template_part(" + expr + ")}")
+            if name in self._int_locals:
+                pieces.append("{" + expr + "}")
+            else:
+                pieces.append("{self._path_template_part(" + expr + ")}")
             cursor = match.end()
         pieces.append(template[cursor:].replace("{", "{{").replace("}", "}}"))
         return "f" + repr("".join(pieces))
