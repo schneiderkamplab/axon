@@ -5704,10 +5704,14 @@ class _DirectTorchEmitter:
         if op == "core.ascribe":
             return self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
         if op == "core.select":
-            cond = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
+            cond_operand = node.inputs[0]
+            if isinstance(cond_operand, GraphLiteral) and isinstance(cond_operand.value, bool):
+                chosen = node.inputs[1] if cond_operand.value else node.inputs[2]
+                return self._operand_expr(chosen, local=local, symbols_dict=symbols_dict)
+            cond = self._operand_expr(cond_operand, local=local, symbols_dict=symbols_dict)
             yes = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
             no = self._operand_expr(node.inputs[2], local=local, symbols_dict=symbols_dict)
-            cond_expr = cond if self._operand_is_bool(node.inputs[0]) else f"bool({cond})"
+            cond_expr = cond if self._operand_is_bool(cond_operand) else f"bool({cond})"
             return f"({yes} if {cond_expr} else {no})"
         if op.startswith("core.binary."):
             return self._binary_expr(
@@ -6098,6 +6102,10 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps}))"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
+            if cast_float == "True":
+                return f"{y_float}.to(dtype={x}.dtype)"
+            if cast_float == "False":
+                return y
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
         if primitive == "_torch_rmsnorm_scaled":
             x = args[0]
@@ -6108,6 +6116,10 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({weight} * ({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype))"
             y = f"({weight} * ({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps})))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
             return f"({y_float} if {cast_float} else {y})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
