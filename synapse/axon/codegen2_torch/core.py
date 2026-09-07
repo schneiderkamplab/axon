@@ -1892,6 +1892,8 @@ class Codegen2GraphModel(nn.Module):
         rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
         return (x * cos) + (rotated * sin)
 
+    _sdpa_mask_cache: dict = {}
+
     @classmethod
     def _sdpa(
         cls,
@@ -1916,7 +1918,13 @@ class Codegen2GraphModel(nn.Module):
         if extra_bias is not None:
             extra_bias = cls._move_to(extra_bias, q.device)
             if torch.is_tensor(attn_mask) and attn_mask.dtype == torch.bool:
-                attn_mask = torch.where(attn_mask, 0.0, float("-inf")).to(dtype=target_dtype)
+                cache_key = id(attn_mask)
+                cached = cls._sdpa_mask_cache.get(cache_key)
+                if cached is not None and cached[0] == attn_mask.shape and cached[1] == target_dtype:
+                    attn_mask = cached[2]
+                else:
+                    attn_mask = torch.where(attn_mask, 0.0, float("-inf")).to(dtype=target_dtype)
+                    cls._sdpa_mask_cache[cache_key] = (attn_mask.shape, target_dtype, attn_mask)
             attn_mask = attn_mask + extra_bias
         return F.scaled_dot_product_attention(
             q,
@@ -3614,6 +3622,12 @@ class _DirectTorchEmitter:
             add(lines, 8, "device = right.device if prefer == 'right' else left.device")
             add(lines, 8, "return cls._move_to(left, device), cls._move_to(right, device)")
             add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _matmul(a, b):")
+        add(lines, 8, "if a.is_floating_point() and b.is_floating_point() and a.dtype != b.dtype:")
+        add(lines, 12, "a = a.to(dtype=b.dtype)")
+        add(lines, 8, "return torch.matmul(a, b)")
+        add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _rope_apply_factors(cls, x, sin, cos, interleaved=False):")
         add(lines, 8, "if interleaved:")
@@ -3625,6 +3639,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)")
         add(lines, 8, "return (x * cos) + (rotated * sin)")
         add(lines, 4, "")
+        add(lines, 4, "_sdpa_mask_cache = {}")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _sdpa(cls, q, k, v, attn_mask, scale=None, enable_gqa=True, extra_bias=None):")
         add(lines, 8, "k = cls._move_to(k, q.device)")
@@ -3642,7 +3657,13 @@ class _DirectTorchEmitter:
         add(lines, 8, "if extra_bias is not None:")
         add(lines, 12, "extra_bias = cls._move_to(extra_bias, q.device)")
         add(lines, 12, "if torch.is_tensor(attn_mask) and attn_mask.dtype == torch.bool:")
-        add(lines, 16, "attn_mask = torch.where(attn_mask, 0.0, float('-inf')).to(dtype=target_dtype)")
+        add(lines, 16, "_cache_key = id(attn_mask)")
+        add(lines, 16, "_cached = cls._sdpa_mask_cache.get(_cache_key)")
+        add(lines, 16, "if _cached is not None and _cached[0] == attn_mask.shape and _cached[1] == target_dtype:")
+        add(lines, 20, "attn_mask = _cached[2]")
+        add(lines, 16, "else:")
+        add(lines, 20, "attn_mask = torch.where(attn_mask, 0.0, float('-inf')).to(dtype=target_dtype)")
+        add(lines, 20, "cls._sdpa_mask_cache[_cache_key] = (attn_mask.shape, target_dtype, attn_mask)")
         add(lines, 12, "attn_mask = attn_mask + extra_bias")
         add(lines, 8, "return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=is_causal, scale=None if scale is None else float(scale), enable_gqa=enable_gqa)")
         add(lines, 4, "")
@@ -4296,7 +4317,10 @@ class _DirectTorchEmitter:
             add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
         add(lines, 4, "")
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
-        add(lines, 8, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "if self.training:")
+        add(lines, 12, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "with torch.inference_mode():")
+        add(lines, 12, "return self._forward(input_ids, **inputs)")
 
     def _emit_generate(self, lines: list[str]) -> None:
         add = self._add
@@ -6158,11 +6182,15 @@ class _DirectTorchEmitter:
             "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, {int_arg(1)})",
             "repeat": lambda: f"({args[0]} if {int_arg(1)} == 1 else torch.repeat_interleave({args[0]}, repeats={int_arg(1)}, dim=({int_arg(2)} if {int_arg(2)} >= 0 else {int_arg(2)} + {args[0]}.dim())))",
             "matmul": lambda: (
-                f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
+                f"self._matmul(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
                 if self.align_devices
-                else f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))({args[0]}, {args[1]})"
+                else f"self._matmul({args[0]}, {args[1]})"
             ),
-            "softmax": lambda: f"F.softmax({args[0]}, dim={int_arg(1, '-1')})",
+            "softmax": lambda: (
+                f"F.softmax({args[0]}, dim={int_arg(1, '-1')}, dtype=torch.float32)"
+                if len(node.inputs) > 2 and isinstance(node.inputs[2], GraphLiteral) and node.inputs[2].value == "float32"
+                else f"F.softmax({args[0]}, dim={int_arg(1, '-1')})"
+            ),
             "where": lambda: (
                 f"self._where({args[0]}, {args[1]}, {args[2]})"
                 if self.align_devices
@@ -6205,9 +6233,9 @@ class _DirectTorchEmitter:
             "activations_tanh": lambda: f"torch.tanh({args[0]})",
             "activations_silu": lambda: f"F.silu({args[0]})",
             "activations_sigmoid": lambda: f"torch.sigmoid({args[0]})",
-            "l2norm": lambda: f"(({args[0]}.float() * torch.pow(torch.mean({args[0]}.float() * {args[0]}.float(), dim=-1, keepdim=True) + {float_arg(1, '1e-6')}, -0.5)).to(dtype={args[0]}.dtype))",
+            "l2norm": lambda: f"(lambda _xf: (_xf * torch.rsqrt(torch.mean(_xf * _xf, dim=-1, keepdim=True) + {float_arg(1, '1e-6')})).to(dtype={args[0]}.dtype))({args[0]}.float())",
             "activations_relu": lambda: f"F.relu({args[0]})",
-            "activations_relu2": lambda: f"(F.relu({args[0]}) * F.relu({args[0]}))",
+            "activations_relu2": lambda: f"(F.relu({args[0]}).pow(2))",
             "activations_gelu": lambda: f"F.gelu({args[0]})",
             "activations_gelu_new": lambda: f"F.gelu({args[0]}, approximate='tanh')",
             "activations_gelu_pytorch_tanh": lambda: f"F.gelu({args[0]}, approximate='tanh')",
