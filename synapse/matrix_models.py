@@ -134,6 +134,14 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
         local_dir="mistral_7b_v0_1", repo_id="mistralai/Mistral-7B-v0.1"
     ),
     "modernbert": ModelDownloadSpec(local_dir="modernbert", repo_id="answerdotai/ModernBERT-base"),
+    "pplx_embed": ModelDownloadSpec(
+        local_dir="pplx_embed",
+        repo_id="perplexity-ai/pplx-embed-v1-0.6b",
+    ),
+    "pplx_pii_masking": ModelDownloadSpec(
+        local_dir="pplx_pii_masking",
+        repo_id="perplexity-ai/pplx-pii-masking",
+    ),
     "mt5_base": ModelDownloadSpec(local_dir="mt5_base", repo_id="google/mt5-base"),
     "mt5_large": ModelDownloadSpec(local_dir="mt5_large", repo_id="google/mt5-large"),
     "mt5_small": ModelDownloadSpec(local_dir="mt5_small", repo_id="google/mt5-small"),
@@ -281,6 +289,7 @@ MATRIX_AXON_MODEL_DIRS: dict[str, tuple[str, ...]] = {
         "phi3_medium_128k_instruct",
     ),
     "phi3small": ("phi3_small_8k_instruct", "phi3_small_128k_instruct"),
+    "pplx_pii_masking": ("pplx_pii_masking",),
     "qwen2_5_0_5b": ("qwen2_5_0_5b",),
     "roberta": ("roberta", "camembert", "xlm_roberta"),
     "smollm": (

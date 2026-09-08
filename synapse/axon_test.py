@@ -959,6 +959,147 @@ def _load_checkpoint_tensor(
     raise KeyError(key)
 
 
+def _load_checkpoint_tensors_with_prefix(
+    safetensors_files: Sequence[Path],
+    prefix: str,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, torch.Tensor]:
+    out: dict[str, torch.Tensor] = {}
+    for path in safetensors_files:
+        st = safetensors.safe_open(str(path), framework="pt")
+        for key in st.keys():
+            if not str(key).startswith(prefix):
+                continue
+            tensor = st.get_tensor(key)
+            if tensor.is_floating_point():
+                tensor = tensor.to(device=device, dtype=dtype)
+            else:
+                tensor = tensor.to(device=device)
+            out[str(key)[len(prefix) :]] = tensor
+    return out
+
+
+_PII_MASKING_MODEL_TYPE = "pii_masking"
+
+
+def _is_pii_masking_config(payload: Any) -> bool:
+    """perplexity-ai/pplx-pii-masking layout: HF model_type "pii_masking" with the
+    bidirectional Qwen3 backbone config nested under "backbone" and the token head
+    metadata (num_token_labels) at the top level. transformers has no AutoConfig or
+    AutoModel entry for it, so loading/config paths adapt it here."""
+    return (
+        isinstance(payload, Mapping)
+        and str(payload.get("model_type", "")).strip().lower() == _PII_MASKING_MODEL_TYPE
+        and isinstance(payload.get("backbone"), Mapping)
+    )
+
+
+def _build_pii_masking_hf_config(payload: Mapping[str, Any]) -> Any:
+    from transformers import Qwen3Config
+
+    backbone = dict(payload["backbone"])
+    # The backbone block is a PPLXQwen3Config (a Qwen3Config subclass whose code lives in
+    # the pplx-embed repo). Drop the remote-code routing keys and build a stock Qwen3Config.
+    for key in ("auto_map", "architectures", "model_type"):
+        backbone.pop(key, None)
+    config = Qwen3Config.from_dict(backbone)
+    config.use_bidirectional_attention = True
+    num_labels = payload.get("num_token_labels")
+    if isinstance(num_labels, int) and not isinstance(num_labels, bool):
+        config.num_token_labels = int(num_labels)
+    return config
+
+
+class _PiiMaskingTokenClassificationReference(torch.nn.Module):
+    """Reference for pii_masking checkpoints, mirroring the published example_usage.py:
+    PPLXQwen3Model (stock Qwen3 with every layer non-causal under a padding-only mask,
+    plain arange positions, no cache) followed by fp32 token logits
+    `h.float() @ W_cls.T + b_cls`. Built from stock transformers classes so no remote
+    code from the backbone repo is needed."""
+
+    def __init__(
+        self,
+        *,
+        backbone: Any,
+        cls_weight: torch.Tensor,
+        cls_bias: torch.Tensor,
+    ) -> None:
+        super().__init__()
+        self.backbone = backbone
+        for layer in self.backbone.layers:
+            layer.self_attn.is_causal = False
+        self.cls_weight = torch.nn.Parameter(cls_weight.detach().clone().float())
+        self.cls_bias = torch.nn.Parameter(cls_bias.detach().clone().float())
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> dict[str, torch.Tensor]:
+        from transformers.masking_utils import create_bidirectional_mask
+
+        # The published model never passes position_ids (plain arange positions).
+        kwargs.pop("position_ids", None)
+        kwargs.setdefault("use_cache", False)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        inputs_embeds = self.backbone.embed_tokens(input_ids)
+        # A pre-built 4D mask is passed through Qwen3Model's causal-mask creation as-is.
+        mask = create_bidirectional_mask(
+            config=self.backbone.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            allow_is_bidirectional_skip=False,
+        )
+        outputs = self.backbone(inputs_embeds=inputs_embeds, attention_mask=mask, **kwargs)
+        hidden = getattr(outputs, "last_hidden_state", None)
+        if not torch.is_tensor(hidden):
+            hidden = outputs[0]
+        logits = torch.nn.functional.linear(hidden.float(), self.cls_weight, self.cls_bias)
+        return {"logits": logits}
+
+
+def _load_pii_masking_masked_lm_reference(
+    *,
+    safetensors_files: Sequence[Path],
+    resolved_dtype: torch.dtype,
+    resolved_device: torch.device,
+    hf_config: Any,
+) -> Any:
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3Model
+
+    backbone = Qwen3Model(hf_config).to(dtype=resolved_dtype)
+    state = _load_checkpoint_tensors_with_prefix(
+        safetensors_files,
+        "backbone.",
+        device=torch.device("cpu"),
+        dtype=resolved_dtype,
+    )
+    missing, unexpected = backbone.load_state_dict(state, strict=False)
+    missing_params = [name for name in missing if not name.endswith("inv_freq")]
+    if missing_params or unexpected:
+        raise RuntimeError(
+            "pii_masking backbone state mismatch: "
+            f"missing={missing_params[:5]} unexpected={list(unexpected)[:5]}"
+        )
+    cls_weight = _load_checkpoint_tensor(
+        safetensors_files, "token_cls_head.weight", device=resolved_device, dtype=torch.float32
+    )
+    cls_bias = _load_checkpoint_tensor(
+        safetensors_files, "token_cls_head.bias", device=resolved_device, dtype=torch.float32
+    )
+    model = _PiiMaskingTokenClassificationReference(
+        backbone=backbone,
+        cls_weight=cls_weight,
+        cls_bias=cls_bias,
+    )
+    # The head stays fp32 by design (matches example_usage.py), so only move devices here.
+    return model.to(device=resolved_device).eval()
+
+
 def _is_deberta_v2_modern_mlm_checkpoint(
     *,
     model_dir: Path,
@@ -1038,6 +1179,14 @@ def _load_hf_masked_lm_reference(
             eps=float(getattr(hf_config, "layer_norm_eps", 1.0e-7)),
         )
         return model.to(device=resolved_device, dtype=resolved_dtype).eval()
+
+    if _is_pii_masking_config(model_config):
+        return _load_pii_masking_masked_lm_reference(
+            safetensors_files=safetensors_files,
+            resolved_dtype=resolved_dtype,
+            resolved_device=resolved_device,
+            hf_config=hf_config,
+        )
 
     model = AutoModelForMaskedLM.from_pretrained(
         str(model_dir),
@@ -2257,6 +2406,11 @@ def _patch_rope_payload_for_compat(
 
 def _load_auto_config_with_compat_fallback(model_dir: Path, *, trust_remote_code: bool) -> Any:
     _ensure_transformers_import_compat()
+    config_path = model_dir / "config.json"
+    if config_path.exists():
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if _is_pii_masking_config(payload):
+            return _build_pii_masking_hf_config(payload)
     compat_exc: Exception | None = None
     try:
         return AutoConfig.from_pretrained(

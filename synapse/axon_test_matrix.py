@@ -521,6 +521,7 @@ def _resolve_model_task_for_pair(pair: _Pair) -> str:
         "electra",
         "longformer",
         "modernbert",
+        "pplx_pii_masking",
         "roberta",
     }
     masked_lm_model_dirs = {
@@ -532,6 +533,7 @@ def _resolve_model_task_for_pair(pair: _Pair) -> str:
         "electra",
         "longformer",
         "modernbert",
+        "pplx_pii_masking",
         "roberta",
         "xlm_roberta",
     }
