@@ -8519,6 +8519,61 @@ def test_codegen2_mlx_generated_expert_linear_matches_torch() -> None:
     assert torch.allclose(actual.to(expected.device), expected, atol=1e-5, rtol=1e-5)
 
 
+def _static_embedding_graph(path: str) -> GraphProgram:
+    ids_type = TypeTensor("Tensor", ("B", "S"))
+    out_type = _tensor("B", "S", "D")
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("ids", ids_type),),
+        outputs=(GraphValueRef("tok", out_type),),
+        output_names=("tok",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("_embedding"),
+                inputs=(
+                    GraphPath(absolute=True, parts=(path,)),
+                    GraphValueRef("ids", ids_type),
+                    GraphLiteral(4, TypeDim()),
+                ),
+                attrs={},
+                outputs=(GraphValue("tok", out_type),),
+                source_module="main",
+                type_expr=out_type,
+            ),
+        ),
+        return_type_expr=out_type,
+    )
+    return GraphProgram(modules=(main,), main_module="main", pragmas={"main": "main"})
+
+
+def test_codegen2_mlx_static_module_attr_does_not_shadow_helper_methods() -> None:
+    # A static parameter path named like a generated helper (``embedding`` ->
+    # ``_embedding``) used to be registered as ``self._embedding = nn.Embedding``,
+    # shadowing the ``_embedding(self, base, ids)`` helper; mlx.nn.Module refuses
+    # to assign a module over a method, so the generated class failed to load.
+    code = emit_mlx_model_code_from_graph_ir(_static_embedding_graph("embedding"))
+    assert "self._embedding = nn.Embedding(" not in code
+    assert "self._mod_embedding = nn.Embedding(" in code
+    assert "self._mod_embedding(ids)" in code
+    assert "def _embedding(self, base, ids):" in code
+
+
+def test_codegen2_mlx_static_embedding_module_loads_and_runs() -> None:
+    pytest.importorskip("mlx")
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(_static_embedding_graph("embedding")), namespace)
+    model_cls = namespace["AxonMlxModel"]
+    weight = torch.arange(6 * 4, dtype=torch.float32).reshape(6, 4) / 10.0
+    ids_t = torch.tensor([[0, 5, 2]], dtype=torch.long)
+    model = model_cls.from_state_dict(torch_state_dict_to_mlx({"embedding.weight": weight}))
+
+    actual_np = model.forward(ids=torch_state_dict_to_mlx({"ids": ids_t})["ids"])
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    assert torch.allclose(actual, weight[ids_t], atol=1e-6)
+
+
 def test_codegen2_mlx_setup_stacks_individual_expert_weights() -> None:
     pytest.importorskip("mlx")
     graph = _expert_linear_graph()
