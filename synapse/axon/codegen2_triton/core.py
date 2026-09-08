@@ -110,6 +110,43 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "_axon_triton_rmsnorm_unit_offset_scaled_kernel[(rows,)](x_in, scale_in, out, rows, last_dim, float(eps), BLOCK=block)")
         add(lines, 8, "return out.reshape(x.shape)")
         add(lines, 4, "")
+        add(lines, 4, "def _layernorm(self, x, eps=1e-5, dim=None, weight_path=None, bias_flag=True, bias_path=None):")
+        add(lines, 8, "weight = self._param(weight_path) if weight_path is not None else None")
+        add(lines, 8, "bias = None")
+        add(lines, 8, "if bias_flag and bias_path is not None:")
+        add(lines, 12, "bias = self._param(bias_path)")
+        add(lines, 8, "if torch.is_tensor(x) and torch.is_tensor(weight):")
+        add(lines, 12, "weight = self._move_to(weight, x.device)")
+        add(lines, 12, "if bias is not None:")
+        add(lines, 16, "bias = self._move_to(bias, x.device)")
+        add(lines, 8, "if dim is not None and int(dim) != -1:")
+        add(lines, 12, "raise ValueError('__triton_layernorm only supports dim=None/-1')")
+        add(lines, 8, "if triton is None or _axon_triton_layernorm_kernel is None or not torch.is_tensor(x) or not x.is_cuda or not torch.is_tensor(weight):")
+        add(lines, 12, "raise RuntimeError('__triton_layernorm requires Triton and CUDA tensors')")
+        add(lines, 8, "last_dim = int(x.shape[-1])")
+        add(lines, 8, "if last_dim <= 0:")
+        add(lines, 12, "return torch.empty_like(x)")
+        add(lines, 8, "if int(weight.numel()) != last_dim:")
+        add(lines, 12, "raise ValueError('__triton_layernorm requires weight.numel() == x.shape[-1]')")
+        add(lines, 8, "x_in = x if x.is_contiguous() else x.contiguous()")
+        add(lines, 8, "w_in = weight.reshape(-1)")
+        add(lines, 8, "w_in = w_in if w_in.is_contiguous() else w_in.contiguous()")
+        add(lines, 8, "b_in = None")
+        add(lines, 8, "has_bias = bias is not None")
+        add(lines, 8, "if has_bias:")
+        add(lines, 12, "b_in = bias.reshape(-1)")
+        add(lines, 12, "b_in = b_in if b_in.is_contiguous() else b_in.contiguous()")
+        add(lines, 8, "out = torch.empty_like(x_in)")
+        add(lines, 8, "rows = out.numel() // last_dim")
+        add(lines, 8, "if rows == 0:")
+        add(lines, 12, "return out.reshape(x.shape)")
+        add(lines, 8, "block = triton.next_power_of_2(last_dim)")
+        add(lines, 8, "if block > 32768:")
+        add(lines, 12, "raise ValueError('__triton_layernorm last dimension is too large for the Triton kernel')")
+        add(lines, 8, "_axon_triton_debug_count('layernorm')")
+        add(lines, 8, "_axon_triton_layernorm_kernel[(rows,)](x_in, w_in, b_in if has_bias else w_in, out, rows, last_dim, float(eps), HAS_BIAS=has_bias, BLOCK=block)")
+        add(lines, 8, "return out.reshape(x.shape)")
+        add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _rope_apply_factors(cls, x, sin, cos, interleaved=False):")
         add(lines, 8, "if interleaved:")
@@ -230,6 +267,24 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "_axon_triton_geglu_tanh_kernel[grid](gate_in, up_in, out, n_elements, BLOCK=block)")
         add(lines, 8, "return out.reshape(gate.shape)")
         add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _sigmoid_gated_mul(cls, gate, up):")
+        add(lines, 8, "if triton is None or _axon_triton_sigmoid_gated_mul_kernel is None or not torch.is_tensor(gate) or not torch.is_tensor(up) or not gate.is_cuda or not up.is_cuda:")
+        add(lines, 12, "raise RuntimeError('__triton_sigmoid_gated_mul requires Triton and CUDA tensors')")
+        add(lines, 8, "if gate.shape != up.shape:")
+        add(lines, 12, "raise ValueError('__triton_sigmoid_gated_mul requires equal gate/up shapes')")
+        add(lines, 8, "gate_in = gate if gate.is_contiguous() else gate.contiguous()")
+        add(lines, 8, "up_in = up if up.is_contiguous() else up.contiguous()")
+        add(lines, 8, "out = torch.empty_like(gate_in)")
+        add(lines, 8, "n_elements = out.numel()")
+        add(lines, 8, "if n_elements == 0:")
+        add(lines, 12, "return out.reshape(gate.shape)")
+        add(lines, 8, "block = 1024")
+        add(lines, 8, "grid = (triton.cdiv(n_elements, block),)")
+        add(lines, 8, "_axon_triton_debug_count('sigmoid_gated_mul')")
+        add(lines, 8, "_axon_triton_sigmoid_gated_mul_kernel[grid](gate_in, up_in, out, n_elements, BLOCK=block)")
+        add(lines, 8, "return out.reshape(gate.shape)")
+        add(lines, 4, "")
         add(lines, 4, "# Deprecated experimental path: real Qwen3-MoE-30B measurements showed this")
         add(lines, 4, "# Triton grouped matmul is much slower than the Torch grouped_mm path.")
         add(lines, 4, "# Keep it unreachable unless a future explicit experiment reworks the kernel.")
@@ -338,11 +393,21 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
             if len(args) < 5:
                 raise ValueError("__triton_rmsnorm_unit_offset_scaled expects x, scale, eps, dim, cast_float")
             return f"self._rmsnorm_unit_offset_scaled({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
+        if primitive == "_triton_layernorm":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if len(args) < 6:
+                raise ValueError("__triton_layernorm expects x, eps, dim, weight_path, bias_flag, bias_path")
+            return f"self._layernorm({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]})"
         if primitive == "_triton_swiglu_activation":
             args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
             if len(args) < 2:
                 raise ValueError("__triton_swiglu_activation expects gate and up")
             return f"self._swiglu_activation({args[0]}, {args[1]})"
+        if primitive == "_triton_sigmoid_gated_mul":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if len(args) < 2:
+                raise ValueError("__triton_sigmoid_gated_mul expects gate and up")
+            return f"self._sigmoid_gated_mul({args[0]}, {args[1]})"
         if primitive == "_triton_geglu_tanh_activation":
             args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
             if len(args) < 2:
@@ -452,6 +517,22 @@ def emit_model_code_from_graph_ir(
             "        y = x * tl.rsqrt(variance + eps) * (scale + 1.0)",
             "        tl.store(out_ptr + offsets, y, mask=mask)",
             "    @triton.jit",
+            "    def _axon_triton_layernorm_kernel(x_ptr, w_ptr, b_ptr, out_ptr, rows, last_dim: tl.constexpr, eps: tl.constexpr, HAS_BIAS: tl.constexpr, BLOCK: tl.constexpr):",
+            "        row = tl.program_id(0)",
+            "        cols = tl.arange(0, BLOCK)",
+            "        mask = cols < last_dim",
+            "        offsets = row * last_dim + cols",
+            "        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)",
+            "        mean = tl.sum(x, axis=0) / last_dim",
+            "        xc = tl.where(mask, x - mean, 0.0)",
+            "        variance = tl.sum(xc * xc, axis=0) / last_dim",
+            "        y = xc * tl.rsqrt(variance + eps) * w",
+            "        if HAS_BIAS:",
+            "            b = tl.load(b_ptr + cols, mask=mask, other=0.0).to(tl.float32)",
+            "            y = y + b",
+            "        tl.store(out_ptr + offsets, y, mask=mask)",
+            "    @triton.jit",
             "    def _axon_triton_rope_apply_kernel(x_ptr, sin_ptr, cos_ptr, out_ptr, n_elements, rotary_dim: tl.constexpr, BLOCK: tl.constexpr):",
             "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
             "        mask = offsets < n_elements",
@@ -490,6 +571,13 @@ def emit_model_code_from_graph_ir(
             "        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
             "        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)",
             "        tl.store(out_ptr + offsets, gate * tl.sigmoid(gate) * up, mask=mask)",
+            "    @triton.jit",
+            "    def _axon_triton_sigmoid_gated_mul_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):",
+            "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
+            "        mask = offsets < n_elements",
+            "        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)",
+            "        tl.store(out_ptr + offsets, tl.sigmoid(gate) * up, mask=mask)",
             "    @triton.jit",
             "    def _axon_triton_geglu_tanh_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):",
             "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
@@ -561,9 +649,11 @@ def emit_model_code_from_graph_ir(
             "    _axon_triton_rmsnorm_noscale_kernel = None",
             "    _axon_triton_rmsnorm_scaled_kernel = None",
             "    _axon_triton_rmsnorm_unit_offset_scaled_kernel = None",
+            "    _axon_triton_layernorm_kernel = None",
             "    _axon_triton_rope_apply_kernel = None",
             "    _axon_triton_rope_pair_apply_kernel = None",
             "    _axon_triton_swiglu_kernel = None",
+            "    _axon_triton_sigmoid_gated_mul_kernel = None",
             "    _axon_triton_geglu_tanh_kernel = None",
             "    _axon_triton_grouped_mm_kernel = None",
             "    _axon_triton_linear_kernel = None",

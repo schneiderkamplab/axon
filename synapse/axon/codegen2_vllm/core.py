@@ -33,6 +33,7 @@ def _graph_path_key(path: GraphPath) -> str:
 _BINOP_SYMBOLS = {
     "core.binary.*": "*",
     "core.binary.+": "+",
+    "core.binary.-": "-",
     "core.binary.%": "%",
     "core.binary.==": "==",
     "core.binary.>=": ">=",
@@ -380,13 +381,16 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 break
         if param_idx is None:
             return None
+        # Allow the param name to be re-traced in the caller module — it refers
+        # to a different value there (the argument expression, not the parameter).
+        caller_visited = visited - {param_name}
         for caller_mod in self.program.modules:
             for node in caller_mod.nodes:
                 call_exprs = self._find_call_exprs(called_mod.name, node)
                 for call_expr in call_exprs:
                     if param_idx < len(call_expr.inputs):
                         arg = call_expr.inputs[param_idx]
-                        result = self._trace_dim_expr(arg, caller_mod, loop_var, visited)
+                        result = self._trace_dim_expr(arg, caller_mod, loop_var, caller_visited)
                         if result is not None:
                             return result
         return None
@@ -402,20 +406,21 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         bin_ops = {
             "core.binary.*": "*",
             "core.binary.+": "+",
+            "core.binary.-": "-",
             "core.binary.%": "%",
             "core.binary.==": "==",
             "core.binary.>=": ">=",
             "core.binary.and": "and",
         }
         if op in bin_ops and len(node.inputs) >= 2:
-            left = self._trace_dim_expr(node.inputs[0], repeated_mod, loop_var, visited)
-            right = self._trace_dim_expr(node.inputs[1], repeated_mod, loop_var, visited)
+            left = self._trace_dim_expr(node.inputs[0], repeated_mod, loop_var, visited.copy())
+            right = self._trace_dim_expr(node.inputs[1], repeated_mod, loop_var, visited.copy())
             if left and right:
                 return _simplify_binop(op, left, right)
         elif op == "core.select" and len(node.inputs) >= 3:
-            cond = self._trace_dim_expr(node.inputs[0], repeated_mod, loop_var, visited)
-            true_val = self._trace_dim_expr(node.inputs[1], repeated_mod, loop_var, visited)
-            false_val = self._trace_dim_expr(node.inputs[2], repeated_mod, loop_var, visited)
+            cond = self._trace_dim_expr(node.inputs[0], repeated_mod, loop_var, visited.copy())
+            true_val = self._trace_dim_expr(node.inputs[1], repeated_mod, loop_var, visited.copy())
+            false_val = self._trace_dim_expr(node.inputs[2], repeated_mod, loop_var, visited.copy())
             if cond and true_val and false_val:
                 return f"({true_val} if {cond} else {false_val})"
         elif op == "Math.floor" and len(node.inputs) >= 1:
@@ -439,20 +444,21 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         bin_ops = {
             "core.binary.*": "*",
             "core.binary.+": "+",
+            "core.binary.-": "-",
             "core.binary.%": "%",
             "core.binary.==": "==",
             "core.binary.>=": ">=",
             "core.binary.and": "and",
         }
         if op in bin_ops and len(expr.inputs) >= 2:
-            left = self._trace_dim_expr(expr.inputs[0], repeated_mod, loop_var, visited)
-            right = self._trace_dim_expr(expr.inputs[1], repeated_mod, loop_var, visited)
+            left = self._trace_dim_expr(expr.inputs[0], repeated_mod, loop_var, visited.copy())
+            right = self._trace_dim_expr(expr.inputs[1], repeated_mod, loop_var, visited.copy())
             if left and right:
                 return _simplify_binop(op, left, right)
         elif op == "core.select" and len(expr.inputs) >= 3:
-            cond = self._trace_dim_expr(expr.inputs[0], repeated_mod, loop_var, visited)
-            true_val = self._trace_dim_expr(expr.inputs[1], repeated_mod, loop_var, visited)
-            false_val = self._trace_dim_expr(expr.inputs[2], repeated_mod, loop_var, visited)
+            cond = self._trace_dim_expr(expr.inputs[0], repeated_mod, loop_var, visited.copy())
+            true_val = self._trace_dim_expr(expr.inputs[1], repeated_mod, loop_var, visited.copy())
+            false_val = self._trace_dim_expr(expr.inputs[2], repeated_mod, loop_var, visited.copy())
             if cond and true_val and false_val:
                 return f"({true_val} if {cond} else {false_val})"
             return None
@@ -465,11 +471,22 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         very small values like head counts, and very large values like
         projection sizes) by picking the candidate with the smallest max value.
         """
+
+        def _resolve_branch(inp: Any) -> int | None:
+            val = _literal_value(inp, None)
+            if isinstance(val, int) and not isinstance(val, bool):
+                return val
+            if isinstance(inp, GraphValueRef) and inp.name:
+                resolved = self._resolve_const_literal(inp.name)
+                if isinstance(resolved, int) and not isinstance(resolved, bool):
+                    return resolved
+            return None
+
         candidates: list[tuple[int, int, str, int, int]] = []
         for node in repeated_mod.nodes:
             if node.op.name == "core.select" and len(node.inputs) >= 3:
-                true_val = _literal_value(node.inputs[1], None)
-                false_val = _literal_value(node.inputs[2], None)
+                true_val = _resolve_branch(node.inputs[1])
+                false_val = _resolve_branch(node.inputs[2])
                 if isinstance(true_val, int) and isinstance(false_val, int) and true_val != false_val:
                     cond = self._trace_dim_expr(node.inputs[0], repeated_mod, loop_var)
                     if cond:
@@ -613,6 +630,21 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             if any(loop_token in p for p in sp):
                 return sp
         return None
+
+    def _collect_scope_prefixes(self) -> set[str]:
+        """Collect unique checkpoint scope prefixes from module_scope_parts.
+
+        These are used to filter checkpoint weights: only weights matching
+        one of these prefixes (or a _ckpt_to_model entry) are loaded.
+        e.g. scope@model.language_model -> prefixes "model.language_model",
+        "model.language_model.layers", etc.
+        """
+        prefixes: set[str] = set()
+        for parts in self._vllm_classification.module_scope_parts.values():
+            clean = [p for p in parts if "{" not in p and "}" not in p]
+            for i in range(2, len(clean) + 1):
+                prefixes.add(".".join(clean[:i]))
+        return prefixes
 
     def _get_expert_count_expr(self) -> str:
         """Return a Python expression for the number of experts from config."""
@@ -1341,7 +1373,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 3, "VocabParallelEmbedding,")
         add(lines, indent * 3, "ParallelLMHead,")
         add(lines, indent * 2, ")")
-        add(lines, indent * 2, "from vllm.model_executor.layers.attention import Attention")
+        add(lines, indent * 2, "from vllm.attention.layer import Attention")
         add(lines, indent * 2, "from vllm.model_executor.layers.layernorm import RMSNorm, LayerNorm")
         add(lines, indent * 2, "")
 
@@ -1353,7 +1385,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         has_rope = False
         if repeated_mod is not None:
             has_rope = self._detect_rope(repeated_mod) is not None
-        if has_rope:
+        if has_rope and self._use_clean_forward:
             num_layers_expr = self._config_expr("num_hidden_layers")
             head_dim_expr = self._head_dim_expr()
             _has_partial_rotary = self._detect_partial_rotary()
@@ -1366,14 +1398,16 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 add(lines, indent * 2, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 3, "get_rope(")
                 add(lines, indent * 4, f"({full_hd} if ((i + 1) % _rope_period == 0) else {local_hd}),")
+                add(lines, indent * 4, f"({full_hd} if ((i + 1) % _rope_period == 0) else {local_hd}),")
                 add(lines, indent * 4, "max_position=getattr(config, 'max_position_embeddings', 4096),")
+                add(lines, indent * 4, f"base=({full_theta} if ((i + 1) % _rope_period == 0) else {local_theta}),")
                 add(lines, indent * 4, f"is_neox_style={_is_neox},")
-                add(lines, indent * 4, "rope_parameters=(")
+                add(lines, indent * 4, "rope_scaling=(")
                 add(lines, indent * 5, "dict(config.rope_parameters[config.layer_types[i]])")
                 add(lines, indent * 5, "if hasattr(config, 'rope_parameters') and hasattr(config, 'layer_types')")
                 add(lines, indent * 5, "and isinstance(config.rope_parameters, dict) and i < len(config.layer_types)")
                 add(lines, indent * 5, "and config.layer_types[i] in config.rope_parameters")
-                add(lines, indent * 5, f"else {{'rope_type': 'default', 'rope_theta': ({full_theta} if ((i + 1) % _rope_period == 0) else {local_theta})}}")
+                add(lines, indent * 5, f"else {{'rope_type': 'default'}}")
                 add(lines, indent * 4, "),")
                 add(lines, indent * 3, f") for i in range({num_layers_expr})")
                 add(lines, indent * 2, "])")
@@ -1390,25 +1424,26 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 add(lines, indent * 3, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 4, "get_rope(")
                 add(lines, indent * 5, f"{head_dim_expr},")
+                add(lines, indent * 5, f"{head_dim_expr},")
                 add(lines, indent * 5, "max_position=getattr(config, 'max_position_embeddings', 4096),")
+                add(lines, indent * 5, "base=_rope_theta,")
                 add(lines, indent * 5, f"is_neox_style={_is_neox},")
-                add(lines, indent * 5, "rope_parameters=(")
+                add(lines, indent * 5, "rope_scaling=(")
                 add(lines, indent * 6, "dict(config.rope_parameters[config.layer_types[i]])")
                 add(lines, indent * 6, "if i < len(config.layer_types) and config.layer_types[i] in config.rope_parameters")
                 if _has_partial_rotary:
-                    add(lines, indent * 6, "else {**{'rope_type': 'default', 'rope_theta': _rope_theta}, **({'rope_dim': config.rotary_dim} if hasattr(config, 'rotary_dim') and config.rotary_dim is not None else {'partial_rotary_factor': getattr(config, 'partial_rotary_factor', getattr(config, 'rotary_pct', 1.0))})}")
+                    add(lines, indent * 6, "else {**{'rope_type': 'default'}, **({'rope_dim': getattr(config, 'rotary_dim', None)} if hasattr(config, 'rotary_dim') and config.rotary_dim is not None else {'partial_rotary_factor': getattr(config, 'partial_rotary_factor', getattr(config, 'rotary_pct', 1.0))})}")
                 else:
-                    add(lines, indent * 6, "else {'rope_type': 'default', 'rope_theta': _rope_theta}")
+                    add(lines, indent * 6, "else {'rope_type': 'default'}")
                 add(lines, indent * 5, "),")
                 add(lines, indent * 4, f") for i in range({num_layers_expr})")
                 add(lines, indent * 3, "])")
                 add(lines, indent * 2, "else:")
                 add(lines, indent * 3, "if _rope_scaling is not None:")
                 add(lines, indent * 4, "_rope_params = dict(_rope_scaling)")
-                add(lines, indent * 4, "if 'rope_theta' not in _rope_params:")
-                add(lines, indent * 5, "_rope_params['rope_theta'] = _rope_theta")
+                add(lines, indent * 4, "_rope_params.pop('rope_theta', None)")
                 add(lines, indent * 3, "else:")
-                add(lines, indent * 4, "_rope_params = {'rope_type': 'default', 'rope_theta': _rope_theta}")
+                add(lines, indent * 4, "_rope_params = {'rope_type': 'default'}")
                 if _has_partial_rotary:
                     add(lines, indent * 4, "_rd = getattr(config, 'rotary_dim', None)")
                     add(lines, indent * 4, "if _rd is not None:")
@@ -1418,9 +1453,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     add(lines, indent * 5, "_rope_params['partial_rotary_factor'] = _prf")
                 add(lines, indent * 3, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 4, f"get_rope({head_dim_expr},")
+                add(lines, indent * 4, f"{head_dim_expr},")
                 add(lines, indent * 4, "max_position=getattr(config, 'max_position_embeddings', 4096),")
+                add(lines, indent * 4, "base=_rope_theta,")
                 add(lines, indent * 4, f"is_neox_style={_is_neox},")
-                add(lines, indent * 4, "rope_parameters=_rope_params,")
+                add(lines, indent * 4, "rope_scaling=_rope_params,")
                 add(lines, indent * 4, f") for i in range({num_layers_expr})")
                 add(lines, indent * 3, "])")
             add(lines, indent * 2, "")
@@ -1588,36 +1625,37 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent, "def load_weights(self, weights):")
         add(lines, indent * 2, "import re as _re")
         add(lines, indent * 2, "stacked_params_mapping = [")
-        _qkv_leaves_seen: set[str] = set()
-        for g in classification.qkv_groups:
-            if g.q_node_id == g.k_node_id:
-                continue
-            q_node = self._find_node_by_id(g.q_node_id)
-            k_node = self._find_node_by_id(g.k_node_id)
-            v_node = self._find_node_by_id(g.v_node_id)
-            if q_node is None or k_node is None or v_node is None:
-                continue
-            for node, shard in [(q_node, "q"), (k_node, "k"), (v_node, "v")]:
-                base = _linear_base_key(node)
-                if not base:
+        if self._use_clean_forward:
+            _qkv_leaves_seen: set[str] = set()
+            for g in classification.qkv_groups:
+                if g.q_node_id == g.k_node_id:
                     continue
-                leaf = base.rsplit(".", 1)[-1] if "." in base else base
-                if leaf in ("q_proj", "k_proj", "v_proj") or leaf in _qkv_leaves_seen:
+                q_node = self._find_node_by_id(g.q_node_id)
+                k_node = self._find_node_by_id(g.k_node_id)
+                v_node = self._find_node_by_id(g.v_node_id)
+                if q_node is None or k_node is None or v_node is None:
                     continue
-                _qkv_leaves_seen.add(leaf)
-                add(lines, indent * 3, f'(".qkv_proj", ".{leaf}", "{shard}"),')
-        if ".q_proj" not in _qkv_leaves_seen:
-            add(lines, indent * 3, '(".qkv_proj", ".q_proj", "q"),')
-        if ".k_proj" not in _qkv_leaves_seen:
-            add(lines, indent * 3, '(".qkv_proj", ".k_proj", "k"),')
-        if ".v_proj" not in _qkv_leaves_seen:
-            add(lines, indent * 3, '(".qkv_proj", ".v_proj", "v"),')
-        has_merged_ffn = any(
-            g.gate_node_id and g.up_node_id for g in classification.ffn_groups
-        )
-        if has_merged_ffn:
-            add(lines, indent * 3, '(".gate_up_proj", ".gate_proj", 0),')
-            add(lines, indent * 3, '(".gate_up_proj", ".up_proj", 1),')
+                for node, shard in [(q_node, "q"), (k_node, "k"), (v_node, "v")]:
+                    base = _linear_base_key(node)
+                    if not base:
+                        continue
+                    leaf = base.rsplit(".", 1)[-1] if "." in base else base
+                    if leaf in ("q_proj", "k_proj", "v_proj") or leaf in _qkv_leaves_seen:
+                        continue
+                    _qkv_leaves_seen.add(leaf)
+                    add(lines, indent * 3, f'(".qkv_proj", ".{leaf}", "{shard}"),')
+            if ".q_proj" not in _qkv_leaves_seen:
+                add(lines, indent * 3, '(".qkv_proj", ".q_proj", "q"),')
+            if ".k_proj" not in _qkv_leaves_seen:
+                add(lines, indent * 3, '(".qkv_proj", ".k_proj", "k"),')
+            if ".v_proj" not in _qkv_leaves_seen:
+                add(lines, indent * 3, '(".qkv_proj", ".v_proj", "v"),')
+            has_merged_ffn = any(
+                g.gate_node_id and g.up_node_id for g in classification.ffn_groups
+            )
+            if has_merged_ffn:
+                add(lines, indent * 3, '(".gate_up_proj", ".gate_proj", 0),')
+                add(lines, indent * 3, '(".gate_up_proj", ".up_proj", 1),')
         add(lines, indent * 2, "]")
         add(lines, indent * 2, "params_dict = dict(self.named_parameters())")
         add(lines, indent * 2, "params_dict.update(dict(self.named_buffers()))")
@@ -1700,9 +1738,45 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 4, "if _individual != _ck:")
         add(lines, indent * 5, "_transposed_ck_weights.add(_individual)")
         add(lines, indent * 2, "")
+        add(lines, indent * 2, "# Build set of checkpoint prefixes for weight filtering")
+        add(lines, indent * 2, "_ckpt_prefixes = set()")
+        add(lines, indent * 2, "for _ck in _ckpt_to_model:")
+        add(lines, indent * 3, "if '.' in _ck:")
+        add(lines, indent * 4, "_parent = _ck.rsplit('.', 1)[0] + '.'")
+        add(lines, indent * 4, "if _parent.count('.') >= 2:")
+        add(lines, indent * 5, "_ckpt_prefixes.add(_parent)")
+        scope_prefixes = self._collect_scope_prefixes()
+        for sp in scope_prefixes:
+            add(lines, indent * 2, f"_ckpt_prefixes.add('{sp}.')")
         add(lines, indent * 2, "for name, loaded_weight in weights:")
+        add(lines, indent * 3, "# Skip checkpoint weights that don't correspond to any vLLM layer")
+        add(lines, indent * 3, "# or registered state_dict_tensors entry (e.g. audio/vision weights")
+        add(lines, indent * 3, "# for multimodal models that we don't use).")
+        add(lines, indent * 3, "if name not in _ckpt_to_model:")
+        add(lines, indent * 4, "if not any(name.startswith(_p) for _p in _ckpt_prefixes):")
+        add(lines, indent * 5, "continue")
         self._emit_weight_loading_body(lines, classification, indent * 3)
         add(lines, indent * 2, "self._loaded_params = loaded_params")
+        add(lines, indent * 2, "# Re-sync state_dict_tensors with vLLM layer params after weight loading")
+        add(lines, indent * 2, "self._build_state_dict_tensors()")
+        add(lines, indent * 2, "# Deduplicate: for non-param state_dict_tensors entries that have a")
+        add(lines, indent * 2, "# matching vLLM param (same shape), copy data into the param and replace")
+        add(lines, indent * 2, "# the entry with a reference to the param to avoid storing duplicate tensors")
+        add(lines, indent * 2, "_param_ids = {id(p) for p in self.parameters()}")
+        add(lines, indent * 2, "_params_by_shape = {}")
+        add(lines, indent * 2, "for _pname, _param in self.named_parameters():")
+        add(lines, indent * 3, "_params_by_shape.setdefault(tuple(_param.shape), []).append(_param)")
+        add(lines, indent * 2, "for _k in list(self.state_dict_tensors.keys()):")
+        add(lines, indent * 3, "_v = self.state_dict_tensors[_k]")
+        add(lines, indent * 3, "if not torch.is_tensor(_v) or id(_v) in _param_ids:")
+        add(lines, indent * 4, "continue")
+        add(lines, indent * 3, "_shape = tuple(_v.shape)")
+        add(lines, indent * 3, "if _shape in _params_by_shape:")
+        add(lines, indent * 4, "for _param in _params_by_shape[_shape]:")
+        add(lines, indent * 5, "if _v.shape == _param.shape and _v.dtype == _param.dtype:")
+        add(lines, indent * 6, "_param.data.copy_(_v)")
+        add(lines, indent * 6, "self.state_dict_tensors[_k] = _param")
+        add(lines, indent * 6, "break")
         add(lines, indent * 2, "# Re-evaluate symbols after weight loading so has_root")
         add(lines, indent * 2, "# checks reflect actual checkpoint keys")
         add(lines, indent * 2, "self._eval_symbols()")
@@ -1761,8 +1835,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent, "")
         add(lines, indent, "def _apply(self, fn, recurse=True):")
         add(lines, indent * 2, "result = super()._apply(fn, recurse=recurse)")
+        add(lines, indent * 2, "# Re-sync state_dict_tensors with moved params, then move remaining non-param tensors")
+        add(lines, indent * 2, "result._build_state_dict_tensors()")
+        add(lines, indent * 2, "_param_ids = {id(p) for p in result.parameters()}")
         add(lines, indent * 2, "for _k, _v in list(result.state_dict_tensors.items()):")
-        add(lines, indent * 3, "if torch.is_tensor(_v):")
+        add(lines, indent * 3, "if torch.is_tensor(_v) and id(_v) not in _param_ids:")
         add(lines, indent * 4, "result.state_dict_tensors[_k] = fn(_v)")
         add(lines, indent * 2, "return result")
         add(lines, indent, "")
@@ -2649,7 +2726,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             if _repeated_mod is not None:
                 _layer_norms = self._analyze_layer_norms(_repeated_mod, classification)
                 if _layer_norms:
-                    use_clean_forward = True
+                    _total_norm_count = (
+                        len(_layer_norms)
+                        + len(classification.qk_norm_node_ids)
+                        + len(classification.v_norm_node_ids)
+                    )
+                    if _total_norm_count <= 4:
+                        use_clean_forward = True
         _is_hybrid_mamba = bool(
             classification.mamba_mixer_module_names
             and classification.qkv_groups
@@ -2699,13 +2782,16 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         # Build map of FFN gate→up pairs for merged gate_up_proj emission.
         # When a gate node has a matching up node, emit a single
         # MergedColumnParallelLinear and skip the up node.
+        # Only merge when clean forward is used — legacy forward inlines
+        # the module body and expects separate gate_proj/up_proj weights.
         ffn_up_to_skip: set[str] = set()
         ffn_gate_to_up: dict[str, str] = {}
-        for g in classification.ffn_groups:
-            if g.gate_node_id and g.up_node_id:
-                ffn_gate_to_up[g.gate_node_id] = g.up_node_id
-                if g.up_node_id != g.gate_node_id:
-                    ffn_up_to_skip.add(g.up_node_id)
+        if use_clean_forward:
+            for g in classification.ffn_groups:
+                if g.gate_node_id and g.up_node_id:
+                    ffn_gate_to_up[g.gate_node_id] = g.up_node_id
+                    if g.up_node_id != g.gate_node_id:
+                        ffn_up_to_skip.add(g.up_node_id)
         self._ffn_gate_to_up = ffn_gate_to_up
         # Deduplicate v_norms: keep only one (they are identical RMSNorm has_weight=False).
         # Multiple v_norms arise from alternative KV modules (e.g. gemma4_kv_shared
@@ -3134,7 +3220,22 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             elif node.id == self._vllm_classification.pli_proj_norm_node_id:
                 dim = self._resolve_const_value("PLI") or f"getattr(config, 'per_layer_input_dim', 256)"
             else:
-                dim = self._config_expr("hidden_size")
+                if len(node.inputs) >= 2:
+                    inp = node.inputs[1] if isinstance(node.inputs[0], GraphPath) else node.inputs[0]
+                    inp_dims = getattr(inp, "dims", None) or getattr(getattr(inp, "typeExpr", None), "dims", None)
+                    if inp_dims and len(inp_dims) >= 4:
+                        dim = self._head_dim_expr()
+                        if self._is_repeated_node(node):
+                            repeated_mod = self._get_repeated_module()
+                            if repeated_mod is not None:
+                                loop_var = self._node_loop_index(node)
+                                hd_expr = self._detect_head_dim_expr(repeated_mod, loop_var)
+                                if hd_expr:
+                                    dim = hd_expr
+                    else:
+                        dim = self._config_expr("hidden_size")
+                else:
+                    dim = self._config_expr("hidden_size")
             eps = self._node_rmsnorm_eps(node)
             has_weight = "rmsnorm_noscale" not in node.op.name
             if has_weight:
@@ -3167,6 +3268,32 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         if not is_q_node or not self._use_clean_forward:
             in_dim = self._node_input_dim_expr(node)
             out_dim = self._node_output_dim_expr(node)
+            # For QKV-classified nodes, compute output dim from head_dim and
+            # num_heads/kv_heads when the traced dim fell back to hidden_size.
+            # This matches QKVParallelLinear's internal output-size formula.
+            hs_expr = self._config_expr("hidden_size")
+            if out_dim == hs_expr:
+                head_size = self._head_dim_expr()
+                if self._is_repeated_node(node):
+                    repeated_mod = self._get_repeated_module()
+                    if repeated_mod is not None:
+                        loop_var = self._node_loop_index(node)
+                        hd_expr = self._detect_head_dim_expr(repeated_mod, loop_var)
+                        if hd_expr:
+                            head_size = hd_expr
+                if is_q_node:
+                    total_heads = self._config_expr("num_attention_heads")
+                    out_dim = f"({head_size} * {total_heads})"
+                else:
+                    total_kv_heads = self._config_expr("num_key_value_heads", alt="num_attention_heads")
+                    if self._is_repeated_node(node):
+                        repeated_mod = self._get_repeated_module()
+                        if repeated_mod is not None:
+                            loop_var = self._node_loop_index(node)
+                            kvh_expr = self._detect_kv_heads_expr(repeated_mod, loop_var)
+                            if kvh_expr:
+                                total_kv_heads = kvh_expr
+                    out_dim = f"({head_size} * {total_kv_heads})"
             bias = self._bias_expr(node)
             prefix = self._layer_prefix(node)
             add(lines, indent, "ColumnParallelLinear(")
@@ -3310,7 +3437,6 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent + 1, "else:")
         add(lines, indent + 2, "param.data.copy_(loaded_weight)")
         add(lines, indent + 1, "loaded_params.add(name)")
-        add(lines, indent + 1, "self.state_dict_tensors[_orig_name] = loaded_weight.to(dtype=self._params_dtype) if loaded_weight.is_floating_point() else loaded_weight")
         add(lines, indent + 1, "break")
         add(lines, indent, "else:")
         add(lines, indent + 1, "name = _ckpt_to_model.get(name, name)")
@@ -3329,7 +3455,6 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent + 1, "else:")
         add(lines, indent + 2, "param.data.copy_(loaded_weight)")
         add(lines, indent + 1, "loaded_params.add(name)")
-        add(lines, indent + 1, "self.state_dict_tensors[_orig_name] = loaded_weight.to(dtype=self._params_dtype) if loaded_weight.is_floating_point() else loaded_weight")
 
     def _vllm_layer_attr_name(self, node: GraphNode) -> str:
         node_id = node.id
@@ -3737,6 +3862,15 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                             py_expr = self._dim_expr_to_python(last, mod, loop_var)
                             if py_expr:
                                 return py_expr
+            # Fallback: use the gate_proj's output dim from the same FFN group
+            for g in self._vllm_classification.ffn_groups:
+                if g.down_node_id == node.id and g.gate_node_id:
+                    gate_node = self._find_node_by_id(g.gate_node_id)
+                    if gate_node is not None:
+                        gate_out = self._node_output_dim_expr(gate_node)
+                        hs_expr = self._config_expr("hidden_size")
+                        if gate_out != hs_expr:
+                            return gate_out
             hs = self._config_expr("hidden_size")
             return f"getattr(config, 'intermediate_size', self._model_config.get('intermediate_size', 4 * {hs}))"
         layer_type = self._vllm_classification.node_types.get(node.id, VLLMLayerType.DEFAULT)
@@ -3752,10 +3886,17 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                             if inp_dims and len(inp_dims) > 0:
                                 last = inp_dims[-1]
                                 py_expr = self._dim_expr_to_python(last, mod, loop_var)
-                                if py_expr:
+                                if py_expr and not self._dim_expr_has_negative_literal(last):
                                     return py_expr
             num_heads = self._config_expr("num_attention_heads")
             head_dim = self._head_dim_expr()
+            if self._is_repeated_node(node):
+                repeated_mod = self._get_repeated_module()
+                if repeated_mod is not None:
+                    loop_var = self._node_loop_index(node)
+                    hd_expr = self._detect_head_dim_expr(repeated_mod, loop_var)
+                    if hd_expr:
+                        head_dim = hd_expr
             return f"({num_heads} * {head_dim})"
         typed = self._node_input_dim_from_type(node)
         if typed is not None:
@@ -3783,6 +3924,18 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     if left and right:
                         return f"({left} {last.op} {right})"
         return None
+
+    def _dim_expr_has_negative_literal(self, dim: Any) -> bool:
+        """Check if a dim expression contains a negative literal int (likely a
+        dimension index like -2 leaked from lowering rather than a real size)."""
+        if isinstance(dim, int):
+            return dim < 0
+        if isinstance(dim, float):
+            return dim < 0
+        if hasattr(dim, "op") and hasattr(dim, "left") and hasattr(dim, "right"):
+            return (self._dim_expr_has_negative_literal(dim.left)
+                    or self._dim_expr_has_negative_literal(dim.right))
+        return False
 
     def _dim_expr_to_python(
         self, dim: Any, repeated_mod: Any, loop_var: str = "i",

@@ -121,6 +121,7 @@ _TORCH_BACKEND_INTRINSICS = frozenset(
         "__torch_selected_expert_relu2_ffn",
         "__torch_selected_expert_swiglu_ffn",
         "__torch_swiglu_ffn",
+        "__torch_gelu_ffn",
         "__torch_topk_normalize",
         "__torch_weighted_topk_sum",
     }
@@ -162,10 +163,13 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_rmsnorm_noscale",
         "__triton_rmsnorm_scaled",
         "__triton_rmsnorm_unit_offset_scaled",
+        "__triton_layernorm",
         "__triton_geglu_tanh_activation",
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
         "__triton_swiglu_activation",
+        "__triton_sigmoid_gated_mul",
+        "__torch_gelu_ffn",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
     }
@@ -894,6 +898,31 @@ def _collect_parameter_path_keys_from_provenance(
             memo[memo_key] = local
             out.update(local)
             return
+        if provenance.op == "__torch_gelu_ffn" and len(provenance.args) >= 8:
+            for index in (1, 2):
+                key = _path_key_from_provenance(
+                    provenance.args[index],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            if isinstance(provenance.args[3], GraphLiteral) and provenance.args[3].value:
+                key = _path_key_from_provenance(
+                    provenance.args[4],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            if isinstance(provenance.args[5], GraphLiteral) and provenance.args[5].value:
+                key = _path_key_from_provenance(
+                    provenance.args[6],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
         if provenance.op == "_params_param" and provenance.args:
             key = _path_key_from_provenance(
                 provenance.args[0],
@@ -1018,6 +1047,17 @@ def _semantic_parameter_path_counts(
             for operand in (node.inputs[1], node.inputs[2], node.inputs[3]):
                 if isinstance(operand, GraphPath):
                     counts[_graph_path_key(operand)] += 1
+            continue
+        if node.op.name == "__torch_gelu_ffn" and len(node.inputs) >= 8:
+            for operand in (node.inputs[1], node.inputs[2]):
+                if isinstance(operand, GraphPath):
+                    counts[_graph_path_key(operand)] += 1
+            if isinstance(node.inputs[3], GraphLiteral) and bool(node.inputs[3].value):
+                if isinstance(node.inputs[4], GraphPath):
+                    counts[_graph_path_key(node.inputs[4])] += 1
+            if isinstance(node.inputs[5], GraphLiteral) and bool(node.inputs[5].value):
+                if isinstance(node.inputs[6], GraphPath):
+                    counts[_graph_path_key(node.inputs[6])] += 1
             continue
         input_provenances = frozenset(
             item
@@ -1285,7 +1325,7 @@ def _linear_pack_candidate(
         weight_paths.append(weight_path)
         if bias_enabled and isinstance(bias_path, GraphPath):
             bias_paths.append(bias_path)
-        if len(nodes) == 3:
+        if len(nodes) >= 4:
             break
     if len(nodes) < 2:
         return None
@@ -1614,6 +1654,143 @@ def _module_value_ref_counts(module: GraphModule) -> Counter[str]:
     return counts
 
 
+_GELU_EXACT_OPS = {"Activations.gelu", "_activations_gelu"}
+_GELU_TANH_OPS = {
+    "Activations.gelu_new",
+    "Activations.gelu_pytorch_tanh",
+    "_activations_gelu_new",
+    "_activations_gelu_pytorch_tanh",
+}
+
+
+def _gelu_ffn_extract_linear(
+    node: GraphNode,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, bool] | None:
+    if node.op.name in ("NN.linear", "_linear") and len(node.inputs) >= 8:
+        base, x, _dim, bias, transpose, expert, weight_leaf, bias_leaf = node.inputs[:8]
+        if not (
+            isinstance(transpose, GraphLiteral)
+            and transpose.value is False
+            and isinstance(expert, GraphLiteral)
+            and expert.value is None
+        ):
+            return None
+        weight_path = _compose_graph_path_operand(base, weight_leaf)
+        bias_flag = isinstance(bias, GraphLiteral) and bool(bias.value)
+        bias_path = _compose_graph_path_operand(base, bias_leaf) if bias_flag else GraphLiteral(value=None, type_expr=TypeNull())
+        if not isinstance(weight_path, GraphPath):
+            return None
+        if bias_flag and not isinstance(bias_path, GraphPath):
+            return None
+        return x, weight_path, bias_path, bias_flag
+    if node.op.name == "NN.linear" and len(node.inputs) >= 5:
+        x = node.inputs[1]
+        weight_path = node.inputs[3]
+        bias_path = node.inputs[4]
+        if not isinstance(weight_path, GraphPath) or not isinstance(bias_path, GraphPath):
+            return None
+        return x, weight_path, bias_path, True
+    return None
+
+
+def _torch_gelu_ffn_candidate(
+    up_node: GraphNode,
+    gelu_node: GraphNode,
+    down_node: GraphNode,
+    *,
+    value_ref_counts: Mapping[str, int],
+    parameter_path_counts: Mapping[str, int],
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    up_info = _gelu_ffn_extract_linear(up_node)
+    if up_info is None:
+        return None
+    up_x, up_weight_path, up_bias_path, up_bias_flag = up_info
+    if gelu_node.op.name not in _GELU_EXACT_OPS and gelu_node.op.name not in _GELU_TANH_OPS:
+        return None
+    if len(gelu_node.inputs) != 1:
+        return None
+    down_info = _gelu_ffn_extract_linear(down_node)
+    if down_info is None:
+        return None
+    _down_x, down_weight_path, down_bias_path, down_bias_flag = down_info
+    if len(up_node.outputs) != 1 or len(gelu_node.outputs) != 1 or len(down_node.outputs) != 1:
+        return None
+    up_out_name = up_node.outputs[0].name
+    gelu_out_name = gelu_node.outputs[0].name
+    if value_ref_counts.get(up_out_name, 0) != 1:
+        return None
+    if value_ref_counts.get(gelu_out_name, 0) != 1:
+        return None
+    up_out_ref = GraphValueRef(up_out_name, up_node.outputs[0].type_expr, up_node.outputs[0].dims)
+    gelu_out_ref = GraphValueRef(gelu_out_name, gelu_node.outputs[0].type_expr, gelu_node.outputs[0].dims)
+    if gelu_node.inputs[0] != up_out_ref:
+        return None
+    if down_node.inputs[1] != gelu_out_ref:
+        return None
+    if parameter_path_counts.get(_graph_path_key(up_weight_path), 0) != 1:
+        return None
+    if parameter_path_counts.get(_graph_path_key(down_weight_path), 0) != 1:
+        return None
+    if up_bias_flag and parameter_path_counts.get(_graph_path_key(up_bias_path), 0) != 1:
+        return None
+    if down_bias_flag and parameter_path_counts.get(_graph_path_key(down_bias_path), 0) != 1:
+        return None
+    gelu_tanh = gelu_node.op.name in _GELU_TANH_OPS
+    return (
+        up_x,
+        up_weight_path,
+        down_weight_path,
+        GraphLiteral(value=up_bias_flag, type_expr=TypeBool()),
+        up_bias_path if up_bias_flag else GraphLiteral(value=None, type_expr=TypeNull()),
+        GraphLiteral(value=down_bias_flag, type_expr=TypeBool()),
+        down_bias_path if down_bias_flag else GraphLiteral(value=None, type_expr=TypeNull()),
+        GraphLiteral(value=gelu_tanh, type_expr=TypeBool()),
+    )
+
+
+def _rewrite_torch_gelu_ffn_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_gelu_ffn",
+) -> GraphProgram:
+    parameter_path_counts = _direct_parameter_path_counts(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 2 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_gelu_ffn_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                value_ref_counts=value_ref_counts,
+                parameter_path_counts=parameter_path_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            down_node = module.nodes[index + 2]
+            changed = True
+            new_nodes.append(
+                replace(
+                    down_node,
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 3
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
 def _torch_swiglu_ffn_candidate(
     gate_up_node: GraphNode,
     silu_node: GraphNode,
@@ -1763,6 +1940,40 @@ def _triton_swiglu_activation_candidate(
     return None
 
 
+def _triton_sigmoid_gated_mul_candidate(
+    mul_node: GraphNode,
+    *,
+    output_provenance: GraphProvenance | None,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand] | None:
+    if mul_node.op.name not in {"_mul", "core.binary.*"}:
+        return None
+    if len(mul_node.outputs) != 1:
+        return None
+    if output_provenance is None or output_provenance.kind != "op":
+        return None
+    if output_provenance.op not in {"_mul", "core.binary.*"} or len(output_provenance.args) != 2:
+        return None
+    left, right = output_provenance.args
+    if left.kind == "op" and left.op == "_activations_sigmoid" and len(left.args) == 1:
+        gate = _provenance_to_graph_operand(left.args[0], provenance_to_operand=provenance_to_operand)
+        up = _provenance_to_graph_operand(right, provenance_to_operand=provenance_to_operand)
+        if gate is not None and up is not None:
+            lt = graph_operand_type(gate)
+            rt = graph_operand_type(up)
+            if isinstance(lt, TypeTensor) and isinstance(rt, TypeTensor):
+                return (gate, up)
+    if right.kind == "op" and right.op == "_activations_sigmoid" and len(right.args) == 1:
+        gate = _provenance_to_graph_operand(right.args[0], provenance_to_operand=provenance_to_operand)
+        up = _provenance_to_graph_operand(left, provenance_to_operand=provenance_to_operand)
+        if gate is not None and up is not None:
+            lt = graph_operand_type(gate)
+            rt = graph_operand_type(up)
+            if isinstance(lt, TypeTensor) and isinstance(rt, TypeTensor):
+                return (gate, up)
+    return None
+
+
 def _triton_geglu_tanh_activation_candidate(
     mul_node: GraphNode,
     *,
@@ -1826,6 +2037,45 @@ def _triton_rmsnorm_noscale_candidate(
     ):
         return None
     return x, eps, dim, cast_float
+
+
+def _triton_layernorm_candidate(
+    node: GraphNode,
+    *,
+    output_provenance: GraphProvenance | None,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    if len(node.outputs) != 1:
+        return None
+    if output_provenance is None or output_provenance.kind != "op":
+        return None
+    if output_provenance.op != "_layernorm" or len(output_provenance.args) < 7:
+        return None
+    base = _provenance_to_graph_operand(output_provenance.args[0], provenance_to_operand=provenance_to_operand)
+    x = _provenance_to_graph_operand(output_provenance.args[1], provenance_to_operand=provenance_to_operand)
+    eps_prov = output_provenance.args[2]
+    eps = _provenance_to_graph_operand(eps_prov, provenance_to_operand=provenance_to_operand)
+    if eps is None and eps_prov.kind == "global" and eps_prov.name:
+        eps = GraphValueRef(eps_prov.name, TypeFloat(), None)
+    dim = _provenance_to_graph_operand(output_provenance.args[3], provenance_to_operand=provenance_to_operand)
+    weight_leaf = _provenance_to_graph_operand(output_provenance.args[4], provenance_to_operand=provenance_to_operand)
+    bias_flag = _provenance_to_graph_operand(output_provenance.args[5], provenance_to_operand=provenance_to_operand)
+    bias_leaf = _provenance_to_graph_operand(output_provenance.args[6], provenance_to_operand=provenance_to_operand)
+    if any(o is None for o in (base, x, eps, dim, weight_leaf, bias_flag, bias_leaf)):
+        return None
+    if not (
+        isinstance(dim, GraphLiteral)
+        and (dim.value is None or dim.value == -1)
+    ):
+        return None
+    weight_path = _compose_graph_path_operand(base, weight_leaf)
+    bias_path = _compose_graph_path_operand(base, bias_leaf)
+    if not isinstance(weight_path, GraphPath):
+        return None
+    bias_enabled = isinstance(bias_flag, GraphLiteral) and bool(bias_flag.value)
+    if bias_enabled and not isinstance(bias_path, GraphPath):
+        return None
+    return x, eps, dim, weight_path, bias_flag, bias_path if bias_enabled else GraphLiteral(value=None, type_expr=TypeNull())
 
 
 def _triton_rmsnorm_scaled_candidate(
@@ -2079,6 +2329,40 @@ def _rewrite_triton_rmsnorm_noscale_intrinsics(graph: GraphProgram) -> GraphProg
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
+def _rewrite_triton_layernorm_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_layernorm_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp("__triton_layernorm"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
 def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     changed = False
@@ -2109,6 +2393,45 @@ def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphPr
                 replace(
                     mul_node,
                     op=GraphOp("__triton_swiglu_activation"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 1
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_triton_sigmoid_gated_mul_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            node = module.nodes[index]
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_sigmoid_gated_mul_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            mul_node = node
+            changed = True
+            new_nodes.append(
+                replace(
+                    mul_node,
+                    op=GraphOp("__triton_sigmoid_gated_mul"),
                     inputs=inputs,
                     attrs={},
                 )
@@ -15430,6 +15753,16 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="torch_swiglu_ffn_intrinsics")
                 current = candidate
             candidate = (
+                _rewrite_torch_gelu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_gelu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_gelu_ffn_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_torch_expert_swiglu_ffn_intrinsics(current)
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_expert_swiglu_ffn")
                 else current
@@ -15781,6 +16114,16 @@ def optimize_graph_program(
                     _validate_optimizer_graph(candidate, phase="triton_gqa_repeat_elimination")
                 current = candidate
             candidate = (
+                _rewrite_torch_gelu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_gelu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_gelu_ffn_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_triton_rmsnorm_scaled_intrinsics(current)
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_rmsnorm_scaled")
                 else current
@@ -15809,6 +16152,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_rmsnorm_unit_offset_scaled_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_triton_layernorm_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_layernorm")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_layernorm_intrinsics")
                 current = candidate
             candidate = (
                 _rewrite_triton_geglu_tanh_activation_intrinsics(current)
@@ -15846,6 +16199,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_swiglu_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_triton_sigmoid_gated_mul_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sigmoid_gated_mul")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_sigmoid_gated_mul_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-vllm":
             candidate = (

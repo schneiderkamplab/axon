@@ -253,9 +253,16 @@ def _is_layernorm_call(
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
+    _has_norm = False
+    _param_ops = {"_linear", "_embedding", "NN.linear", "NN.embedding",
+                  "_conv1d", "NN.conv1d", "_scatter", "NN.scatter"}
     for n in mod.nodes:
         if n.op.name in ("_layernorm", "NN.layernorm"):
-            return True
+            _has_norm = True
+        if n.op.name in _param_ops:
+            return False
+    if _has_norm:
+        return True
     return _module_contains_primitive(
         mod, "_layernorm", modules_by_name,
         recursive="." in node.op.name,
@@ -271,9 +278,18 @@ def _is_rmsnorm_call(
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
+    # Only classify as rmsnorm if the module is a simple wrapper (contains
+    # a norm call but no other parameterized ops like linear/embedding).
+    _has_norm = False
+    _param_ops = {"_linear", "_embedding", "NN.linear", "NN.embedding",
+                  "_conv1d", "NN.conv1d", "_scatter", "NN.scatter"}
     for n in mod.nodes:
         if n.op.name in ("_rmsnorm", "NN.rmsnorm", "NN.rmsnorm_noscale"):
-            return True
+            _has_norm = True
+        if n.op.name in _param_ops:
+            return False
+    if _has_norm:
+        return True
     return _module_contains_primitive(
         mod, "_rmsnorm", modules_by_name,
         recursive="." in node.op.name,
