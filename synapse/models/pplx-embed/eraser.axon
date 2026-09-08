@@ -1,0 +1,89 @@
+{-# CHECKPOINTS "blackpen-sk/eraser" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "pplx_pii_masking" #-}
+
+import Activations (silu, sigmoid)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Math (div, mul)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- ((1024) :: Dim)
+
+NUM_LAYERS <- ((28) :: Dim)
+
+NUM_HEADS <- ((16) :: Dim)
+
+KVH <- ((8) :: Dim)
+
+HEAD_DIM <- ((128) :: Dim)
+
+QD <- do
+  return ((NUM_HEADS * HEAD_DIM) :: Dim)
+
+KVD <- do
+  return ((KVH * HEAD_DIM) :: Dim)
+
+FFN <- ((3072) :: Dim)
+
+EPS <- (1e-06)
+
+THETA <- (1000000.0)
+
+NUM_LABELS <- ((237) :: Dim)
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
+head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+pii_masking_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+pii_masking_block x rope_sin rope_cos mask = do
+  xn <- rms@input_layernorm x
+  a <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=NUM_HEADS |> head_rms@q_norm
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> head_rms@k_norm
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    return attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
+  return x + m
+
+pplx_pii_masking :: TokenIds[B,S] -> ?Mask[B,S,S] -> (Tensor[B,S,NUM_LABELS], Tensor[B,1])
+pplx_pii_masking input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids HEAD_DIM THETA) :: (Tensor[B,1,S,HEAD_DIM], Tensor[B,1,S,HEAD_DIM]))
+  mask <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  x <- scope@backbone do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
+      x <- pii_masking_block x rope_sin rope_cos mask
+      yield x
+    return rms@norm x
+  h <- Tensor.cast x dtype="float32"
+  logits <- NN.linear@token_cls_head h dim=NUM_LABELS bias=true
+  pooled <- Tensor.sum h dim=1 keepdim=false
+  pooled <- div pooled S
+  sensitivity <- NN.linear@sensitivity_head pooled dim=1 bias=true |> sigmoid
+  return logits, sensitivity
