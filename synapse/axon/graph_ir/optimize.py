@@ -1255,6 +1255,45 @@ def _linear_weight_pack_dim(transpose: GraphOperand) -> int:
     return -1 if transpose_literal is not None and bool(transpose_literal.value) else -2
 
 
+def _linear_pack_extract(node: GraphNode) -> tuple[GraphOperand, GraphOperand, GraphPath, GraphPath, bool, GraphLiteral, GraphLiteral] | None:
+    """Extract (x, bias_flag, weight_path, bias_path, bias_enabled, transpose_lit, expert_lit) from a linear node.
+
+    Handles both 8-input (``_linear`` / ``NN.linear`` with bias/transpose/expert literals)
+    and 5-input (simplified ``NN.linear`` with resolved weight/bias paths) forms.
+    Also matches specialized module clones like ``NN.linear__spec_5``.
+    """
+    name = node.op.name
+    is_linear = name == "_linear" or name == "NN.linear" or name.startswith("NN.linear__spec_")
+    if not is_linear or len(node.outputs) != 1:
+        return None
+    if len(node.inputs) >= 8:
+        base, x, _dim, bias, transpose, expert, weight_leaf, bias_leaf = node.inputs[:8]
+        if not (
+            isinstance(transpose, GraphLiteral)
+            and transpose.value is False
+            and isinstance(expert, GraphLiteral)
+            and expert.value is None
+        ):
+            return None
+        weight_path = _compose_graph_path_operand(base, weight_leaf)
+        bias_path = _compose_graph_path_operand(base, bias_leaf)
+        bias_enabled = isinstance(bias, GraphLiteral) and bool(bias.value)
+        if not isinstance(weight_path, GraphPath):
+            return None
+        if bias_enabled and not isinstance(bias_path, GraphPath):
+            return None
+        return x, bias, weight_path, bias_path if bias_enabled else GraphLiteral(value=None, type_expr=TypeNull()), bias_enabled, transpose, expert
+    if len(node.inputs) >= 5:
+        base, x, _dim, weight_path, bias_path = node.inputs[:5]
+        if not isinstance(weight_path, GraphPath):
+            return None
+        bias_enabled = isinstance(bias_path, GraphPath)
+        if not bias_enabled and not isinstance(bias_path, GraphLiteral):
+            return None
+        return x, GraphLiteral(value=True, type_expr=TypeBool()) if bias_enabled else GraphLiteral(value=False, type_expr=TypeBool()), weight_path, bias_path if bias_enabled else GraphLiteral(value=None, type_expr=TypeNull()), bias_enabled, GraphLiteral(value=False, type_expr=TypeBool()), GraphLiteral(value=None, type_expr=TypeNull())
+    return None
+
+
 def _linear_pack_candidate(
     module: GraphModule,
     start_index: int,
@@ -1262,55 +1301,32 @@ def _linear_pack_candidate(
     parameter_path_counts: Mapping[str, int],
 ) -> tuple[tuple[int, ...], tuple[GraphOperand, GraphOperand, GraphOperand, GraphLiteral | None, tuple[GraphValue, ...], tuple[GraphPath, ...], tuple[GraphPath, ...] | None]] | None:
     first = module.nodes[start_index]
-    if first.op.name != "_linear" or len(first.outputs) != 1 or len(first.inputs) < 8:
+    first_info = _linear_pack_extract(first)
+    if first_info is None:
         return None
-    first_path, first_x, _first_dim, first_bias, first_transpose, first_expert, first_weight_leaf, first_bias_leaf = first.inputs[:8]
-    if not (
-        isinstance(first_transpose, GraphLiteral)
-        and first_transpose.value is False
-        and isinstance(first_expert, GraphLiteral)
-        and first_expert.value is None
-    ):
-        return None
-    first_weight_path = _compose_graph_path_operand(first_path, first_weight_leaf)
-    first_bias_path = _compose_graph_path_operand(first_path, first_bias_leaf)
-    if not isinstance(first_weight_path, GraphPath):
-        return None
+    first_x, first_bias, first_weight_path, first_bias_path, bias_enabled, first_transpose, first_expert = first_info
     if parameter_path_counts.get(_graph_path_key(first_weight_path), 0) != 1:
         return None
-    bias_enabled = isinstance(first_bias, GraphLiteral) and bool(first_bias.value)
     if bias_enabled:
-        if not isinstance(first_bias_path, GraphPath):
-            return None
         if parameter_path_counts.get(_graph_path_key(first_bias_path), 0) != 1:
             return None
     nodes: list[GraphNode] = [first]
     indexes: list[int] = [start_index]
     weight_paths: list[GraphPath] = [first_weight_path]
-    bias_paths: list[GraphPath] = [first_bias_path] if bias_enabled and isinstance(first_bias_path, GraphPath) else []
+    bias_paths: list[GraphPath] = [first_bias_path] if bias_enabled else []
     for index in range(start_index + 1, len(module.nodes)):
         node = module.nodes[index]
-        if node.op.name != "_linear" or len(node.outputs) != 1 or len(node.inputs) < 8:
+        info = _linear_pack_extract(node)
+        if info is None:
             continue
-        path, x, _dim, bias, transpose, expert, weight_leaf, bias_leaf = node.inputs[:8]
-        if x != first_x or bias != first_bias or transpose != first_transpose or expert != first_expert:
+        x, bias, weight_path, bias_path, node_bias_enabled, _transpose, _expert = info
+        if x != first_x or node_bias_enabled != bias_enabled:
             continue
-        if not (
-            isinstance(transpose, GraphLiteral)
-            and transpose.value is False
-            and isinstance(expert, GraphLiteral)
-            and expert.value is None
-        ):
-            continue
-        weight_path = _compose_graph_path_operand(path, weight_leaf)
-        bias_path = _compose_graph_path_operand(path, bias_leaf)
         if not isinstance(weight_path, GraphPath):
             continue
         if weight_path in weight_paths:
             continue
         if parameter_path_counts.get(_graph_path_key(weight_path), 0) != 1:
-            # This is a projection in the same candidate run, but its parameter
-            # tensor has another semantic read. Do not pack around it.
             break
         if bias_enabled:
             if not isinstance(bias_path, GraphPath):
@@ -1318,7 +1334,6 @@ def _linear_pack_candidate(
             if bias_path in bias_paths:
                 continue
             if parameter_path_counts.get(_graph_path_key(bias_path), 0) != 1:
-                # Same as for weights: a reused bias blocks the whole pack.
                 break
         nodes.append(node)
         indexes.append(index)
@@ -1363,7 +1378,9 @@ def _direct_parameter_path_counts(graph: GraphProgram) -> Counter[str]:
         for node in module.nodes:
             for operand in (*node.inputs, *node.attrs.values()):
                 _collect_direct_graph_path_keys(operand, counts)
-            if node.op.name == "_linear" and len(node.inputs) >= 8:
+            name = node.op.name
+            is_linear_8 = name == "_linear" or name == "NN.linear" or name.startswith("NN.linear__spec_")
+            if is_linear_8 and len(node.inputs) >= 8:
                 base, _x, _dim, bias, _transpose, _expert, weight_leaf, bias_leaf = node.inputs[:8]
                 weight_path = _compose_graph_path_operand(base, weight_leaf)
                 if isinstance(weight_path, GraphPath):

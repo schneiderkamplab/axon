@@ -112,7 +112,7 @@ def _path_pattern_regex(pattern: str) -> re.Pattern[str]:
         if name in used:
             pieces.append(f"(?P={name})")
         else:
-            pieces.append(f"(?P<{name}>[^.]+)")
+            pieces.append(f"(?P<{name}>.+)")
             used.add(name)
         cursor = match.end()
     pieces.append(re.escape(pattern[cursor:]))
