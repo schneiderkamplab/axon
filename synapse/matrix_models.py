@@ -79,6 +79,10 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
         local_dir="dfm_decoder",
         repo_id="danish-foundation-models/dfm-decoder-open-v0-7b-pt",
     ),
+    "dfm_mimir": ModelDownloadSpec(
+        local_dir="dfm_mimir",
+        repo_id="danish-foundation-models/DFM-Mimir",
+    ),
     "distilbert": ModelDownloadSpec(
         local_dir="distilbert",
         repo_id="distilbert/distilbert-base-uncased",
@@ -113,6 +117,10 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
     "gpt_oss_120b": ModelDownloadSpec(
         local_dir="gpt_oss_120b",
         repo_id="openai/gpt-oss-120b",
+    ),
+    "hrm_text_1b": ModelDownloadSpec(
+        local_dir="hrm_text_1b",
+        repo_id="sapientinc/HRM-Text-1B",
     ),
     "jamba_3b": ModelDownloadSpec(local_dir="jamba_3b", repo_id="ai21labs/AI21-Jamba-Reasoning-3B"),
     "llama3_2_1b": ModelDownloadSpec(local_dir="llama3_2_1b", repo_id="meta-llama/Llama-3.2-1B"),
@@ -259,6 +267,8 @@ MATRIX_AXON_MODEL_DIRS: dict[str, tuple[str, ...]] = {
     "gpt2": ("gpt2",),
     "gpt2_kv": ("gpt2",),
     "gpt_oss_20b": ("gpt_oss_20b", "gpt_oss_120b"),
+    "generic-hrm-text": ("hrm_text_1b", "dfm_mimir"),
+    "HRM-Text-1B": ("hrm_text_1b",),
     "jamba_3b": ("jamba_3b",),
     "llama3_2_1b": ("llama3_2_1b",),
     "longformer": ("longformer",),
