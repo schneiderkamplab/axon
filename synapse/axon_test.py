@@ -99,6 +99,8 @@ def _default_graph_backend_intrinsics(
         return "codegen2-triton"
     if axon_backend == "codegen2-vllm":
         return "codegen2-vllm"
+    if axon_backend == "codegen2-mlx":
+        return "codegen2-mlx:__mlx_sdpa,__mlx_rope"
     if axon_backend == "codegen2-jax":
         return "codegen2-jax:__jax_sdpa,__jax_rope"
     return None
@@ -4100,6 +4102,7 @@ def _run_axon_test_single(
             "gemma3",
             "gemma4",
             "gpt_oss",
+            "hrm_text",
             "mistral4",
             "mistral3",
             "llama4",
