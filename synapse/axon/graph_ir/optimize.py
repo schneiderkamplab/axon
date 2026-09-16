@@ -113,6 +113,7 @@ _TORCH_BACKEND_INTRINSICS = frozenset(
         "__torch_expert_swiglu_ffn",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
+        "__torch_rmsnorm_noscale",
         "__torch_rmsnorm_scaled",
         "__torch_sdpa",
         "__torch_selected_expert_clamped_packed_swiglu_ffn",
@@ -6146,6 +6147,74 @@ def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgra
             changed = True
         else:
             new_modules.append(module)
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_rmsnorm_noscale_module_calls(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
+    modules_by_name = {m.name: m for m in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        if module.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1"):
+            new_modules.append(module)
+            continue
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if (
+                node.op.name not in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
+                or len(node.outputs) != 1
+                or node.attrs
+            ):
+                new_nodes.append(node)
+                continue
+            callee = modules_by_name.get(node.op.name)
+            if callee is None or len(callee.nodes) != 1:
+                new_nodes.append(node)
+                continue
+            rmsnorm_node = callee.nodes[0]
+            if rmsnorm_node.op.name != "_rmsnorm" or len(rmsnorm_node.inputs) < 4:
+                new_nodes.append(node)
+                continue
+            formal_to_actual = {
+                formal.name: actual
+                for formal, actual in zip(callee.inputs, node.inputs, strict=False)
+            }
+            x = formal_to_actual.get("x")
+            if x is None:
+                new_nodes.append(node)
+                continue
+            eps = formal_to_actual.get(
+                "eps",
+                rmsnorm_node.inputs[1]
+                if len(rmsnorm_node.inputs) > 1
+                else GraphLiteral(value=1e-06, type_expr=TypeFloat()),
+            )
+            dim = formal_to_actual.get(
+                "dim",
+                rmsnorm_node.inputs[2]
+                if len(rmsnorm_node.inputs) > 2
+                else GraphLiteral(value=None, type_expr=None),
+            )
+            cast_float = formal_to_actual.get(
+                "cast_float",
+                rmsnorm_node.inputs[3]
+                if len(rmsnorm_node.inputs) > 3
+                else GraphLiteral(value=False, type_expr=TypeBool()),
+            )
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp(op_name),
+                    inputs=(x, eps, dim, cast_float),
+                    attrs={},
+                )
+            )
+            changed = True
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
@@ -15834,6 +15903,16 @@ def optimize_graph_program(
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_rmsnorm_scaled_intrinsics")
                 current = candidate
+            candidate = (
+                _rewrite_rmsnorm_noscale_module_calls(current, op_name="__torch_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_rmsnorm_noscale_module_calls")
+                current = candidate
         if backend_intrinsic_target == "codegen2-tinygrad":
             candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__tinygrad_sdpa")
@@ -16144,6 +16223,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_rmsnorm_noscale_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_rmsnorm_noscale_module_calls(current, op_name="__triton_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_rmsnorm_noscale_module_calls")
                 current = candidate
             candidate = (
                 _rewrite_triton_rmsnorm_unit_offset_scaled_intrinsics(current)

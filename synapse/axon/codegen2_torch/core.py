@@ -2511,6 +2511,21 @@ class Codegen2GraphModel(nn.Module):
             out(y)
             return True
 
+        if primitive == "_torch_rmsnorm_noscale":
+            x = args[0]
+            eps = float(args[1]) if len(args) > 1 and not self._is_null(args[1]) else 1e-6
+            dim = args[2] if len(args) > 2 and not self._is_null(args[2]) else None
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else False
+            if dim is not None and int(dim) != -1:
+                raise ValueError("_torch_rmsnorm_noscale only supports dim=None/-1")
+            if cast_float:
+                x_f = x.float()
+                y = x_f * torch.rsqrt(torch.mean(x_f * x_f, dim=-1, keepdim=True) + eps)
+                out(y.to(dtype=x.dtype))
+            else:
+                out(x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps))
+            return True
+
         if primitive == "conv1d":
             if len(args) != 8:
                 raise ValueError("conv1d expects x, weight, bias, stride, padding_left, padding_right, dilation, groups")
@@ -6196,6 +6211,18 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({weight} * ({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype))"
             y = f"({weight} * ({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps})))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
+            return f"({y_float} if {cast_float} else {y})"
+        if primitive == "_torch_rmsnorm_noscale":
+            x = args[0]
+            eps = float_arg(1, "1e-6")
+            cast_float = bool_arg(3, "False")
+            x_float = f"{x}.float()"
+            y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
+            y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
             if cast_float == "True":
                 return y_float
             if cast_float == "False":
