@@ -6069,6 +6069,7 @@ def _rewrite_mlx_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgram:
             and module.nodes[0].op.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
             and module.nodes[1].op.name == "Params.param_scale"
             and len(module.nodes[1].inputs) >= 2
+            and all(isinstance(out, GraphValue) for out in module.outputs)
         ):
             rmsnorm_node = module.nodes[0]
             param_scale_node = module.nodes[1]
@@ -6112,6 +6113,7 @@ def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgra
             and module.nodes[0].op.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
             and module.nodes[1].op.name == "Params.param_scale"
             and len(module.nodes[1].inputs) >= 2
+            and all(isinstance(out, GraphValue) for out in module.outputs)
         ):
             rmsnorm_node = module.nodes[0]
             param_scale_node = module.nodes[1]
