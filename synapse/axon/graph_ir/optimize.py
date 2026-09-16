@@ -5380,14 +5380,34 @@ def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram) -> GraphProgra
     has_candidate_shape = False
     for module in graph.modules:
         names = [node.op.name for node in module.nodes]
+        cumsum_names = {"_cumsum", "Tensor.cumsum"}
+        slice_names = {"_slice", "Tensor.slice"}
+        cast_names = {"_cast_like", "Tensor.cast_like"}
+        div_names = {"core.binary./", "_div"}
         for index in range(len(names)):
-            if names[index : index + 4] == ["_cumsum", "_slice", "core.binary./", "_cast_like"]:
+            if (
+                names[index] in cumsum_names
+                and index + 3 < len(names)
+                and names[index + 2] in slice_names
+                and names[index + 3] in div_names
+            ):
                 has_candidate_shape = True
                 break
-            if names[index : index + 4] == ["_cumsum", "_slice", "_div", "_cast_like"]:
+            if (
+                names[index] in cumsum_names
+                and index + 2 < len(names)
+                and names[index + 1] in slice_names
+                and names[index + 2] in cast_names
+            ):
                 has_candidate_shape = True
                 break
-            if names[index : index + 3] == ["_cumsum", "_slice", "_cast_like"]:
+            if (
+                names[index] in cumsum_names
+                and index + 3 < len(names)
+                               and names[index + 1] in slice_names
+                and names[index + 2] in div_names
+                and names[index + 3] in cast_names
+            ):
                 has_candidate_shape = True
                 break
         if has_candidate_shape:
