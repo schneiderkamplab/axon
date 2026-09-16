@@ -171,10 +171,14 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_rmsnorm_unit_offset_scaled",
         "__triton_layernorm",
         "__triton_geglu_tanh_activation",
+        "__triton_modulated_rmsnorm",
+        "__triton_relu2_activation",
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
+        "__triton_selected_expert_relu2_ffn",
         "__triton_sigmoid_gated_merge",
         "__triton_sigmoid_gated_mul",
+        "__triton_softmax",
         "__triton_split_swiglu",
         "__triton_swiglu_activation",
         "__torch_gelu_ffn",
@@ -1949,6 +1953,56 @@ def _triton_swiglu_activation_candidate(
     return None
 
 
+def _triton_relu2_activation_candidate(
+    node: GraphNode,
+    *,
+    output_provenance: GraphProvenance | None,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand] | None:
+    if node.op.name != "_activations_relu2":
+        return None
+    if len(node.outputs) != 1:
+        return None
+    if output_provenance is None or output_provenance.kind != "op":
+        return None
+    if output_provenance.op != "_activations_relu2" or len(output_provenance.args) != 1:
+        return None
+    x = _provenance_to_graph_operand(output_provenance.args[0], provenance_to_operand=provenance_to_operand)
+    if x is None:
+        return None
+    return (x,)
+
+
+def _triton_softmax_candidate(
+    node: GraphNode,
+    *,
+    output_provenance: GraphProvenance | None,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand] | None:
+    if node.op.name != "_softmax":
+        return None
+    if len(node.outputs) != 1:
+        return None
+    if output_provenance is None or output_provenance.kind != "op":
+        return None
+    if output_provenance.op != "_softmax" or len(output_provenance.args) < 1:
+        return None
+    x = _provenance_to_graph_operand(output_provenance.args[0], provenance_to_operand=provenance_to_operand)
+    if x is None:
+        return None
+    dim = output_provenance.args[1] if len(output_provenance.args) > 1 else None
+    dim_val = -1
+    if dim is not None:
+        dim_operand = _provenance_to_graph_operand(dim, provenance_to_operand=provenance_to_operand)
+        if isinstance(dim_operand, GraphLiteral) and isinstance(dim_operand.value, int):
+            dim_val = dim_operand.value
+        else:
+            return None
+    if dim_val != -1:
+        return None
+    return (x, GraphLiteral(-1, TypeInt()))
+
+
 def _triton_sigmoid_gated_mul_candidate(
     mul_node: GraphNode,
     *,
@@ -2405,6 +2459,90 @@ def _rewrite_swiglu_activation_intrinsics(
             new_nodes.append(
                 replace(
                     mul_node,
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 1
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_relu2_activation_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            node = module.nodes[index]
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_relu2_activation_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 1
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_softmax_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            node = module.nodes[index]
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_softmax_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
                     op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
@@ -16582,6 +16720,7 @@ def optimize_graph_program(
                 current = candidate
             triton_selected_expert_intrinsics = {
                 "__triton_selected_expert_packed_swiglu_ffn",
+                "__triton_selected_expert_relu2_ffn",
             }
             candidate = (
                 _rewrite_torch_selected_expert_intrinsics(
@@ -16606,6 +16745,26 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_swiglu_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_relu2_activation_intrinsics(current, op_name="__triton_relu2_activation")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_relu2_activation")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_relu2_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_softmax_intrinsics(current, op_name="__triton_softmax")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_softmax")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_softmax_intrinsics")
                 current = candidate
             candidate = (
                 _rewrite_split_swiglu_intrinsics(current, swiglu_op="__triton_swiglu_activation", fused_op="__triton_split_swiglu")

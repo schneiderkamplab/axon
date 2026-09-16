@@ -352,6 +352,71 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "_axon_triton_sigmoid_gated_merge_kernel[(rows,)](gate_in, up_in, out, rows, D, H, S, BLOCK=block)")
         add(lines, 8, "return out.reshape(B, S, H * D)")
         add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _relu2_activation(cls, x):")
+        add(lines, 8, "if triton is None or _axon_triton_relu2_kernel is None or not torch.is_tensor(x) or not x.is_cuda:")
+        add(lines, 12, "raise RuntimeError('__triton_relu2_activation requires Triton and a CUDA tensor')")
+        add(lines, 8, "x_in = x if x.is_contiguous() else x.contiguous()")
+        add(lines, 8, "out = torch.empty_like(x_in)")
+        add(lines, 8, "n_elements = out.numel()")
+        add(lines, 8, "if n_elements == 0:")
+        add(lines, 12, "return out.reshape(x.shape)")
+        add(lines, 8, "block = 1024")
+        add(lines, 8, "grid = (triton.cdiv(n_elements, block),)")
+        add(lines, 8, "_axon_triton_debug_count('relu2_activation')")
+        add(lines, 8, "_axon_triton_relu2_kernel[grid](x_in, out, n_elements, BLOCK=block, LONG_INDEXING=0 if n_elements <= (2**31 - 1024 * 4) else 1)")
+        add(lines, 8, "return out.reshape(x.shape)")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _softmax(cls, x, dim=-1, dtype=None):")
+        add(lines, 8, "if triton is None or _axon_triton_softmax_kernel is None or not torch.is_tensor(x) or not x.is_cuda:")
+        add(lines, 12, "raise RuntimeError('__triton_softmax requires Triton and a CUDA tensor')")
+        add(lines, 8, "if dim is not None and int(dim) != -1:")
+        add(lines, 12, "raise ValueError('__triton_softmax only supports dim=-1')")
+        add(lines, 8, "orig_shape = x.shape")
+        add(lines, 8, "x_2d = x.reshape(-1, x.shape[-1]) if x.ndim != 2 else x")
+        add(lines, 8, "x_in = x_2d if x_2d.is_contiguous() else x_2d.contiguous()")
+        add(lines, 8, "rows, cols = x_in.shape")
+        add(lines, 8, "if cols == 0:")
+        add(lines, 12, "return x_in.new_empty(rows, cols).reshape(orig_shape)")
+        add(lines, 8, "out = torch.empty_like(x_in)")
+        add(lines, 8, "block = triton.next_power_of_2(cols)")
+        add(lines, 8, "if block > 32768:")
+        add(lines, 12, "raise ValueError('__triton_softmax last dimension is too large for the Triton kernel')")
+        add(lines, 8, "num_warps = 4 if block < 512 else 8")
+        add(lines, 8, "_axon_triton_debug_count('softmax')")
+        add(lines, 8, "_axon_triton_softmax_kernel[(rows,)](x_in, out, rows, cols, BLOCK=block, num_warps=num_warps)")
+        add(lines, 8, "return out.reshape(orig_shape)")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _modulated_rmsnorm(cls, x, scale, modulation, eps=1e-6):")
+        add(lines, 8, "if triton is None or _axon_triton_modulated_rmsnorm_kernel is None or not torch.is_tensor(x) or not x.is_cuda:")
+        add(lines, 12, "raise RuntimeError('__triton_modulated_rmsnorm requires Triton and a CUDA tensor')")
+        add(lines, 8, "if not torch.is_tensor(scale):")
+        add(lines, 12, "scale = self._param(scale)")
+        add(lines, 8, "if not torch.is_tensor(modulation):")
+        add(lines, 12, "modulation = self._param(modulation)")
+        add(lines, 8, "scale = self._move_to(scale, x.device)")
+        add(lines, 8, "modulation = self._move_to(modulation, x.device)")
+        add(lines, 8, "last_dim = int(x.shape[-1])")
+        add(lines, 8, "if last_dim <= 0:")
+        add(lines, 12, "return torch.empty_like(x)")
+        add(lines, 8, "x_in = x.reshape(-1, last_dim) if x.ndim != 2 else x")
+        add(lines, 8, "x_in = x_in if x_in.is_contiguous() else x_in.contiguous()")
+        add(lines, 8, "scale_in = scale.reshape(-1) if scale.ndim > 0 else scale")
+        add(lines, 8, "scale_in = scale_in if scale_in.is_contiguous() else scale_in.contiguous()")
+        add(lines, 8, "mod_in = modulation.reshape(-1) if modulation.ndim > 0 else modulation")
+        add(lines, 8, "mod_in = mod_in if mod_in.is_contiguous() else mod_in.contiguous()")
+        add(lines, 8, "rows = x_in.shape[0]")
+        add(lines, 8, "out = torch.empty_like(x_in)")
+        add(lines, 8, "block = triton.next_power_of_2(last_dim)")
+        add(lines, 8, "if block > 32768:")
+        add(lines, 12, "raise ValueError('__triton_modulated_rmsnorm last dimension is too large for the Triton kernel')")
+        add(lines, 8, "num_warps = 4 if block < 512 else 8")
+        add(lines, 8, "_axon_triton_debug_count('modulated_rmsnorm')")
+        add(lines, 8, "_axon_triton_modulated_rmsnorm_kernel[(rows,)](x_in, scale_in, mod_in, out, rows, last_dim, float(eps), BLOCK=block, num_warps=num_warps)")
+        add(lines, 8, "return out.reshape(x.shape)")
+        add(lines, 4, "")
         add(lines, 4, "# Deprecated experimental path: real Qwen3-MoE-30B measurements showed this")
         add(lines, 4, "# Triton grouped matmul is much slower than the Torch grouped_mm path.")
         add(lines, 4, "# Keep it unreachable unless a future explicit experiment reworks the kernel.")
@@ -409,6 +474,16 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "values = self._expert_linear_weight(hidden, topk_indices, down_weight_path, transpose=transpose)")
         add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
         add(lines, 8, "_axon_triton_debug_count('selected_expert_packed_swiglu_ffn')")
+        add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _triton_selected_expert_relu2_ffn(self, x, topk_scores, topk_indices, up_weight_path, down_weight_path, transpose=False):")
+        add(lines, 8, "topk_indices = topk_indices.long()")
+        add(lines, 8, "expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))")
+        add(lines, 8, "up = self._expert_linear_weight(expanded, topk_indices, up_weight_path, transpose=transpose)")
+        add(lines, 8, "hidden = self._relu2_activation(up)")
+        add(lines, 8, "values = self._expert_linear_weight(hidden, topk_indices, down_weight_path, transpose=transpose)")
+        add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
+        add(lines, 8, "_axon_triton_debug_count('selected_expert_relu2_ffn')")
         add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
         add(lines, 4, "")
         add(lines, 4, "def _cross_entropy_loss(self, logits, labels, softcap=0.0, logit_scale=1.0):")
@@ -543,12 +618,35 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
             if len(args) < 2:
                 raise ValueError("__triton_geglu_tanh_activation expects gate and up")
             return f"self._geglu_tanh_activation({args[0]}, {args[1]})"
+        if primitive == "_triton_relu2_activation":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if len(args) < 1:
+                raise ValueError("__triton_relu2_activation expects x")
+            return f"self._relu2_activation({args[0]})"
+        if primitive == "_triton_softmax":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            dim = args[1] if len(args) > 1 else "-1"
+            return f"self._softmax({args[0]}, dim={dim})"
+        if primitive == "_triton_modulated_rmsnorm":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if len(args) < 3:
+                raise ValueError("__triton_modulated_rmsnorm expects x, scale, modulation")
+            eps = args[3] if len(args) > 3 else "1e-6"
+            return f"self._modulated_rmsnorm({args[0]}, {args[1]}, {args[2]}, eps={eps})"
         if primitive == "_triton_selected_expert_packed_swiglu_ffn":
             args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
             if len(args) < 6:
                 raise ValueError("__triton_selected_expert_packed_swiglu_ffn expects input, top-k scores/indices, gate-up/down weight paths, and transpose")
             return (
                 f"self._triton_selected_expert_packed_swiglu_ffn("
+                f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, transpose=bool({args[5]}))"
+            )
+        if primitive == "_triton_selected_expert_relu2_ffn":
+            args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if len(args) < 6:
+                raise ValueError("__triton_selected_expert_relu2_ffn expects input, top-k scores/indices, up/down weight paths, and transpose")
+            return (
+                f"self._triton_selected_expert_relu2_ffn("
                 f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, transpose=bool({args[5]}))"
             )
         if primitive == "_torch_rope_pair_apply_factors":
@@ -902,6 +1000,42 @@ def emit_model_code_from_graph_ir(
             "        out = acc.to(x_ptr.dtype.element_ty)",
             "        out_ptrs = out_ptr + offs_m[:, None] * N + offs_n[None, :]",
             "        tl.store(out_ptrs, out, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))",
+            "    @triton.jit",
+            "    def _axon_triton_relu2_kernel(x_ptr, out_ptr, n_elements, BLOCK: tl.constexpr, LONG_INDEXING: tl.constexpr):",
+            "        block_idx = tl.program_id(0)",
+            "        if LONG_INDEXING:",
+            "            offsets = block_idx.to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)",
+            "            n_elements = tl.cast(n_elements, tl.int64)",
+            "        else:",
+            "            offsets = block_idx * BLOCK + tl.arange(0, BLOCK)",
+            "        mask = offsets < n_elements",
+            "        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        r = tl.maximum(x, 0.0)",
+            "        tl.store(out_ptr + offsets, (r * r).to(x_ptr.dtype.element_ty), mask=mask)",
+            "    @triton.jit",
+            "    def _axon_triton_softmax_kernel(x_ptr, out_ptr, rows, cols, BLOCK: tl.constexpr):",
+            "        row = tl.program_id(0)",
+            "        col_offsets = tl.arange(0, BLOCK)",
+            "        mask = col_offsets < cols",
+            "        row_ptr = x_ptr + row * cols",
+            "        x = tl.load(row_ptr + col_offsets, mask=mask, other=-float('inf')).to(tl.float32)",
+            "        c = tl.max(x, 0)",
+            "        exp_x = tl.exp(x - c)",
+            "        s = tl.sum(exp_x, 0)",
+            "        tl.store(out_ptr + row * cols + col_offsets, (exp_x / s).to(x_ptr.dtype.element_ty), mask=mask)",
+            "    @triton.jit",
+            "    def _axon_triton_modulated_rmsnorm_kernel(x_ptr, scale_ptr, mod_ptr, out_ptr, rows, n_cols, eps, BLOCK: tl.constexpr):",
+            "        row = tl.program_id(0)",
+            "        col_offsets = tl.arange(0, BLOCK)",
+            "        mask = col_offsets < n_cols",
+            "        row_ptr = x_ptr + row * n_cols",
+            "        x = tl.load(row_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        scale = tl.load(scale_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        mod = tl.load(mod_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)",
+            "        x = x * (1.0 + mod)",
+            "        ss = 1.0 / tl.sqrt(tl.sum(x * x, 0) / n_cols + eps)",
+            "        out = (x * ss * scale).to(x_ptr.dtype.element_ty)",
+            "        tl.store(out_ptr + row * n_cols + col_offsets, out, mask=mask)",
             "else:",
             "    _axon_triton_rmsnorm_noscale_kernel = None",
             "    _axon_triton_add_rmsnorm_noscale_kernel = None",
@@ -918,6 +1052,9 @@ def emit_model_code_from_graph_ir(
             "    _axon_triton_ce_forward_kernel = None",
             "    _axon_triton_ce_backward_kernel = None",
             "    _axon_triton_linear_kernel = None",
+            "    _axon_triton_relu2_kernel = None",
+            "    _axon_triton_softmax_kernel = None",
+            "    _axon_triton_modulated_rmsnorm_kernel = None",
             "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters",
             "from synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",
