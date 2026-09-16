@@ -395,7 +395,7 @@ def _maybe_rewrite_node_to_backend_sdpa(
                 local_provenance=local_provenance,
             )
             keep_prov = _graph_value_ref_provenance(keep, local_provenance=local_provenance)
-            if fact.additive_mask != fact.keep and not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
+            if fact.additive_mask != fact.keep and not fact.precomputed_additive_mask and not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
                 continue
         if fact.default_scale or fact.scale is None:
             scale_operand: GraphOperand = GraphLiteral(value=None, type_expr=TypeNull())

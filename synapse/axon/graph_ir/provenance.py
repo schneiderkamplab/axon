@@ -137,6 +137,7 @@ class GraphSdpaGqaFact:
     default_scale: bool = True
     scale: GraphProvenance | None = None  # None = default 1/sqrt(HD)
     extra_additive_bias: str | None = None  # input name of extra additive bias (e.g. rel_bias)
+    precomputed_additive_mask: bool = False  # additive mask is a raw input, not derived from keep
 
 
 @dataclass(frozen=True)
@@ -1035,6 +1036,7 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
             keep=keep_name,
             default_scale=is_default,
             scale=None if is_default else scale,
+            precomputed_additive_mask=True,
         )
     return None
 
@@ -1087,6 +1089,26 @@ def _try_sdpa_on_softmax_in(
             default_scale=is_default,
             scale=None if is_default else scale,
         )
+    # Pre-computed additive mask: the mask is a raw input, not derived from
+    # keep inside the callee (e.g. Attention.attention_with_additive_mask).
+    # The backend intrinsic receives the additive float mask directly.
+    mask_name = _input_name(additive_mask)
+    if mask_name is not None:
+        scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
+        if scores is not None and scale is not None:
+            q_name, k_name = _match_standard_qk_scores(scores)
+            if q_name is not None and k_name is not None:
+                is_default = _is_default_scale(scale)
+                return GraphSdpaGqaFact(
+                    q=q_name,
+                    k=k_name,
+                    v=v_name,
+                    additive_mask=mask_name,
+                    keep=keep_name,
+                    default_scale=is_default,
+                    scale=None if is_default else scale,
+                    precomputed_additive_mask=True,
+                )
     # Try nested-add form: (scores * scale + keep_mask) + extra_bias
     # This arises when attention has a rel_bias parameter (e.g. T5, DeBERTa).
     # The extra_bias is an arbitrary additive tensor added on top of the keep mask.
@@ -1110,6 +1132,28 @@ def _try_sdpa_on_softmax_in(
                             default_scale=is_default,
                             scale=None if is_default else scale,
                             extra_additive_bias=extra_bias_name,
+                        )
+        # Nested-add with pre-computed additive mask + extra_bias:
+        # (scores * scale + precomputed_mask) + extra_bias
+        inner_mask_name = _input_name(inner_additive)
+        if inner_mask_name is not None:
+            extra_bias_name = _input_name(additive_mask)
+            if extra_bias_name is not None:
+                scores, scale = _match_binary_op(inner_scores, "core.binary.*")
+                if scores is not None and scale is not None:
+                    q_name, k_name = _match_standard_qk_scores(scores)
+                    if q_name is not None and k_name is not None:
+                        is_default = _is_default_scale(scale)
+                        return GraphSdpaGqaFact(
+                            q=q_name,
+                            k=k_name,
+                            v=v_name,
+                            additive_mask=inner_mask_name,
+                            keep=keep_name,
+                            default_scale=is_default,
+                            scale=None if is_default else scale,
+                            extra_additive_bias=extra_bias_name,
+                            precomputed_additive_mask=True,
                         )
     return None
 
