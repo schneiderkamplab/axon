@@ -1892,6 +1892,8 @@ class Codegen2GraphModel(nn.Module):
         rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
         return (x * cos) + (rotated * sin)
 
+    _sdpa_mask_cache: dict = {}
+
     @classmethod
     def _sdpa(
         cls,
@@ -1916,7 +1918,13 @@ class Codegen2GraphModel(nn.Module):
         if extra_bias is not None:
             extra_bias = cls._move_to(extra_bias, q.device)
             if torch.is_tensor(attn_mask) and attn_mask.dtype == torch.bool:
-                attn_mask = torch.where(attn_mask, 0.0, float("-inf")).to(dtype=target_dtype)
+                cache_key = id(attn_mask)
+                cached = cls._sdpa_mask_cache.get(cache_key)
+                if cached is not None and cached[0] == attn_mask.shape and cached[1] == target_dtype:
+                    attn_mask = cached[2]
+                else:
+                    attn_mask = torch.where(attn_mask, 0.0, float("-inf")).to(dtype=target_dtype)
+                    cls._sdpa_mask_cache[cache_key] = (attn_mask.shape, target_dtype, attn_mask)
             attn_mask = attn_mask + extra_bias
         return F.scaled_dot_product_attention(
             q,
@@ -2001,6 +2009,34 @@ class Codegen2GraphModel(nn.Module):
         down_weight = self._required_param(str(down_weight_path), field="swiglu_ffn.down.weight")
         hidden = self._move_to(hidden, down_weight.device)
         return F.linear(hidden, down_weight, None)
+
+    def _gelu_ffn(
+        self,
+        x: Any,
+        up_weight_path: Any,
+        down_weight_path: Any,
+        up_bias_flag: Any = True,
+        up_bias_path: Any = None,
+        down_bias_flag: Any = True,
+        down_bias_path: Any = None,
+        gelu_tanh: Any = False,
+    ) -> Any:
+        up_weight = self._required_param(str(up_weight_path), field="gelu_ffn.up.weight")
+        up_bias = None
+        if up_bias_flag and up_bias_path is not None:
+            up_bias = self._required_param(str(up_bias_path), field="gelu_ffn.up.bias")
+        x = self._move_to(x, up_weight.device)
+        hidden = F.linear(x, up_weight, up_bias)
+        if gelu_tanh:
+            hidden = F.gelu(hidden, approximate='tanh')
+        else:
+            hidden = F.gelu(hidden)
+        down_weight = self._required_param(str(down_weight_path), field="gelu_ffn.down.weight")
+        down_bias = None
+        if down_bias_flag and down_bias_path is not None:
+            down_bias = self._required_param(str(down_bias_path), field="gelu_ffn.down.bias")
+        hidden = self._move_to(hidden, down_weight.device)
+        return F.linear(hidden, down_weight, down_bias)
 
     def _expert_swiglu_ffn(
         self,
@@ -2295,6 +2331,37 @@ class Codegen2GraphModel(nn.Module):
             out(self._swiglu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
             return True
 
+        if primitive == "_torch_swiglu_activation":
+            out(F.silu(args[0]) * args[1])
+            return True
+
+        if primitive == "_torch_split_swiglu":
+            x = args[0]
+            dim = int(args[1])
+            size0 = int(args[2])
+            size1 = int(args[3])
+            gate = x.narrow(dim, 0, size0)
+            up = x.narrow(dim, size0, size1)
+            out(F.silu(gate) * up)
+            return True
+
+        if primitive == "_torch_sigmoid_gated_mul":
+            out(torch.sigmoid(args[0]) * args[1])
+            return True
+
+        if primitive == "_torch_sigmoid_gated_merge":
+            gate = args[0]
+            a = args[1]
+            result = (torch.sigmoid(gate) * a).permute(0, 2, 1, 3).contiguous()
+            out(result.reshape(gate.shape[0], gate.shape[2], -1))
+            return True
+
+        if primitive == "_torch_gelu_ffn":
+            if len(args) < 8:
+                raise ValueError("__torch_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
+            out(self._gelu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]))
+            return True
+
         if primitive == "_torch_expert_swiglu_ffn":
             if len(args) < 5:
                 raise ValueError("__torch_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
@@ -2469,6 +2536,34 @@ class Codegen2GraphModel(nn.Module):
             out(y)
             return True
 
+        if primitive == "_torch_rmsnorm_noscale":
+            x = args[0]
+            eps = float(args[1]) if len(args) > 1 and not self._is_null(args[1]) else 1e-6
+            dim = args[2] if len(args) > 2 and not self._is_null(args[2]) else None
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else False
+            if dim is not None and int(dim) != -1:
+                raise ValueError("_torch_rmsnorm_noscale only supports dim=None/-1")
+            if cast_float:
+                x_f = x.float()
+                y = x_f * torch.rsqrt(torch.mean(x_f * x_f, dim=-1, keepdim=True) + eps)
+                out(y.to(dtype=x.dtype))
+            else:
+                out(x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps))
+            return True
+
+        if primitive == "_torch_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = float(args[2]) if len(args) > 2 and not self._is_null(args[2]) else 1e-6
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else True
+            s = x + r
+            x_calc = s.float() if cast_float else s
+            y = x_calc * torch.rsqrt(torch.mean(x_calc * x_calc, dim=-1, keepdim=True) + eps)
+            if cast_float:
+                y = y.to(dtype=x.dtype)
+            out(y)
+            return True
+
         if primitive == "conv1d":
             if len(args) != 8:
                 raise ValueError("conv1d expects x, weight, bias, stride, padding_left, padding_right, dilation, groups")
@@ -2479,8 +2574,7 @@ class Codegen2GraphModel(nn.Module):
             if primitive == "activations_gelu":
                 out(F.gelu(x))
             else:
-                x_f = x.float() if x.is_floating_point() else x
-                out((0.5 * x_f * (1.0 + torch.tanh(0.7978845608028654 * (x_f + 0.044715 * x_f * x_f * x_f)))).to(dtype=x.dtype))
+                out(F.gelu(x, approximate='tanh'))
             return True
         if primitive == "activations_tanh":
             out(torch.tanh(args[0]))
@@ -3132,6 +3226,7 @@ class _DirectTorchEmitter:
         self._inline_stack: set[str] = set()
         self._emitted_defs_stack: list[dict[str, Any]] = []
         self._emitted_aliases_stack: list[dict[str, GraphOperand]] = []
+        self._int_locals: set[str] = set()
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -3614,6 +3709,12 @@ class _DirectTorchEmitter:
             add(lines, 8, "device = right.device if prefer == 'right' else left.device")
             add(lines, 8, "return cls._move_to(left, device), cls._move_to(right, device)")
             add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _matmul(a, b):")
+        add(lines, 8, "if a.is_floating_point() and b.is_floating_point() and a.dtype != b.dtype:")
+        add(lines, 12, "a = a.to(dtype=b.dtype)")
+        add(lines, 8, "return torch.matmul(a, b)")
+        add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _rope_apply_factors(cls, x, sin, cos, interleaved=False):")
         add(lines, 8, "if interleaved:")
@@ -3625,24 +3726,33 @@ class _DirectTorchEmitter:
         add(lines, 8, "rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)")
         add(lines, 8, "return (x * cos) + (rotated * sin)")
         add(lines, 4, "")
+        add(lines, 4, "_sdpa_mask_cache = {}")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _sdpa(cls, q, k, v, attn_mask, scale=None, enable_gqa=True, extra_bias=None):")
         add(lines, 8, "k = cls._move_to(k, q.device)")
         add(lines, 8, "v = cls._move_to(v, q.device)")
-        add(lines, 8, "attn_mask = cls._move_to(attn_mask, q.device)")
+        add(lines, 8, "is_causal = attn_mask is None")
+        add(lines, 8, "if not is_causal:")
+        add(lines, 12, "attn_mask = cls._move_to(attn_mask, q.device)")
         add(lines, 8, "target_dtype = v.dtype")
         add(lines, 8, "if q.dtype != target_dtype:")
         add(lines, 12, "q = q.to(dtype=target_dtype)")
         add(lines, 8, "if k.dtype != target_dtype:")
         add(lines, 12, "k = k.to(dtype=target_dtype)")
-        add(lines, 8, "if torch.is_tensor(attn_mask) and attn_mask.dtype != torch.bool and attn_mask.dtype != target_dtype:")
+        add(lines, 8, "if not is_causal and torch.is_tensor(attn_mask) and attn_mask.dtype != torch.bool and attn_mask.dtype != target_dtype:")
         add(lines, 12, "attn_mask = attn_mask.to(dtype=target_dtype)")
         add(lines, 8, "if extra_bias is not None:")
         add(lines, 12, "extra_bias = cls._move_to(extra_bias, q.device)")
         add(lines, 12, "if torch.is_tensor(attn_mask) and attn_mask.dtype == torch.bool:")
-        add(lines, 16, "attn_mask = torch.where(attn_mask, 0.0, float('-inf')).to(dtype=target_dtype)")
+        add(lines, 16, "_cache_key = id(attn_mask)")
+        add(lines, 16, "_cached = cls._sdpa_mask_cache.get(_cache_key)")
+        add(lines, 16, "if _cached is not None and _cached[0] == attn_mask.shape and _cached[1] == target_dtype:")
+        add(lines, 20, "attn_mask = _cached[2]")
+        add(lines, 16, "else:")
+        add(lines, 20, "attn_mask = torch.where(attn_mask, 0.0, float('-inf')).to(dtype=target_dtype)")
+        add(lines, 20, "cls._sdpa_mask_cache[_cache_key] = (attn_mask.shape, target_dtype, attn_mask)")
         add(lines, 12, "attn_mask = attn_mask + extra_bias")
-        add(lines, 8, "return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False, scale=None if scale is None else float(scale), enable_gqa=enable_gqa)")
+        add(lines, 8, "return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=is_causal, scale=None if scale is None else float(scale), enable_gqa=enable_gqa)")
         add(lines, 4, "")
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
@@ -3878,6 +3988,20 @@ class _DirectTorchEmitter:
         add(lines, 8, "down_weight = self._param(down_weight_path)")
         add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
         add(lines, 8, "return F.linear(hidden, down_weight, None)")
+        add(lines, 4, "")
+        add(lines, 4, "def _gelu_ffn(self, x, up_weight_path, down_weight_path, up_bias_flag=True, up_bias_path=None, down_bias_flag=True, down_bias_path=None, gelu_tanh=False):")
+        add(lines, 8, "up_weight = self._param(up_weight_path)")
+        add(lines, 8, "up_bias = self._param(up_bias_path) if up_bias_flag and up_bias_path is not None else None")
+        add(lines, 8, "x = self._move_to(x, up_weight.device)")
+        add(lines, 8, "hidden = F.linear(x, up_weight, up_bias)")
+        add(lines, 8, "if gelu_tanh:")
+        add(lines, 12, "hidden = F.gelu(hidden, approximate='tanh')")
+        add(lines, 8, "else:")
+        add(lines, 12, "hidden = F.gelu(hidden)")
+        add(lines, 8, "down_weight = self._param(down_weight_path)")
+        add(lines, 8, "down_bias = self._param(down_bias_path) if down_bias_flag and down_bias_path is not None else None")
+        add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
+        add(lines, 8, "return F.linear(hidden, down_weight, down_bias)")
         add(lines, 4, "")
         add(lines, 4, "def _expert_linear_weight(self, x, expert_idx, weight_path, bias_value=None, transpose=False):")
         add(lines, 8, "weight = self._param(weight_path)")
@@ -4294,7 +4418,10 @@ class _DirectTorchEmitter:
             add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
         add(lines, 4, "")
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
-        add(lines, 8, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "if self.training:")
+        add(lines, 12, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "with torch.inference_mode():")
+        add(lines, 12, "return self._forward(input_ids, **inputs)")
 
     def _emit_generate(self, lines: list[str]) -> None:
         add = self._add
@@ -4899,6 +5026,8 @@ class _DirectTorchEmitter:
                 self._add(lines, indent, f"{temp_name} = {expr}")
                 self._record_emitted_alias(temp_name, operand)
                 inline_local.add(temp_name)
+                if isinstance(graph_operand_type(operand), TypeInt):
+                    self._int_locals.add(temp_name)
                 subst[param.name] = GraphValueRef(
                     name=temp_name,
                     type_expr=graph_operand_type(operand),
@@ -5209,13 +5338,13 @@ class _DirectTorchEmitter:
             self._add(lines, indent, f"{x_name} = {args[1]}")
         if transpose_literal is True:
             if bias_literal is False:
-                op_expr = f"torch.matmul({x_name}, {weight_name})"
+                op_expr = f"F.linear({x_name}, {weight_name}.t())"
             else:
-                op_expr = f"torch.matmul({x_name}, {weight_name}) + ({bias_arg} if {bias_arg} is not None else 0)"
+                op_expr = f"F.linear({x_name}, {weight_name}.t(), {bias_arg})"
         elif transpose_literal is False:
             op_expr = f"F.linear({x_name}, {weight_name}, {bias_arg})"
         else:
-            op_expr = f"(torch.matmul({x_name}, {weight_name}) + ({bias_arg} if {bias_arg} is not None else 0) if {transpose_expr} else F.linear({x_name}, {weight_name}, {bias_arg}))"
+            op_expr = f"(F.linear({x_name}, {weight_name}.t(), {bias_arg}) if {transpose_expr} else F.linear({x_name}, {weight_name}, {bias_arg}))"
         if self.profile:
             self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {op_expr})")
         else:
@@ -5474,6 +5603,8 @@ class _DirectTorchEmitter:
             lines.append(" " * indent + f"{temp_name} = {expr}")
             self._record_emitted_alias(temp_name, operand)
             inline_local.add(temp_name)
+            if isinstance(graph_operand_type(operand), TypeInt):
+                self._int_locals.add(temp_name)
             subst[param.name] = GraphValueRef(
                 name=temp_name,
                 type_expr=graph_operand_type(operand),
@@ -5698,10 +5829,14 @@ class _DirectTorchEmitter:
         if op == "core.ascribe":
             return self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
         if op == "core.select":
-            cond = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
+            cond_operand = node.inputs[0]
+            if isinstance(cond_operand, GraphLiteral) and isinstance(cond_operand.value, bool):
+                chosen = node.inputs[1] if cond_operand.value else node.inputs[2]
+                return self._operand_expr(chosen, local=local, symbols_dict=symbols_dict)
+            cond = self._operand_expr(cond_operand, local=local, symbols_dict=symbols_dict)
             yes = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
             no = self._operand_expr(node.inputs[2], local=local, symbols_dict=symbols_dict)
-            cond_expr = cond if self._operand_is_bool(node.inputs[0]) else f"bool({cond})"
+            cond_expr = cond if self._operand_is_bool(cond_operand) else f"bool({cond})"
             return f"({yes} if {cond_expr} else {no})"
         if op.startswith("core.binary."):
             return self._binary_expr(
@@ -5947,6 +6082,28 @@ class _DirectTorchEmitter:
                 f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
                 f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
             )
+        if primitive == "_torch_swiglu_activation":
+            return f"(F.silu({args[0]}) * {args[1]})"
+        if primitive == "_torch_split_swiglu":
+            x = args[0]
+            dim = args[1]
+            size0 = args[2]
+            size1 = args[3]
+            return f"(F.silu({x}.narrow(int({dim}), 0, int({size0}))) * {x}.narrow(int({dim}), int({size0}), int({size1})))"
+        if primitive == "_torch_sigmoid_gated_mul":
+            return f"(torch.sigmoid({args[0]}) * {args[1]})"
+        if primitive == "_torch_sigmoid_gated_merge":
+            g = args[0]
+            a = args[1]
+            return f"((torch.sigmoid({g}) * {a}).permute(0, 2, 1, 3).contiguous().reshape({g}.shape[0], {g}.shape[2], -1))"
+        if primitive == "_torch_gelu_ffn":
+            if len(args) < 8:
+                raise ValueError("__torch_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
+            return (
+                f"self._gelu_ffn({args[0]}, {args[1]}, {args[2]}, "
+                f"up_bias_flag={args[3]}, up_bias_path={args[4]}, "
+                f"down_bias_flag={args[5]}, down_bias_path={args[6]}, gelu_tanh={args[7]})"
+            )
         if primitive == "_torch_expert_swiglu_ffn":
             if len(args) < 5:
                 raise ValueError("__torch_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
@@ -6092,6 +6249,10 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps}))"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
+            if cast_float == "True":
+                return f"{y_float}.to(dtype={x}.dtype)"
+            if cast_float == "False":
+                return y
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
         if primitive == "_torch_rmsnorm_scaled":
             x = args[0]
@@ -6102,6 +6263,36 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({weight} * ({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype))"
             y = f"({weight} * ({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps})))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
+            return f"({y_float} if {cast_float} else {y})"
+        if primitive == "_torch_rmsnorm_noscale":
+            x = args[0]
+            eps = float_arg(1, "1e-6")
+            cast_float = bool_arg(3, "False")
+            x_float = f"{x}.float()"
+            y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
+            y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
+            return f"({y_float} if {cast_float} else {y})"
+        if primitive == "_torch_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = float_arg(2, "1e-6")
+            cast_float = bool_arg(3, "True")
+            s = f"({x} + {r})"
+            s_float = f"{s}.float()"
+            y_float = f"({s_float} * torch.rsqrt(torch.mean({s_float} * {s_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
+            y = f"({s} * torch.rsqrt(torch.mean({s} * {s}, dim=-1, keepdim=True) + {eps}))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
             return f"({y_float} if {cast_float} else {y})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
@@ -6140,11 +6331,15 @@ class _DirectTorchEmitter:
             "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, {int_arg(1)})",
             "repeat": lambda: f"({args[0]} if {int_arg(1)} == 1 else torch.repeat_interleave({args[0]}, repeats={int_arg(1)}, dim=({int_arg(2)} if {int_arg(2)} >= 0 else {int_arg(2)} + {args[0]}.dim())))",
             "matmul": lambda: (
-                f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
+                f"self._matmul(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
                 if self.align_devices
-                else f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))({args[0]}, {args[1]})"
+                else f"self._matmul({args[0]}, {args[1]})"
             ),
-            "softmax": lambda: f"F.softmax({args[0]}, dim={int_arg(1, '-1')})",
+            "softmax": lambda: (
+                f"F.softmax({args[0]}, dim={int_arg(1, '-1')}, dtype=torch.float32)"
+                if len(node.inputs) > 2 and isinstance(node.inputs[2], GraphLiteral) and node.inputs[2].value == "float32"
+                else f"F.softmax({args[0]}, dim={int_arg(1, '-1')})"
+            ),
             "where": lambda: (
                 f"self._where({args[0]}, {args[1]}, {args[2]})"
                 if self.align_devices
@@ -6187,12 +6382,12 @@ class _DirectTorchEmitter:
             "activations_tanh": lambda: f"torch.tanh({args[0]})",
             "activations_silu": lambda: f"F.silu({args[0]})",
             "activations_sigmoid": lambda: f"torch.sigmoid({args[0]})",
-            "l2norm": lambda: f"(({args[0]}.float() * torch.pow(torch.mean({args[0]}.float() * {args[0]}.float(), dim=-1, keepdim=True) + {float_arg(1, '1e-6')}, -0.5)).to(dtype={args[0]}.dtype))",
+            "l2norm": lambda: f"(lambda _xf: (_xf * torch.rsqrt(torch.mean(_xf * _xf, dim=-1, keepdim=True) + {float_arg(1, '1e-6')})).to(dtype={args[0]}.dtype))({args[0]}.float())",
             "activations_relu": lambda: f"F.relu({args[0]})",
-            "activations_relu2": lambda: f"(F.relu({args[0]}) * F.relu({args[0]}))",
+            "activations_relu2": lambda: f"(F.relu({args[0]}).pow(2))",
             "activations_gelu": lambda: f"F.gelu({args[0]})",
-            "activations_gelu_new": lambda: f"(0.5 * {args[0]}.float() * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]}.float() + 0.044715 * {args[0]}.float() * {args[0]}.float() * {args[0]}.float())))).to(dtype={args[0]}.dtype)",
-            "activations_gelu_pytorch_tanh": lambda: f"(0.5 * {args[0]}.float() * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]}.float() + 0.044715 * {args[0]}.float() * {args[0]}.float() * {args[0]}.float())))).to(dtype={args[0]}.dtype)",
+            "activations_gelu_new": lambda: f"F.gelu({args[0]}, approximate='tanh')",
+            "activations_gelu_pytorch_tanh": lambda: f"F.gelu({args[0]}, approximate='tanh')",
             "activations_gegelu": lambda: f"self._gegelu({args[0]}, {args[1] if len(args) > 1 else 'None'})",
             "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",
@@ -6393,7 +6588,10 @@ class _DirectTorchEmitter:
             pieces.append(template[cursor:match.start()].replace("{", "{{").replace("}", "}}"))
             name = match.group(1)
             expr = _py_ident(name) if name in local else f"{symbols_dict}[{name!r}]"
-            pieces.append("{self._path_template_part(" + expr + ")}")
+            if name in self._int_locals:
+                pieces.append("{" + expr + "}")
+            else:
+                pieces.append("{self._path_template_part(" + expr + ")}")
             cursor = match.end()
         pieces.append(template[cursor:].replace("{", "{{").replace("}", "}}"))
         return "f" + repr("".join(pieces))

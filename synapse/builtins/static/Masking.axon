@@ -38,13 +38,12 @@ mask_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Mask[B,K,C]
 mask_for_input x mask capacity = (mask == null)
   ? do
     values <- mask_values x capacity
-    return ((values, Q) :: Mask[B,K,C])
+    q_len <- size x 1
+    return ((values, q_len) :: Mask[B,K,C])
   : (mask :: Mask[B,K,C])
 
 mask_length_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Dim
-mask_length_for_input x mask past_length = (mask == null) ? 0 : do
-  _, length <- mask
-  return length
+mask_length_for_input x mask past_length = past_length + Q
 
 causal_mask_for_input_keep :: Tensor[B,Q] -> Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
 causal_mask_for_input_keep x mask ?window=null = do
@@ -76,7 +75,10 @@ causal_mask_for_input x key_length ?padding_mask=null ?window=null = (padding_ma
     values <- mask_values x C
     mask <- ((values, key_length) :: Mask[B,K,C])
     return causal_mask_for_input_keep x mask window=window
-  : causal_mask_for_input_masked x padding_mask window=window
+  : do
+    values, _ <- padding_mask
+    mask <- ((values, key_length) :: Mask[B,K,C])
+    return causal_mask_for_input_masked x mask window=window
 
 bidirectional_mask_for_input_keep :: Tensor[B,Q] -> Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
 bidirectional_mask_for_input_keep x mask ?window=null = do
@@ -105,7 +107,10 @@ bidirectional_mask_for_input x key_length ?padding_mask=null ?window=null = (pad
     values <- mask_values x C
     mask <- ((values, key_length) :: Mask[B,K,C])
     return bidirectional_mask_for_input_keep x mask window=window
-  : bidirectional_mask_for_input_masked x padding_mask window=window
+  : do
+    values, _ <- padding_mask
+    mask <- ((values, key_length) :: Mask[B,K,C])
+    return bidirectional_mask_for_input_masked x mask window=window
 
 -- Band position for query row t, slot w: pos[t, w] = t + w - left, with
 -- w in [0, left + right + 1). Out-of-range slots are clamped into [0, S); the

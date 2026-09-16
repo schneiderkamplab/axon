@@ -137,6 +137,7 @@ class GraphSdpaGqaFact:
     default_scale: bool = True
     scale: GraphProvenance | None = None  # None = default 1/sqrt(HD)
     extra_additive_bias: str | None = None  # input name of extra additive bias (e.g. rel_bias)
+    precomputed_additive_mask: bool = False  # additive mask is a raw input, not derived from keep
 
 
 @dataclass(frozen=True)
@@ -985,6 +986,8 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     standard = _standard_sdpa_fact(provenance)
     if standard is not None:
         return standard
+    # Peel _cast wrapper (e.g. from fp32_compute=true).
+    provenance = _peel_op(provenance, "_cast")
     # reshape(matmul(where(keep_g, probs, 0), unsqueeze(v, 2)), ...)
     if provenance.kind != "op" or provenance.op != "_reshape" or len(provenance.args) < 1:
         return None
@@ -992,6 +995,8 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     if matmul_out.kind != "op" or matmul_out.op != "_matmul" or len(matmul_out.args) != 2:
         return None
     probs_masked, vg = matmul_out.args
+    # Peel reshape wrapper on probs (e.g. probs6 reshape between _where and matmul).
+    probs_masked = _peel_op(probs_masked, "_reshape")
     v_name = _match_unsqueeze_input(vg, dim=2)
     if v_name is None:
         return None
@@ -1031,6 +1036,7 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
             keep=keep_name,
             default_scale=is_default,
             scale=None if is_default else scale,
+            precomputed_additive_mask=True,
         )
     return None
 
@@ -1083,6 +1089,26 @@ def _try_sdpa_on_softmax_in(
             default_scale=is_default,
             scale=None if is_default else scale,
         )
+    # Pre-computed additive mask: the mask is a raw input, not derived from
+    # keep inside the callee (e.g. Attention.attention_with_additive_mask).
+    # The backend intrinsic receives the additive float mask directly.
+    mask_name = _input_name(additive_mask)
+    if mask_name is not None:
+        scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
+        if scores is not None and scale is not None:
+            q_name, k_name = _match_standard_qk_scores(scores)
+            if q_name is not None and k_name is not None:
+                is_default = _is_default_scale(scale)
+                return GraphSdpaGqaFact(
+                    q=q_name,
+                    k=k_name,
+                    v=v_name,
+                    additive_mask=mask_name,
+                    keep=keep_name,
+                    default_scale=is_default,
+                    scale=None if is_default else scale,
+                    precomputed_additive_mask=True,
+                )
     # Try nested-add form: (scores * scale + keep_mask) + extra_bias
     # This arises when attention has a rel_bias parameter (e.g. T5, DeBERTa).
     # The extra_bias is an arbitrary additive tensor added on top of the keep mask.
@@ -1106,6 +1132,28 @@ def _try_sdpa_on_softmax_in(
                             default_scale=is_default,
                             scale=None if is_default else scale,
                             extra_additive_bias=extra_bias_name,
+                        )
+        # Nested-add with pre-computed additive mask + extra_bias:
+        # (scores * scale + precomputed_mask) + extra_bias
+        inner_mask_name = _input_name(inner_additive)
+        if inner_mask_name is not None:
+            extra_bias_name = _input_name(additive_mask)
+            if extra_bias_name is not None:
+                scores, scale = _match_binary_op(inner_scores, "core.binary.*")
+                if scores is not None and scale is not None:
+                    q_name, k_name = _match_standard_qk_scores(scores)
+                    if q_name is not None and k_name is not None:
+                        is_default = _is_default_scale(scale)
+                        return GraphSdpaGqaFact(
+                            q=q_name,
+                            k=k_name,
+                            v=v_name,
+                            additive_mask=inner_mask_name,
+                            keep=keep_name,
+                            default_scale=is_default,
+                            scale=None if is_default else scale,
+                            extra_additive_bias=extra_bias_name,
+                            precomputed_additive_mask=True,
                         )
     return None
 
@@ -1140,6 +1188,7 @@ def _match_additive_mask_from_keep(provenance: GraphProvenance) -> str | None:
     if provenance.kind != "op" or provenance.op != "_where" or len(provenance.args) != 3:
         return None
     keep, yes, no = provenance.args
+    # Peel reshape wrapper on keep (e.g. keep_b = Tensor.reshape keep [...]).
     keep_name = _input_name(keep)
     if keep_name is None:
         return None
@@ -1181,6 +1230,8 @@ def _match_probs_slice_softmax(provenance: GraphProvenance) -> GraphProvenance |
 
 
 def _match_qk_scores(provenance: GraphProvenance) -> tuple[str | None, str | None]:
+    # Peel reshape/cast wrappers between matmul and scale.
+    provenance = _peel_cast_reshape(provenance)
     if provenance.kind != "op" or provenance.op != "_matmul" or len(provenance.args) != 2:
         return None, None
     q_name = _match_reshape_input(provenance.args[0])
@@ -1209,6 +1260,7 @@ def _match_gqa_keep_expand(provenance: GraphProvenance) -> str | None:
 
 def _match_reshape_input(provenance: GraphProvenance) -> str | None:
     if provenance.kind == "op" and provenance.op == "_reshape" and provenance.args:
+        # Peel gather+reshape wrappers to find the underlying input.
         return _input_name(provenance.args[0])
     return None
 
@@ -1218,11 +1270,36 @@ def _match_unsqueeze_input(provenance: GraphProvenance, *, dim: int) -> str | No
         return None
     if provenance.args[1] != _make_provenance("literal", value=dim):
         return None
+    # Peel wrappers (cast, reshape, gather) to find the underlying input.
     return _input_name(provenance.args[0])
 
 
+def _peel_op(provenance: GraphProvenance, op_name: str) -> GraphProvenance:
+    """Strip a single wrapper op (e.g. _cast, _reshape) if it wraps exactly one arg."""
+    while provenance.kind == "op" and provenance.op == op_name and len(provenance.args) >= 1:
+        provenance = provenance.args[0]
+    return provenance
+
+
+def _peel_ops(provenance: GraphProvenance, op_names: frozenset[str]) -> GraphProvenance:
+    """Strip any sequence of wrapper ops from the given set."""
+    while provenance.kind == "op" and provenance.op in op_names and len(provenance.args) >= 1:
+        provenance = provenance.args[0]
+    return provenance
+
+
+_CAST_RESHAPE = frozenset({"_cast", "_reshape"})
+
+
+def _peel_cast_reshape(provenance: GraphProvenance) -> GraphProvenance:
+    """Strip _cast and _reshape wrappers that don't change semantic identity."""
+    return _peel_ops(provenance, _CAST_RESHAPE)
+
+
 def _input_name(provenance: GraphProvenance) -> str | None:
-    return provenance.name if provenance.kind == "input" else None
+    # Peel common wrappers (cast, reshape) that don't change the underlying input.
+    peeled = _peel_cast_reshape(provenance)
+    return peeled.name if peeled.kind == "input" else None
 
 
 def _is_default_scale(provenance: GraphProvenance) -> bool:
@@ -1242,45 +1319,53 @@ def _rope_apply_factors_fact(provenance: GraphProvenance) -> GraphRopeApplyFacto
     second = _match_rope_scaled_term(right)
     if first is None or second is None:
         return None
-    x_a, factor_a, rotated_a = first
-    x_b, factor_b, rotated_b = second
+    x_a, factor_a, rotated_a, interleaved_a = first
+    x_b, factor_b, rotated_b, interleaved_b = second
     if not rotated_a and rotated_b and x_a == x_b:
         return GraphRopeApplyFactorsFact(
             x=x_a,
             cos=factor_a,
             sin=factor_b,
-            interleaved=False,
+            interleaved=interleaved_b,
         )
     if not rotated_b and rotated_a and x_a == x_b:
         return GraphRopeApplyFactorsFact(
             x=x_a,
             cos=factor_b,
             sin=factor_a,
-            interleaved=False,
+            interleaved=interleaved_a,
         )
     return None
 
 
 def _match_rope_scaled_term(
     provenance: GraphProvenance,
-) -> tuple[GraphProvenance, GraphProvenance, bool] | None:
+) -> tuple[GraphProvenance, GraphProvenance, bool, bool] | None:
     left, right = _match_binary_op(provenance, "core.binary.*")
     if left is None or right is None:
         return None
     left_rot = _match_rope_rotate_half_noninterleaved(left)
     if left_rot is not None:
         factor = _match_expand_source(right)
-        return (left_rot, factor, True) if factor is not None else None
+        return (left_rot, factor, True, False) if factor is not None else None
     right_rot = _match_rope_rotate_half_noninterleaved(right)
     if right_rot is not None:
         factor = _match_expand_source(left)
-        return (right_rot, factor, True) if factor is not None else None
+        return (right_rot, factor, True, False) if factor is not None else None
+    left_rot_i = _match_rope_rotate_half_interleaved(left)
+    if left_rot_i is not None:
+        factor = _match_expand_source(right)
+        return (left_rot_i, factor, True, True) if factor is not None else None
+    right_rot_i = _match_rope_rotate_half_interleaved(right)
+    if right_rot_i is not None:
+        factor = _match_expand_source(left)
+        return (right_rot_i, factor, True, True) if factor is not None else None
     factor = _match_expand_source(right)
     if factor is not None:
-        return left, factor, False
+        return (left, factor, False, False)
     factor = _match_expand_source(left)
     if factor is not None:
-        return right, factor, False
+        return (right, factor, False, False)
     return None
 
 
@@ -1314,6 +1399,60 @@ def _match_rope_rotate_half_noninterleaved(
         return None
     # hi_end is the last shape symbol and is intentionally not name-matched.
     return x_hi
+
+
+def _peel_reshape_once(provenance: GraphProvenance) -> GraphProvenance | None:
+    if provenance.kind == "op" and provenance.op == "_reshape" and provenance.args:
+        return provenance.args[0]
+    return None
+
+
+def _match_rope_rotate_half_interleaved(
+    provenance: GraphProvenance,
+) -> GraphProvenance | None:
+    outer = _peel_reshape_once(provenance)
+    if outer is None:
+        return None
+    if outer.kind != "op" or outer.op != "_concat" or len(outer.args) < 3:
+        return None
+    first, second, dim = outer.args[:3]
+    if dim != _make_provenance("literal", value=-1):
+        return None
+    first_inner = _peel_reshape_once(first)
+    if first_inner is None:
+        return None
+    neg_left, neg_right = _match_binary_op(first_inner, "core.binary.-")
+    if neg_left != _make_provenance("literal", value=0) or neg_right is None:
+        return None
+    neg_right_inner = _peel_reshape_once(neg_right)
+    if neg_right_inner is None:
+        neg_right_inner = neg_right
+    odd_slice = _match_slice(neg_right_inner)
+    if odd_slice is None:
+        return None
+    x_odd_reshaped, odd_dim, odd_start, odd_end = odd_slice
+    second_inner = _peel_reshape_once(second)
+    if second_inner is None:
+        second_inner = second
+    second_inner2 = _peel_reshape_once(second_inner)
+    even_slice = None
+    if second_inner2 is not None:
+        even_slice = _match_slice(second_inner2)
+    if even_slice is None:
+        even_slice = _match_slice(second_inner)
+    if even_slice is None:
+        return None
+    x_even_reshaped, even_dim, even_start, even_end = even_slice
+    if x_odd_reshaped != x_even_reshaped:
+        return None
+    if odd_dim != _make_provenance("literal", value=-1) or even_dim != _make_provenance("literal", value=-1):
+        return None
+    if odd_start != _make_provenance("literal", value=1) or odd_end != _make_provenance("literal", value=2):
+        return None
+    if even_start != _make_provenance("literal", value=0) or even_end != _make_provenance("literal", value=1):
+        return None
+    x_original = _peel_reshape_once(x_odd_reshaped)
+    return x_original if x_original is not None else x_odd_reshaped
 
 
 def _match_negated_slice(

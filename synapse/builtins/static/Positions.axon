@@ -48,6 +48,4 @@ position_ids_from_mask x mask pad_fill = do
   return slice pos dim=-1 start=(length - S) end=length
 
 position_ids :: TokenIds[B,S] -> ?Mask[B,K,C] -> ?Dim -> ?Int -> Tensor[B,S]
-position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
-  ? (position_ids_nomask x past_length)
-  : (position_ids_from_mask x attn_mask pad_fill)
+position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = position_ids_nomask x past_length

@@ -536,7 +536,7 @@ def _allocate_vllm_kv_cache(
     device: torch.device,
 ) -> list[torch.Tensor]:
     """Allocate and bind KV cache tensors to all Attention layers in the model."""
-    from vllm.model_executor.layers.attention import Attention
+    from vllm.attention.layer import Attention
 
     config = vllm_config.model_config.hf_config
     if hasattr(config, "text_config"):
@@ -583,8 +583,8 @@ def _build_vllm_attn_metadata(
     metadata type (FlashAttention, Triton, etc.) via the backend's builder.
     """
     import math
-    from vllm.model_executor.layers.attention import Attention
-    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.attention.layer import Attention
+    from vllm.v1.attention.backends.utils import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import AttentionSpec
 
     cache_config = vllm_config.cache_config
@@ -624,6 +624,8 @@ def _build_vllm_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.cpu(),
+        num_computed_tokens_cpu=torch.zeros(batch_size, dtype=torch.int32),
         num_reqs=batch_size,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
@@ -731,7 +733,7 @@ def _vllm_manual_generate(
                         batch_size, cur_len, device=device, dtype=torch.long,
                     )
 
-                with _sfc(attn_md, _vllm_cfg, slot_mapping=slot_map, skip_compiled=True):
+                with _sfc(attn_md, _vllm_cfg):
                     logits = model(**fwd_kwargs)
 
                 if logits.dim() == 2:
@@ -4989,7 +4991,7 @@ def _run_axon_test_single(
             )
             state_load_device = (
                 torch.device("cpu")
-                if axon_backend in {"pipeline2-torch", "codegen2-torch", "codegen2-triton"}
+                if axon_backend in {"pipeline2-torch", "codegen2-torch", "codegen2-triton", "codegen2-vllm"}
                 else target_device
             )
             if axon_backend == "codegen2-tinygrad":
@@ -5053,7 +5055,7 @@ def _run_axon_test_single(
                     for key, value in local_state_dict.items()
                 }
             if axon_backend == "codegen2-vllm":
-                from vllm.config import VllmConfig, ModelConfig, CacheConfig, CompilationConfig, CompilationMode, set_current_vllm_config
+                from vllm.config import VllmConfig, ModelConfig, CacheConfig, CompilationConfig, CompilationLevel, set_current_vllm_config
                 from vllm.distributed import parallel_state as _vllm_ps
                 try:
                     _vllm_model_config = ModelConfig(
@@ -5064,6 +5066,17 @@ def _run_axon_test_single(
                     import tempfile as _vllm_tmpf, json as _vllm_json, shutil as _vllm_shutil
                     _vllm_tmp_dir = _vllm_tmpf.mkdtemp()
                     _vllm_cfg = hf_config.to_dict() if hf_config is not None and hasattr(hf_config, 'to_dict') else (dict(hf_config) if hf_config is not None else {})
+                    _text_cfg = _vllm_cfg.pop("text_config", None)
+                    if isinstance(_text_cfg, dict):
+                        for _k, _v in _text_cfg.items():
+                            if _k not in _vllm_cfg:
+                                _vllm_cfg[_k] = _v
+                    _vllm_cfg.pop("vision_config", None)
+                    _vllm_cfg.pop("audio_config", None)
+                    _vllm_cfg.pop("rope_parameters", None)
+                    _rs = _vllm_cfg.get("rope_scaling")
+                    if isinstance(_rs, dict) and "rope_type" not in _rs:
+                        _vllm_cfg.pop("rope_scaling", None)
                     _vllm_cfg["architectures"] = ["LlamaForCausalLM"]
                     _vllm_cfg["model_type"] = "llama"
                     if "hidden_size" not in _vllm_cfg:
@@ -5077,6 +5090,14 @@ def _run_axon_test_single(
                         nah = _vllm_cfg.get("num_attention_heads", 0)
                         if hs and nah:
                             _vllm_cfg["head_dim"] = hs // nah
+                    if "num_key_value_heads" not in _vllm_cfg:
+                        _nkv = _vllm_cfg.get("num_kv_heads", _vllm_cfg.get("n_kv_heads", None))
+                        if _nkv is not None:
+                            _vllm_cfg["num_key_value_heads"] = _nkv
+                    if "intermediate_size" not in _vllm_cfg:
+                        _is = _vllm_cfg.get("intermediate_sizes", _vllm_cfg.get("mlp_dim", None))
+                        if _is is not None:
+                            _vllm_cfg["intermediate_size"] = _is
                     with open(os.path.join(_vllm_tmp_dir, "config.json"), "w") as _f:
                         _vllm_json.dump(_vllm_cfg, _f)
                     _vllm_model_config = ModelConfig(
@@ -5089,31 +5110,40 @@ def _run_axon_test_single(
                     _vllm_model_config.hf_config = _vllm_hf_config
                 _vllm_cache_config = CacheConfig(
                     block_size=16,
-                    gpu_memory_utilization=0.90,
+                    gpu_memory_utilization=0.05,
                     cache_dtype="auto",
                 )
-                from vllm.config.attention import AttentionConfig, AttentionBackendEnum
-                _vllm_attention_config = AttentionConfig()
                 _vllm_head_dim = getattr(hf_config, 'head_dim', None)
                 if _vllm_head_dim is None:
                     _text_cfg = getattr(hf_config, 'text_config', None)
                     if _text_cfg is not None:
-                        _vllm_head_dim = getattr(_text_cfg, 'head_dim', None)
+                        try:
+                            _vllm_head_dim = getattr(_text_cfg, 'head_dim', None)
+                        except Exception:
+                            _vllm_head_dim = None
                     if _vllm_head_dim is None:
-                        _hs = getattr(hf_config, 'hidden_size', 0)
-                        _nah = getattr(hf_config, 'num_attention_heads', 0)
+                        _hs = getattr(hf_config, 'hidden_size', None)
+                        _nah = getattr(hf_config, 'num_attention_heads', None)
+                        if _hs is None and _text_cfg is not None:
+                            _hs = getattr(_text_cfg, 'hidden_size', None)
+                            _nah = getattr(_text_cfg, 'num_attention_heads', None)
                         if _hs and _nah:
                             _vllm_head_dim = _hs // _nah
                 if _vllm_head_dim is not None and _vllm_head_dim >= 256:
                     pass  # B200: no backend supports head_dim>=256 (FA4 TMEM limit, TRITON shared mem)
                 _vllm_compile_config = CompilationConfig()
-                _vllm_compile_config.mode = CompilationMode.NONE
-                _vllm_config = VllmConfig(
+                _vllm_compile_config.level = CompilationLevel.NO_COMPILATION
+                _vllm_config_kwargs = dict(
                     model_config=_vllm_model_config,
                     cache_config=_vllm_cache_config,
-                    attention_config=_vllm_attention_config,
                     compilation_config=_vllm_compile_config,
                 )
+                try:
+                    from vllm.config.attention import AttentionConfig
+                    _vllm_config_kwargs["attention_config"] = AttentionConfig()
+                except Exception:
+                    pass
+                _vllm_config = VllmConfig(**_vllm_config_kwargs)
                 with set_current_vllm_config(_vllm_config):
                     if not _vllm_ps.model_parallel_is_initialized():
                         if not torch.distributed.is_initialized():
@@ -5148,17 +5178,48 @@ def _run_axon_test_single(
                             sys.stdout.close()
                             sys.stdout = _orig_stdout
                     _need_fa_dtype = (
-                        _vllm_attention_config.backend is not None
-                        and resolved_dtype != torch.float32
+                        resolved_dtype != torch.float32
                     )
                     if _need_fa_dtype:
-                        from vllm.utils.torch_utils import set_default_torch_dtype
-                        with set_default_torch_dtype(resolved_dtype):
-                            syn = model_cls(vllm_config=_vllm_config, prefix="model")
+                        from contextlib import contextmanager as _ctx
+                        @_ctx
+                        def _set_default_torch_dtype(_dt):
+                            _old = torch.get_default_dtype()
+                            torch.set_default_dtype(_dt)
+                            try:
+                                yield
+                            finally:
+                                torch.set_default_dtype(_old)
+                        with _set_default_torch_dtype(resolved_dtype):
+                            _vllm_hf_cfg = _vllm_config.model_config.hf_config
+                            _vllm_hf_text_cfg = getattr(_vllm_config.model_config, 'hf_text_config', None)
+                            for _cfg_to_fix in [_vllm_hf_cfg, getattr(_vllm_hf_cfg, 'text_config', None), _vllm_hf_text_cfg]:
+                                if _cfg_to_fix is not None and hasattr(_cfg_to_fix, 'allow_global_per_layer_attribute_access'):
+                                    _cfg_to_fix.allow_global_per_layer_attribute_access = True
+                            with torch.device('cpu'):
+                                syn = model_cls(vllm_config=_vllm_config, prefix="model")
                     else:
-                        syn = model_cls(vllm_config=_vllm_config, prefix="model")
+                        _vllm_hf_cfg = _vllm_config.model_config.hf_config
+                        _vllm_hf_text_cfg = getattr(_vllm_config.model_config, 'hf_text_config', None)
+                        for _cfg_to_fix in [_vllm_hf_cfg, getattr(_vllm_hf_cfg, 'text_config', None), _vllm_hf_text_cfg]:
+                            if _cfg_to_fix is not None and hasattr(_cfg_to_fix, 'allow_global_per_layer_attribute_access'):
+                                _cfg_to_fix.allow_global_per_layer_attribute_access = True
+                        with torch.device('cpu'):
+                            syn = model_cls(vllm_config=_vllm_config, prefix="model")
                 syn.load_weights(local_state_dict.items())
-                if _need_fa_dtype:
+                # Free loaded weights to save CPU memory before moving model to GPU
+                if local_state_dict is not None and local_state_dict is not state_ref_cpu:
+                    local_state_dict.clear()
+                if local_state_dict is not None:
+                    del local_state_dict
+                    local_state_dict = None
+                import gc as _gc; _gc.collect()
+                _first_param = next(syn.parameters(), None)
+                _already_on_target = (_first_param is not None
+                                      and _first_param.device == target_device)
+                if _already_on_target:
+                    syn = syn.eval()
+                elif _need_fa_dtype:
                     syn = syn.to(target_device, dtype=resolved_dtype).eval()
                 else:
                     syn = syn.to(target_device).eval()
@@ -5166,7 +5227,7 @@ def _run_axon_test_single(
                     import torch._dynamo as _dynamo
                     syn.forward = _dynamo.disable(syn.forward)
                 if _need_fa_dtype:
-                    from vllm.model_executor.layers.attention import Attention as _VllmAttention
+                    from vllm.attention.layer import Attention as _VllmAttention
                     _orig_attn_fwd = _VllmAttention.forward
                     _target_dt = resolved_dtype
                     def _cast_attn_fwd(self, query, key, value, *args, **kwargs):
@@ -5293,7 +5354,7 @@ def _run_axon_test_single(
                                 _slot_map = _vllm_cached_slot_map
                             else:
                                 _attn_md, _slot_map = None, None
-                            with _sfc(_attn_md, _vllm_cfg, slot_mapping=_slot_map, skip_compiled=not compile_axon):
+                            with _sfc(_attn_md, _vllm_cfg):
                                 return _extract_logits(model(**_syn_in))
                 if _is_deepseek_family_model_type(resolved_model_type):
                     syn_inputs = io["syn_inputs"]
