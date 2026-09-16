@@ -159,11 +159,12 @@ def _py_ident(name: str) -> str:
 
 
 def _path_to_safe_attr(path: str) -> str:
+    # Prefixed so a static parameter path such as ``embedding`` or ``linear``
+    # cannot shadow the generated ``_embedding``/``_linear`` helper methods
+    # (mlx.nn.Module.__setattr__ raises when a module is assigned over a method).
     safe = path.replace(".", "_")
     safe = re.sub(r"[^A-Za-z0-9_]", "_", safe)
-    if safe and safe[0].isdigit():
-        safe = "_" + safe
-    return safe
+    return f"mod_{safe}"
 
 
 def _collect_static_param_paths(program: GraphProgram) -> dict[str, str]:
