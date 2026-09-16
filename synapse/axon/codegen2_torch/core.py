@@ -2331,6 +2331,31 @@ class Codegen2GraphModel(nn.Module):
             out(self._swiglu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
             return True
 
+        if primitive == "_torch_swiglu_activation":
+            out(F.silu(args[0]) * args[1])
+            return True
+
+        if primitive == "_torch_split_swiglu":
+            x = args[0]
+            dim = int(args[1])
+            size0 = int(args[2])
+            size1 = int(args[3])
+            gate = x.narrow(dim, 0, size0)
+            up = x.narrow(dim, size0, size1)
+            out(F.silu(gate) * up)
+            return True
+
+        if primitive == "_torch_sigmoid_gated_mul":
+            out(torch.sigmoid(args[0]) * args[1])
+            return True
+
+        if primitive == "_torch_sigmoid_gated_merge":
+            gate = args[0]
+            a = args[1]
+            result = (torch.sigmoid(gate) * a).permute(0, 2, 1, 3).contiguous()
+            out(result.reshape(gate.shape[0], gate.shape[2], -1))
+            return True
+
         if primitive == "_torch_gelu_ffn":
             if len(args) < 8:
                 raise ValueError("__torch_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
@@ -2524,6 +2549,19 @@ class Codegen2GraphModel(nn.Module):
                 out(y.to(dtype=x.dtype))
             else:
                 out(x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps))
+            return True
+
+        if primitive == "_torch_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = float(args[2]) if len(args) > 2 and not self._is_null(args[2]) else 1e-6
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else True
+            s = x + r
+            x_calc = s.float() if cast_float else s
+            y = x_calc * torch.rsqrt(torch.mean(x_calc * x_calc, dim=-1, keepdim=True) + eps)
+            if cast_float:
+                y = y.to(dtype=x.dtype)
+            out(y)
             return True
 
         if primitive == "conv1d":
@@ -6044,6 +6082,20 @@ class _DirectTorchEmitter:
                 f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
                 f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
             )
+        if primitive == "_torch_swiglu_activation":
+            return f"(F.silu({args[0]}) * {args[1]})"
+        if primitive == "_torch_split_swiglu":
+            x = args[0]
+            dim = args[1]
+            size0 = args[2]
+            size1 = args[3]
+            return f"(F.silu({x}.narrow(int({dim}), 0, int({size0}))) * {x}.narrow(int({dim}), int({size0}), int({size1})))"
+        if primitive == "_torch_sigmoid_gated_mul":
+            return f"(torch.sigmoid({args[0]}) * {args[1]})"
+        if primitive == "_torch_sigmoid_gated_merge":
+            g = args[0]
+            a = args[1]
+            return f"((torch.sigmoid({g}) * {a}).permute(0, 2, 1, 3).contiguous().reshape({g}.shape[0], {g}.shape[2], -1))"
         if primitive == "_torch_gelu_ffn":
             if len(args) < 8:
                 raise ValueError("__torch_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
@@ -6223,6 +6275,20 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
+            return f"({y_float} if {cast_float} else {y})"
+        if primitive == "_torch_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = float_arg(2, "1e-6")
+            cast_float = bool_arg(3, "True")
+            s = f"({x} + {r})"
+            s_float = f"{s}.float()"
+            y_float = f"({s_float} * torch.rsqrt(torch.mean({s_float} * {s_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
+            y = f"({s} * torch.rsqrt(torch.mean({s} * {s}, dim=-1, keepdim=True) + {eps}))"
             if cast_float == "True":
                 return y_float
             if cast_float == "False":

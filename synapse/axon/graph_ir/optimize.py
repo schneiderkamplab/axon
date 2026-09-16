@@ -109,6 +109,7 @@ class GraphOptimizeConfig:
 _SPECIALIZE_MODES = {"off", "single-callsite", "monomorphize"}
 _TORCH_BACKEND_INTRINSICS = frozenset(
     {
+        "__torch_add_rmsnorm_noscale",
         "__torch_expert_packed_swiglu_ffn",
         "__torch_expert_swiglu_ffn",
         "__torch_rope_apply_factors",
@@ -121,6 +122,9 @@ _TORCH_BACKEND_INTRINSICS = frozenset(
         "__torch_selected_expert_packed_swiglu_ffn",
         "__torch_selected_expert_relu2_ffn",
         "__torch_selected_expert_swiglu_ffn",
+        "__torch_sigmoid_gated_merge",
+        "__torch_sigmoid_gated_mul",
+        "__torch_split_swiglu",
         "__torch_swiglu_ffn",
         "__torch_gelu_ffn",
         "__torch_topk_normalize",
@@ -161,6 +165,7 @@ _JAX_BACKEND_INTRINSICS = frozenset(
 )
 _TRITON_BACKEND_INTRINSICS = frozenset(
     {
+        "__triton_add_rmsnorm_noscale",
         "__triton_rmsnorm_noscale",
         "__triton_rmsnorm_scaled",
         "__triton_rmsnorm_unit_offset_scaled",
@@ -168,8 +173,10 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_geglu_tanh_activation",
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
-        "__triton_swiglu_activation",
+        "__triton_sigmoid_gated_merge",
         "__triton_sigmoid_gated_mul",
+        "__triton_split_swiglu",
+        "__triton_swiglu_activation",
         "__torch_gelu_ffn",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
@@ -2364,7 +2371,11 @@ def _rewrite_triton_layernorm_intrinsics(graph: GraphProgram) -> GraphProgram:
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
-def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_swiglu_activation_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     changed = False
     new_modules: list[GraphModule] = []
@@ -2393,7 +2404,7 @@ def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphPr
             new_nodes.append(
                 replace(
                     mul_node,
-                    op=GraphOp("__triton_swiglu_activation"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -2403,7 +2414,11 @@ def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphPr
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
-def _rewrite_triton_sigmoid_gated_mul_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_sigmoid_gated_mul_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     changed = False
     new_modules: list[GraphModule] = []
@@ -2432,7 +2447,7 @@ def _rewrite_triton_sigmoid_gated_mul_intrinsics(graph: GraphProgram) -> GraphPr
             new_nodes.append(
                 replace(
                     mul_node,
-                    op=GraphOp("__triton_sigmoid_gated_mul"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -6234,6 +6249,226 @@ def _rewrite_rmsnorm_noscale_module_calls(
                 )
             )
             changed = True
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_add_rmsnorm_noscale_intrinsics(
+    graph: GraphProgram,
+    *,
+    rmsnorm_op: str,
+    fused_op: str,
+) -> GraphProgram:
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        producer: dict[str, GraphNode] = {}
+        for node in module.nodes:
+            for out in node.outputs:
+                producer[out.name] = node
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if (
+                node.op.name == rmsnorm_op
+                and len(node.inputs) >= 4
+                and len(node.outputs) == 1
+                and not node.attrs
+            ):
+                x_operand = node.inputs[0]
+                if isinstance(x_operand, GraphValueRef):
+                    add_node = producer.get(x_operand.name)
+                    if (
+                        add_node is not None
+                        and add_node.op.name == "core.binary.+"
+                        and len(add_node.inputs) == 2
+                    ):
+                        eps = node.inputs[1]
+                        dim = node.inputs[2]
+                        cast_float = node.inputs[3]
+                        new_nodes.append(
+                            replace(
+                                node,
+                                op=GraphOp(fused_op),
+                                inputs=(add_node.inputs[0], add_node.inputs[1], eps, dim, cast_float),
+                                attrs={},
+                            )
+                        )
+                        changed = True
+                        continue
+            new_nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_split_swiglu_intrinsics(
+    graph: GraphProgram,
+    *,
+    swiglu_op: str,
+    fused_op: str,
+) -> GraphProgram:
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        producer: dict[str, GraphNode] = {}
+        for node in module.nodes:
+            for out in node.outputs:
+                producer[out.name] = node
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if (
+                node.op.name == swiglu_op
+                and len(node.inputs) == 2
+                and len(node.outputs) == 1
+                and not node.attrs
+            ):
+                gate_ref = node.inputs[0]
+                up_ref = node.inputs[1]
+                if isinstance(gate_ref, GraphValueRef) and isinstance(up_ref, GraphValueRef):
+                    gate_split = producer.get(gate_ref.name)
+                    up_split = producer.get(up_ref.name)
+                    if (
+                        gate_split is not None
+                        and gate_split is up_split
+                        and gate_split.op.name == "_split"
+                        and len(gate_split.outputs) == 2
+                        and gate_split.outputs[0].name == gate_ref.name
+                        and gate_split.outputs[1].name == up_ref.name
+                        and len(gate_split.inputs) >= 3
+                    ):
+                        tensor_in = gate_split.inputs[0]
+                        dim_in = gate_split.inputs[1]
+                        sizes_expr = gate_split.inputs[2]
+                        if isinstance(sizes_expr, GraphExpr) and len(sizes_expr.inputs) >= 2:
+                            size0 = sizes_expr.inputs[0]
+                            size1 = sizes_expr.inputs[1]
+                            new_nodes.append(
+                                replace(
+                                    node,
+                                    op=GraphOp(fused_op),
+                                    inputs=(tensor_in, dim_in, size0, size1),
+                                    attrs={},
+                                )
+                            )
+                            changed = True
+                            continue
+            new_nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_sigmoid_gated_merge_intrinsics(
+    graph: GraphProgram,
+    *,
+    sigmoid_op: str,
+    fused_op: str,
+) -> GraphProgram:
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        producer: dict[str, GraphNode] = {}
+        use_count: dict[str, int] = {}
+        node_by_output: dict[str, int] = {}
+        for idx, node in enumerate(module.nodes):
+            for out in node.outputs:
+                producer[out.name] = node
+                node_by_output[out.name] = idx
+                use_count[out.name] = 0
+        for node in module.nodes:
+            for inp in node.inputs:
+                if isinstance(inp, GraphValueRef):
+                    use_count[inp.name] = use_count.get(inp.name, 0) + 1
+                elif isinstance(inp, GraphExpr):
+                    for einp in inp.inputs:
+                        if isinstance(einp, GraphValueRef):
+                            use_count[einp.name] = use_count.get(einp.name, 0) + 1
+
+        skip_names: set[str] = set()
+        replacements: dict[str, GraphNode] = {}
+        for node in module.nodes:
+            if (
+                node.op.name == "_reshape"
+                and len(node.inputs) >= 2
+                and len(node.outputs) == 1
+                and isinstance(node.inputs[0], GraphValueRef)
+            ):
+                permute_node = producer.get(node.inputs[0].name)
+                if (
+                    permute_node is not None
+                    and permute_node.op.name == "_permute"
+                    and len(permute_node.inputs) >= 2
+                    and isinstance(permute_node.inputs[0], GraphValueRef)
+                ):
+                    perm_dims_input = permute_node.inputs[1]
+                    perm_dims: list[int] | None = None
+                    if isinstance(perm_dims_input, GraphExpr):
+                        if (
+                            perm_dims_input.op.name == "core.list"
+                            and len(perm_dims_input.inputs) == 4
+                            and all(isinstance(d, GraphLiteral) for d in perm_dims_input.inputs)
+                        ):
+                            perm_dims = [int(perm_dims_input.inputs[i].value) for i in range(4)]
+                    elif isinstance(perm_dims_input, GraphValueRef):
+                        dims_producer = producer.get(perm_dims_input.name)
+                        if (
+                            dims_producer is not None
+                            and dims_producer.op.name == "core.list"
+                            and len(dims_producer.inputs) == 4
+                            and all(isinstance(d, GraphLiteral) for d in dims_producer.inputs)
+                        ):
+                            perm_dims = [int(dims_producer.inputs[i].value) for i in range(4)]
+                    sig_node = None
+                    if perm_dims == [0, 2, 1, 3]:
+                        sig_node = producer.get(permute_node.inputs[0].name)
+                    if (
+                        sig_node is not None
+                        and sig_node.op.name == sigmoid_op
+                        and len(sig_node.inputs) == 2
+                        and len(sig_node.outputs) == 1
+                        and use_count.get(sig_node.outputs[0].name, 0) == 1
+                    ):
+                        gate_in = sig_node.inputs[0]
+                        a_in = sig_node.inputs[1]
+                        fused_node = replace(
+                            node,
+                            op=GraphOp(fused_op),
+                            inputs=(gate_in, a_in),
+                            attrs={},
+                        )
+                        replacements[node.outputs[0].name] = fused_node
+                        skip_names.add(sig_node.outputs[0].name)
+                        skip_names.add(permute_node.outputs[0].name)
+                        permute_idx = node_by_output[permute_node.outputs[0].name]
+                        reshape_idx = node_by_output[node.outputs[0].name]
+                        for mid_idx in range(permute_idx + 1, reshape_idx):
+                            mid_node = module.nodes[mid_idx]
+                            all_inputs_internal = True
+                            for inp in mid_node.inputs:
+                                if isinstance(inp, GraphValueRef):
+                                    if inp.name not in skip_names and inp.name != permute_node.outputs[0].name:
+                                        all_inputs_internal = False
+                                        break
+                                elif isinstance(inp, GraphExpr):
+                                    for einp in inp.inputs:
+                                        if isinstance(einp, GraphValueRef) and einp.name not in skip_names and einp.name != permute_node.outputs[0].name:
+                                            all_inputs_internal = False
+                                            break
+                            if all_inputs_internal:
+                                for out in mid_node.outputs:
+                                    skip_names.add(out.name)
+                        changed = True
+
+        if not replacements and not skip_names:
+            new_modules.append(module)
+            continue
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            out_name = node.outputs[0].name if len(node.outputs) == 1 else None
+            if out_name in replacements:
+                new_nodes.append(replacements[out_name])
+            elif any(out.name in skip_names for out in node.outputs):
+                continue
+            else:
+                new_nodes.append(node)
         new_modules.append(replace(module, nodes=tuple(new_nodes)))
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
@@ -15933,6 +16168,56 @@ def optimize_graph_program(
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_rmsnorm_noscale_module_calls")
                 current = candidate
+            candidate = (
+                _rewrite_add_rmsnorm_noscale_intrinsics(current, rmsnorm_op="__torch_rmsnorm_noscale", fused_op="__torch_add_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_add_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_add_rmsnorm_noscale_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_swiglu_activation_intrinsics(current, op_name="__torch_swiglu_activation")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_swiglu_activation")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_swiglu_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_split_swiglu_intrinsics(current, swiglu_op="__torch_swiglu_activation", fused_op="__torch_split_swiglu")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_split_swiglu")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_split_swiglu_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_mul_intrinsics(current, op_name="__torch_sigmoid_gated_mul")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_sigmoid_gated_mul")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_sigmoid_gated_mul_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_merge_intrinsics(current, sigmoid_op="__torch_sigmoid_gated_mul", fused_op="__torch_sigmoid_gated_merge")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_sigmoid_gated_merge")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_sigmoid_gated_merge_intrinsics")
+                current = candidate
         if backend_intrinsic_target == "codegen2-tinygrad":
             candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__tinygrad_sdpa")
@@ -16255,6 +16540,16 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="triton_rmsnorm_noscale_module_calls")
                 current = candidate
             candidate = (
+                _rewrite_add_rmsnorm_noscale_intrinsics(current, rmsnorm_op="__triton_rmsnorm_noscale", fused_op="__triton_add_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_add_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_add_rmsnorm_noscale_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_triton_rmsnorm_unit_offset_scaled_intrinsics(current)
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_rmsnorm_unit_offset_scaled")
                 else current
@@ -16302,7 +16597,7 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="triton_selected_expert_intrinsics")
                 current = candidate
             candidate = (
-                _rewrite_triton_swiglu_activation_intrinsics(current)
+                _rewrite_swiglu_activation_intrinsics(current, op_name="__triton_swiglu_activation")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_swiglu_activation")
                 else current
             )
@@ -16312,7 +16607,17 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="triton_swiglu_activation_intrinsics")
                 current = candidate
             candidate = (
-                _rewrite_triton_sigmoid_gated_mul_intrinsics(current)
+                _rewrite_split_swiglu_intrinsics(current, swiglu_op="__triton_swiglu_activation", fused_op="__triton_split_swiglu")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_split_swiglu")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_split_swiglu_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_mul_intrinsics(current, op_name="__triton_sigmoid_gated_mul")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sigmoid_gated_mul")
                 else current
             )
@@ -16320,6 +16625,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_sigmoid_gated_mul_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_merge_intrinsics(current, sigmoid_op="__triton_sigmoid_gated_mul", fused_op="__triton_sigmoid_gated_merge")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sigmoid_gated_merge")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_sigmoid_gated_merge_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-vllm":
             candidate = (
