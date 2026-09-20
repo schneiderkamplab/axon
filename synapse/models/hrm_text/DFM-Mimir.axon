@@ -1,0 +1,499 @@
+{-# CHECKPOINTS ["sapientinc/HRM-Text-1B", "danish-foundation-models/DFM-Mimir"] #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "hrm_text" #-}
+
+type TokenIds[B, S] = Tensor[B,S]
+
+type IdxTensor[..S] = Tensor[..S]
+
+type CacheLayer[B, H, T, C, DH] = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+
+type Cache[B, H, T, C, DH] = List[(Tensor[B,H,T,DH], Tensor[B,H,T,DH])]
+
+type CacheLayerKV[B, H, T, C, DK, DV] = (Tensor[B,H,T,DK], Tensor[B,H,T,DV])
+
+type CacheKV[B, H, T, C, DK, DV] = List[(Tensor[B,H,T,DK], Tensor[B,H,T,DV])]
+
+type CacheAny = List[(Any, Any)]
+
+type Mask[B, K, C] = Tensor[B,K]
+
+Math.mul :: Any -> Any -> Any
+Math.mul x y = _mul x y
+
+Math.exp :: T -> T
+Math.exp x = _exp x
+
+Math.log :: T -> T
+Math.log x = _log x
+
+Math.floor :: Any -> Any
+Math.floor x = _floor x
+
+Math.sin :: Tensor[..S] -> Tensor[..S]
+Math.sin x = _sin x
+
+Math.cos :: Tensor[..S] -> Tensor[..S]
+Math.cos x = _cos x
+
+Math.sqrt :: Float -> Float
+Math.sqrt x = _sqrt x
+
+Params.param :: Path -> Tensor[..S]
+Params.param path = _params_param path
+
+Activations.sigmoid :: Tensor[..S] -> Tensor[..S]
+Activations.sigmoid x = _activations_sigmoid x
+
+Activations.tanh :: Tensor[..S] -> Tensor[..S]
+Activations.tanh x = _activations_tanh x
+
+Activations.silu :: Tensor[..S] -> Tensor[..S]
+Activations.silu x = _activations_silu x
+
+List.init :: List[_T]
+List.init = _list_init
+
+List.index :: List[_T] -> Int -> _T
+List.index values i = _list_index values i
+
+List.append :: List[_T] -> _T -> List[_T]
+List.append values value = _list_append values value
+
+List.length :: List[_T] -> Dim
+List.length values = _list_length values
+
+Tensor.split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..R]]
+Tensor.split x ?dim=-1 ?sizes=null = _split x dim sizes
+
+Tensor.permute :: Tensor[..S] -> ?Any -> Tensor[..R]
+Tensor.permute x ?dims=null = _permute x dims
+
+Tensor.transpose :: Tensor[..S] -> ?Int -> ?Int -> Tensor[..R]
+Tensor.transpose x ?dim1=1 ?dim2=2 = _transpose x dim1 dim2
+
+Tensor.reshape :: Tensor[..S] -> List[Dim] -> Tensor[..R]
+Tensor.reshape x shape = _reshape x shape
+
+Tensor.shape :: Tensor[..S] -> List[Dim]
+Tensor.shape x = _shape x
+
+Tensor.size :: Tensor[..S] -> Int -> Dim
+Tensor.size x dim = _tensor_size x dim
+
+Tensor.expand :: Tensor[..S] -> ?List[Dim] -> Tensor[..R]
+Tensor.expand x ?shape=null = _expand x shape
+
+Tensor.arange :: Tensor[..S] -> ?Dim -> ?Dim -> IdxTensor[..R]
+Tensor.arange x ?start=0 ?end=null = _arange x start end
+
+Tensor.cast :: Tensor[..S] -> ?String -> Tensor[..S]
+Tensor.cast x ?dtype=null = _cast x dtype
+
+Tensor.cast_like :: Tensor[..S] -> Tensor[..R] -> Tensor[..S]
+Tensor.cast_like x ref = _cast_like x ref
+
+Tensor.zeros :: Tensor[..REF] -> List[Dim] -> ?String -> Tensor[..S]
+Tensor.zeros ref shape ?dtype=null = _zeros ref shape dtype
+
+Tensor.cumsum :: Tensor[..S] -> ?Int -> Tensor[..S]
+Tensor.cumsum x ?dim=-1 = _cumsum x dim
+
+Tensor.unsqueeze :: Tensor[..S] -> ?Int -> Tensor[..R]
+Tensor.unsqueeze x ?dim=0 = _unsqueeze x dim
+
+Tensor.concat :: Tensor[..S] -> Tensor[..T] -> ?Int -> Tensor[..R]
+Tensor.concat x y ?dim=-1 = _concat x y dim=dim
+
+Tensor.matmul :: Tensor[..S] -> Tensor[..T] -> Tensor[..R]
+Tensor.matmul x y = _matmul x y
+
+Tensor.eq :: Any -> Any -> Tensor[..R]
+Tensor.eq x y = _eq x y
+
+Tensor.le :: Any -> Any -> Tensor[..R]
+Tensor.le x y = _le x y
+
+Tensor.and :: Tensor[..S] -> Tensor[..T] -> Tensor[..R]
+Tensor.and x y = _and x y
+
+Tensor.where :: Any -> Any -> Any -> Tensor[..R]
+Tensor.where cond x y = _where cond x y
+
+Tensor.slice :: Tensor[..S] -> Int -> Dim -> Dim -> Tensor[..R]
+Tensor.slice x dim start end = _slice x dim start end
+
+Tensor.softmax :: Tensor[..S] -> ?Int -> ?String -> Tensor[..S]
+Tensor.softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
+
+Tensor.topk :: Tensor[..S] -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor[..R], IdxTensor[..I])
+Tensor.topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
+
+Tensor.dtype_value :: Tensor[..S] -> String -> Float
+Tensor.dtype_value x kind = _dtype_value x kind
+
+Tensor.empty_like :: Tensor[..S] -> ?String -> Tensor[..S]
+Tensor.empty_like x ?dtype=null = _empty_like x dtype
+
+Tensor.fill :: Tensor[..S] -> Any -> ?String -> Tensor[..S]
+Tensor.fill x value ?dtype=null = _fill x value dtype
+
+Tensor.zeros_like :: Tensor[..S] -> Tensor[..S]
+Tensor.zeros_like x = _zeros_like x
+
+Tensor.min_like :: Tensor[..S] -> Tensor[..S]
+Tensor.min_like x = Tensor.fill (Tensor.empty_like x) (Tensor.dtype_value x "min")
+
+Attention.merge_heads :: Tensor[B,heads,S,HD] -> Tensor[B,S,heads * HD]
+Attention.merge_heads x = do
+  y <- Tensor.permute x dims=[0, 2, 1, 3]
+  h <- Tensor.size y dim=2
+  hd <- Tensor.size y dim=3
+  d <- h * hd
+  return Tensor.reshape y shape=[B, S, d]
+
+Attention.mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> Tensor[B,H,Q,K]
+Attention.mask_to_additive ref keep = Tensor.where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
+
+Attention.attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
+Attention.attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
+  scale_eff <- (scale == null) ? (1.0 / Math.sqrt HD) : scale
+  scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  scores <- scores * scale_eff
+  softcap_val <- (softcap == null) ? 0.0 : softcap
+  scores <- ((softcap == null) or (softcap_val == 0.0))
+        ? scores
+        : do
+            scaled <- scores / softcap_val
+            squashed <- Activations.tanh scaled
+            return squashed * softcap_val
+  mask <- Attention.mask_to_additive scores keep
+  probs_in <- scores + mask
+  probs_in <- (rel_bias == null) ? probs_in : (probs_in + rel_bias)
+  probs_in <- (sink_logits == null)
+        ? probs_in
+        : do
+            combined <- Tensor.concat probs_in sink_logits dim=-1
+            row_max, _ <- Tensor.topk combined 1 dim=-1 largest=true sorted=false
+            return combined - row_max
+  probs <- fp32_compute ? (Tensor.softmax probs_in dim=-1 dtype="float32") : (Tensor.softmax probs_in dim=-1)
+  K <- Tensor.size v dim=-2
+  probs <- Tensor.slice probs dim=-1 start=0 end=K
+  probs <- (probs :: Tensor[B,H,Q,K])
+  probs <- zero_masked_after_softmax ? (Tensor.where keep probs 0) : probs
+  v_work <- fp32_compute ? (Tensor.cast v dtype="float32") : v
+  out <- Tensor.matmul probs v_work
+  return fp32_compute ? (Tensor.cast out dtype="float32") : out
+
+Cache.update :: ?CacheLayer[B,H,P,C,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> ?Dim -> (Tensor[B,H,key_length,DH], Tensor[B,H,key_length,DH], ?CacheLayer[B,H,key_length,C,DH])
+Cache.update past k v ?key_length=null = (past == null)
+    ? do
+        return k, v, (k, v)
+    : do
+        k_past, v_past <- (past :: CacheLayer[B,H,P,C,DH])
+        k_all <- Tensor.concat k_past k dim=-2
+        v_all <- Tensor.concat v_past v dim=-2
+        return k_all, v_all, (k_all, v_all)
+
+Cache.index :: ?Cache[B,H,T,C,DH] -> Int -> ?CacheLayer[B,H,T,C,DH]
+Cache.index values i = (values == null) ? null : (((List.length (values :: Cache[B,H,T,C,DH])) == 0) ? null : List.index (values :: Cache[B,H,T,C,DH]) i)
+
+Cache.append :: ?Cache[B,H,T,C,DH] -> ?CacheLayer[B,H,T,C,DH] -> ?Cache[B,H,T,C,DH]
+Cache.append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
+
+Cache.past_length :: ?Cache[B,H,T,C,DH] -> Dim
+Cache.past_length cache = (cache == null)
+    ? 0
+    : ((List.length (cache :: Cache[B,H,T,C,DH])) == 0)
+      ? 0
+      : do
+          layer <- List.index (cache :: Cache[B,H,T,C,DH]) 0
+          k, _ <- layer
+          return Tensor.size k -2
+
+Cache.prepare :: ?Cache[B,H,P,C,DH] -> ?Bool -> Dim -> ?Cache[B,H,K,C,DH]
+Cache.prepare past use_cache capacity = use_cache ? List.init : null
+
+Cache.read :: ?Cache[B,H,P,C,DH] -> ?Cache[B,H,K,C,DH] -> ?Cache[B,H,P,C,DH]
+Cache.read past work = past
+
+Cache.finish :: ?Cache[B,H,K,C,DH] -> Dim -> ?Cache[B,H,K,C,DH]
+Cache.finish cache length = cache
+
+Config.has_value :: Path -> Bool
+Config.has_value key = (Config.value key default=null) != null
+
+Config.int :: Path -> ?Int -> Int
+Config.int key ?default=null = _config_int key default
+
+Config.dim :: Path -> ?Dim -> Dim
+Config.dim key ?default=null = _config_dim key default
+
+Config.float :: Path -> ?Float -> Float
+Config.float key ?default=null = _config_float key default
+
+Config.value :: Path -> ?Any -> Any
+Config.value key ?default=null = _config_value key default
+
+Masking.mask_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> ?Mask[B,K,C]
+Masking.mask_for_input x mask capacity = mask
+
+Masking.mask_length_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Dim
+Masking.mask_length_for_input x mask past_length = (mask == null) ? (past_length + Q) : K
+
+Masking.causal_mask_for_input_keep :: Tensor[B,Q] -> Dim -> ?Dim -> Tensor[B,1,Q,K]
+Masking.causal_mask_for_input_keep x K ?window=null = do
+  row_ids <- Tensor.arange x start=0 end=Q |> Tensor.reshape shape=[Q, 1]
+  col_ids <- Tensor.arange x start=0 end=K |> Tensor.reshape shape=[1, K]
+  aligned <- row_ids + (K - Q)
+  upper <- Tensor.le col_ids aligned
+  keep_window <- (window == null) ? upper : (Tensor.and upper (Tensor.le (aligned - window + 1) col_ids))
+  keep <- Tensor.reshape keep_window shape=[1, 1, Q, K]
+  return Tensor.expand keep shape=[B, 1, Q, K]
+
+Masking.causal_mask_for_input_masked :: Tensor[B,Q] -> Dim -> Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+Masking.causal_mask_for_input_masked x K padding_mask ?window=null = do
+  keep <- Masking.causal_mask_for_input_keep x K window=window
+  pad_keep <- Tensor.cast padding_mask dtype="bool" |> Tensor.reshape shape=[B, 1, 1, K]
+  return Tensor.and keep pad_keep
+
+Masking.causal_mask_for_input :: Tensor[B,Q] -> Dim -> ?Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+Masking.causal_mask_for_input x K ?padding_mask=null ?window=null = if padding_mask == null then Masking.causal_mask_for_input_keep x K window=window else Masking.causal_mask_for_input_masked x K padding_mask window=window
+
+NN.linear :: Path -> Tensor[..S,Din] -> ?Dim -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor[..S,dim]
+NN.linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=@weight ?bias_path=@bias = _linear@path x dim bias transpose expert weight_path bias_path
+
+NN.embedding :: Path -> Tensor[..S] -> ?Dim -> ?Float -> Tensor[..S,dim]
+NN.embedding@path x ?dim=null ?scale=null = do
+  y <- _embedding@path x dim
+  return (scale == null) ? y : (y * scale)
+
+NN.rmsnorm_noscale :: Tensor[..S] -> ?Float -> ?Dim -> ?Bool -> Tensor[..S]
+NN.rmsnorm_noscale x ?eps=1e-6 ?dim=null ?cast_float=true = _rmsnorm x eps dim cast_float
+
+Positions.position_ids_masked :: TokenIds[B,S] -> Tensor[B,SM] -> Int -> Tensor[B,S]
+Positions.position_ids_masked x attn_mask pad_fill = do
+  pos <- Tensor.cast attn_mask dtype="long" |> Tensor.cumsum dim=-1
+  pos <- Tensor.where (Tensor.eq attn_mask 0) pad_fill (pos - 1)
+  return Tensor.slice pos dim=-1 start=(SM - S) end=SM
+
+Positions.position_ids_nomask :: TokenIds[B,S] -> Dim -> Tensor[B,S]
+Positions.position_ids_nomask x past_length = do
+  return Tensor.arange x start=past_length end=(past_length + S) |> Tensor.cast dtype="long" |> Tensor.reshape shape=[1, S] |> Tensor.expand shape=[B, S]
+
+Positions.position_ids :: TokenIds[B,S] -> ?Tensor[B,SM] -> ?Dim -> ?Int -> Tensor[B,S]
+Positions.position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null) ? (Positions.position_ids_nomask x past_length) : (Positions.position_ids_masked x attn_mask pad_fill)
+
+Positions.position_ids_scale :: Tensor[B,SM] -> Float -> Tensor[B,SM]
+Positions.position_ids_scale position_ids scale_factor = do
+  pos <- Tensor.cast position_ids dtype="float32"
+  return pos / scale_factor
+
+Positions.sinusoidal_positions :: Tensor[B,S,D] -> Tensor[B,S] -> ?Float -> ?Int -> ?Int -> ?String -> Tensor[B,S,D]
+Positions.sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null ?mode=null = do
+  theta <- (theta == null) ? 10000.0 : theta
+  offset <- (offset == null) ? 2 : offset
+  mode <- (mode == null) ? "legacy" : mode
+  half <- D / 2
+  pos <- Tensor.cast position_ids dtype="float32"
+  pos <- pos + offset
+  pos <- Tensor.reshape pos shape=[B, S, 1]
+  freq_idx <- Tensor.arange ref start=0 end=half |> Tensor.cast dtype="float32"
+  inv_freq <- (mode == "rope")
+        ? do
+            inv_shape <- freq_idx / half
+            return Math.exp (0 - ((Math.log theta) * inv_shape))
+        : do
+            den <- (((half - 1) > 0) ? (half - 1) : 1)
+            inv_shape <- freq_idx / den
+            return Math.exp (0 - ((Math.log theta) * inv_shape))
+  inv_freq <- Tensor.reshape inv_freq shape=[1, 1, half]
+  angles <- pos * inv_freq
+  sin_part <- Math.sin angles
+  cos_part <- Math.cos angles
+  emb <- Tensor.concat sin_part cos_part dim=-1
+  emb <- ((D % 2) == 0)
+        ? emb
+        : do
+            pad <- (Tensor.slice ref dim=-1 start=0 end=1) * 0.0
+            padded <- Tensor.concat emb pad dim=-1
+            ref_shape <- Tensor.shape ref
+            return Tensor.reshape padded shape=ref_shape
+  emb <- (padding_idx == null)
+        ? emb
+        : do
+            mask <- Tensor.eq position_ids padding_idx |> Tensor.unsqueeze dim=-1
+            return Tensor.where mask (Tensor.zeros_like emb) emb
+  return Tensor.cast_like emb ref
+
+Positions.rope_rotate_half_noninterleaved :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+Positions.rope_rotate_half_noninterleaved x = do
+  x1 <- Tensor.slice x dim=-1 start=0 end=(R / 2)
+  x2 <- Tensor.slice x dim=-1 start=(R / 2) end=R
+  return Tensor.concat (0 - x2) x1 dim=-1
+
+Positions.rope_rotate_half_interleaved :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+Positions.rope_rotate_half_interleaved x = do
+  pair <- Tensor.reshape x shape=[B, H, S, (R / 2), 2]
+  even <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[B, H, S, (R / 2)]
+  odd <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[B, H, S, (R / 2)]
+  neg_odd <- Tensor.reshape (0 - odd) shape=[B, H, S, (R / 2), 1]
+  even <- Tensor.reshape even shape=[B, H, S, (R / 2), 1]
+  return Tensor.concat neg_odd even dim=-1 |> Tensor.reshape shape=[B, H, S, R]
+
+Positions.rope_rotate_half :: Tensor[B,H,S,R] -> ?Bool -> Tensor[B,H,S,R]
+Positions.rope_rotate_half x ?interleaved=false = interleaved ? (Positions.rope_rotate_half_interleaved x) : (Positions.rope_rotate_half_noninterleaved x)
+
+Positions.rope_base_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Bool -> ?Float -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+Positions.rope_base_factors position_ids rotary_dim ?theta=10000.0 ?interleaved=false ?scale_factor=null = do
+  position_ids <- (scale_factor == null) ? position_ids : (Positions.position_ids_scale position_ids scale_factor)
+  ref <- Tensor.zeros position_ids shape=[B, S, rotary_dim] dtype="float32"
+  emb <- Positions.sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
+  half <- ((Math.floor (rotary_dim / 2)) :: Dim)
+  sin_half <- Tensor.slice emb dim=-1 start=0 end=half
+  cos_half <- Tensor.slice emb dim=-1 start=half end=rotary_dim
+  sin_half <- Tensor.reshape sin_half shape=[B, 1, S, half]
+  cos_half <- Tensor.reshape cos_half shape=[B, 1, S, half]
+  sin <- interleaved
+        ? do
+            pair <- Tensor.reshape sin_half shape=[B, 1, S, half, 1]
+            pair <- Tensor.concat pair pair dim=-1
+            return Tensor.reshape pair shape=[B, 1, S, rotary_dim]
+        : do
+            xx <- Tensor.concat sin_half sin_half dim=-1
+            return Tensor.reshape xx shape=[B, 1, S, rotary_dim]
+  cos <- interleaved
+        ? do
+            pair <- Tensor.reshape cos_half shape=[B, 1, S, half, 1]
+            pair <- Tensor.concat pair pair dim=-1
+            return Tensor.reshape pair shape=[B, 1, S, rotary_dim]
+        : do
+            xx <- Tensor.concat cos_half cos_half dim=-1
+            return Tensor.reshape xx shape=[B, 1, S, rotary_dim]
+  return sin, cos
+
+Positions.rope_apply_factors :: Tensor[B,H,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> Tensor[B,H,S,R]
+Positions.rope_apply_factors x sin cos ?interleaved=false = do
+  sin <- Tensor.expand sin shape=[B, H, S, R]
+  cos <- Tensor.expand cos shape=[B, H, S, R]
+  return (x * cos) + ((Positions.rope_rotate_half x interleaved=interleaved) * sin)
+
+Positions.rope_pair_base_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+Positions.rope_pair_base_factors q k sin cos ?interleaved=false = do
+  q_rot <- Positions.rope_apply_factors q sin cos interleaved=interleaved
+  k_rot <- Positions.rope_apply_factors k sin cos interleaved=interleaved
+  return q_rot, k_rot
+
+MODEL_DIM <- ((1536) :: Dim)
+
+VOCAB_SIZE <- ((262144) :: Dim)
+
+HAS_STACK_LAYERS <- false
+
+NUM_LAYERS_I <- (HAS_STACK_LAYERS ? (16) : ((16) :: Int))
+
+NUM_HEADS <- ((12) :: Dim)
+
+HAS_HEAD_DIM <- true
+
+MODEL_HEAD_DIM <- (HAS_HEAD_DIM ? (128) : ((MODEL_DIM / NUM_HEADS) :: Dim))
+
+QD <- ((NUM_HEADS * MODEL_HEAD_DIM) :: Dim)
+
+GQKV_DIM <- ((4 * QD) :: Dim)
+
+FFN <- ((4096) :: Dim)
+
+GATE_UP_DIM <- ((2 * FFN) :: Dim)
+
+H_CYCLES <- ((2) :: Int)
+
+L_CYCLES <- ((3) :: Int)
+
+EPS <- (1e-06)
+
+THETA <- (10000.0)
+
+MAX_POSITIONS <- ((4096) :: Dim)
+
+HAS_EMBED_SCALE <- true
+
+INIT_RANGE <- (0.025515518153991442)
+
+EMBED_SCALE <- (HAS_EMBED_SCALE ? (39.191835884530846) : ((1.0 / INIT_RANGE) :: Float))
+
+hrm_rms :: Tensor[B,S,D] -> Tensor[B,S,D]
+hrm_rms x = NN.rmsnorm_noscale x eps=EPS cast_float=true
+
+hrm_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+hrm_block x rope_sin rope_cos mask past_kv = do
+  xn <- hrm_rms x
+  a, new_kv <- scope@attn do
+    gqkv <- NN.linear@gqkv_proj xn dim=GQKV_DIM bias=false
+    gate_lin, q_lin, k_lin, v_lin <- Tensor.split gqkv sizes=[QD, QD, QD, QD]
+    q <- Tensor.reshape q_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    k <- Tensor.reshape k_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    v <- Tensor.reshape v_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    gate <- Tensor.reshape gate_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    q, k <- Positions.rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- Attention.attention q k v mask
+    a <- Activations.sigmoid gate |> Math.mul a
+    a <- Attention.merge_heads a |> NN.linear@o_proj dim=MODEL_DIM
+    return a, new_kv
+  x <- x + a
+  xn <- hrm_rms x
+  m <- scope@mlp do
+    gate_up <- NN.linear@gate_up_proj xn dim=GATE_UP_DIM bias=false
+    gate, up <- Tensor.split gate_up sizes=[FFN, FFN]
+    return gate |> Activations.silu |> Math.mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+hrm_stack :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+hrm_stack@path x rope_sin rope_cos mask read_kv work_kv cycle_offset = do
+  x, work_kv <- for@layers i <- [0..NUM_LAYERS_I) carry (x, work_kv) do
+    slot <- cycle_offset + i
+    past_i <- Cache.index read_kv slot
+    x, new_i <- hrm_block x rope_sin rope_cos mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- hrm_rms x
+  return x, work_kv
+
+hrm_l_cycles :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH], Int)
+hrm_l_cycles z_l z_h rope_sin rope_cos mask read_kv work_kv slot_offset = do
+  z_l, work_kv, slot_offset <- for i <- [0..L_CYCLES) carry (z_l, work_kv, slot_offset) do
+    x_l <- z_l + z_h
+    z_l, work_kv <- hrm_stack@model.L_module x_l rope_sin rope_cos mask read_kv work_kv slot_offset
+    slot_offset <- slot_offset + NUM_LAYERS_I
+    yield z_l, work_kv, slot_offset
+  return z_l, work_kv, slot_offset
+
+hrm_text :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+hrm_text input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- Masking.mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- Positions.position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- Positions.rope_base_factors pos_ids MODEL_HEAD_DIM THETA
+  key_len <- Masking.mask_length_for_input input_ids attn_mask past_length
+  mask <- Masking.causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  x <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM scale=EMBED_SCALE
+  z0 <- ((Params.param @@model.z_L_init) :: Tensor[MODEL_DIM])
+  z_l <- Tensor.reshape z0 shape=[1, 1, MODEL_DIM] |> Tensor.expand shape=[B, S, MODEL_DIM] |> Tensor.cast_like x
+  z_h <- x
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  slot_offset <- 0
+  z_h, z_l, work_kv, slot_offset <- for i <- [0..H_CYCLES) carry (z_h, z_l, work_kv, slot_offset) do
+    z_l, work_kv, slot_offset <- hrm_l_cycles z_l z_h rope_sin rope_cos mask read_kv work_kv slot_offset
+    x_h <- z_h + z_l
+    z_h, work_kv <- hrm_stack@model.H_module x_h rope_sin rope_cos mask read_kv work_kv slot_offset
+    slot_offset <- slot_offset + NUM_LAYERS_I
+    yield z_h, z_l, work_kv, slot_offset
+  logits <- NN.linear@@lm_head z_h dim=VOCAB_SIZE bias=false
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  return logits, new_kv
