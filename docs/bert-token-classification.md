@@ -1,5 +1,8 @@
 # BERT token classification
 
+Measured Linux CPU/CUDA results: [MiniLM / Few-NERD report](bert-token-classification-results.md).
+Apple Silicon measurements are pending.
+
 `synapse/models/bert/generic-bert-token-classification.axon` implements an
 inference-only BERT encoder followed by a learned token-classification head.
 The shared encoder also serves the existing masked-LM definition. Supported

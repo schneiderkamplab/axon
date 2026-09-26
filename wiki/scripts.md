@@ -3,8 +3,10 @@
 ## Public BERT token-classification experiment
 
 Owner: Axon contributors/agents. Last confirmed: 2026-09-26. Confidence: high
-for Linux training, export, and quality runs; Mac execution remains pending.
+for Linux training, export, quality, and timing runs; Mac execution remains pending.
 Uses: [public runbook](../docs/bert-token-classification.md).
+Validated-by: [measured report](../docs/bert-token-classification-results.md) and
+`log/bert-ner-20260926/public-results.json.gz` (all ten configurations passed quality gates).
 
 | Script | Purpose / CLI | Inputs | Outputs |
 |---|---|---|---|
