@@ -14,7 +14,9 @@ On this machine, ORT CUDA FP16 had the lowest batch-1 latency across the three
 measured lengths. CPU INT8 was faster than CPU FP32 with a small F1 reduction.
 Axon CUDA FP16 reduced batch-1 latency relative to HF CUDA FP16, while HF had
 higher throughput at batch 32 / sequence 128. These results do not establish
-one fastest runtime for every workload. **MLX and Core ML remain unmeasured.**
+one fastest runtime for every workload. MLX and Core ML were not measured in this
+Linux run. Subsequent [Mac CPU/MPS/MLX measurements](bert-token-classification-mac-results.md)
+use the updated Axon implementation; Core ML remains unmeasured.
 
 [Raw results and all 18,000 timing samples (gzip JSON)](../log/bert-ner-20260926/public-results.json.gz)
 include per-label quality, precision flags, provider placement, versions, hashes,

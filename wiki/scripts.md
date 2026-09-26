@@ -3,7 +3,8 @@
 ## Public BERT token-classification experiment
 
 Owner: Axon contributors/agents. Last confirmed: 2026-09-26. Confidence: high
-for Linux training, export, quality, and timing runs; Mac execution remains pending.
+for Linux training/export and the audited Linux and M1 Pro quality/timing runs.
+Timing conclusions remain limited to the recorded hardware and desktop conditions.
 Uses: [public runbook](../docs/bert-token-classification.md).
 Validated-by: [measured report](../docs/bert-token-classification-results.md) and
 `log/bert-ner-20260926/public-results.json.gz` (all ten configurations passed quality gates).
@@ -14,6 +15,20 @@ ONNX artifact hashes are unchanged. The run-local `run_validation.py`,
 `check_compile.py`, and `summarize.py` document this follow-up's execution and
 aggregation. `report_ner.py` covers the original single-process result naming;
 do not treat individual `-r0/-r1/-r2` files as one contiguous sampling run.
+
+The [Mac comparison](../docs/bert-token-classification-mac-results.md) uses the
+corrected MLX export and records both the earlier desktop session and a quieter
+performance-only confirmation. All ten quality gates passed; the confirmation
+reuses quality. Each condition has 30 fresh processes and 18,000 samples.
+The run-local `log/ner-mac-public-20260926/build_results.py` is owned by Axon
+contributors/agents: `--previous <extracted earlier archive> --quiet <extracted
+confirmation archive> --output log/<publication>`. Requires NumPy; run without
+Python `-O`. It reads archives without executing supplied code, verifies checksums,
+quality counts/gates, samples/statistics, run order, earlier-file preservation,
+and supplied comparisons, then writes sanitized `public-results.json.gz`,
+`audit.json`, and `all-case-comparison.csv`. See its adjacent README for exact
+reproduction commands and archive hashes. Never pool the two conditions or pick
+the faster run per case; process min–max ranges are not confidence intervals.
 
 | Script | Purpose / CLI | Inputs | Outputs |
 |---|---|---|---|
@@ -39,3 +54,6 @@ and emitted lookups checked against real checkpoint/packed keys, without MLX
 execution. Source parsing alone is insufficient validation of emitted lookups.
 The `-mlxfix` handoff supersedes the initial optimized bundle for Mac MLX runs;
 the small overlay is applied to a fresh copy of the existing bundle.
+Subsequent full Mac quality and timing runs validate all four MLX modes. This
+supersedes the pending Mac status of the earlier source-only validation, while
+preserving its role in diagnosing the missing packed weight scope.

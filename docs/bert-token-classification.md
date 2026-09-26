@@ -2,7 +2,7 @@
 
 Measured Linux CPU/CUDA results: [optimized HF/Axon comparison](bert-token-classification-optimized-results.md)
 and [original report including ONNX](bert-token-classification-results.md).
-Apple Silicon measurements are pending.
+Measured Apple Silicon CPU/MPS/MLX results: [Mac comparison, including the quieter confirmation](bert-token-classification-mac-results.md).
 
 `synapse/models/bert/generic-bert-token-classification.axon` implements an
 inference-only BERT encoder followed by a learned token-classification head.

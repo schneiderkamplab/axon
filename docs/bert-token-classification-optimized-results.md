@@ -74,6 +74,6 @@ Includes tokenization, windowing, transfers, inference, and IO span decoding on 
 - 198 regression tests passed; five tinygrad cases skipped because clang was unavailable. Separate source-only MLX generation checks passed.
 - Generated public forward passed full-graph CUDA compilation parity in FP32/FP16, under no_grad and inference_mode, with padded inputs. This is a separate smoke check; the performance tables use eager execution.
 - The original CUDA attempt failed because the sandbox could not access the GPU. Its failed log is retained; successful CUDA runs used host GPU access.
-- Mac results remain pending. MLX packing requires unquantized FP32/FP16 weights. Compilation/export success is not evidence of Apple Silicon speed or quality.
+- [Mac CPU/MPS/MLX results](bert-token-classification-mac-results.md) now include ten passing full-test quality checks and two separate performance runs. They use the subsequent MLX path correction and the same frozen weights. MLX packing requires unquantized FP32/FP16 weights. No Core ML measurement is available.
 
 Frozen checkpoint SHA-256: `944c16a050788efd4ab111c165ea40edbc8759febdf4f0800f9c4fb1026f2120`.
