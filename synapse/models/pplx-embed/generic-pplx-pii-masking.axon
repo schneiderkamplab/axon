@@ -1,0 +1,81 @@
+{-# CHECKPOINTS ["perplexity-ai/pplx-pii-masking", "blackpen-sk/eraser"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (silu, sigmoid)
+import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Math (div, mul)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Config
+import NN
+import Tensor
+
+
+
+-- perplexity-ai/pplx-pii-masking (HF model_type "pii_masking") and its
+-- fine-tunes (e.g. blackpen-sk/eraser). Backbone is PPLXQwen3Model =
+-- stock Qwen3 with every layer non-causal (bidirectional padding mask,
+-- no KV cache, plain arange position ids); backbone hyper-parameters live
+-- under config["backbone"]. Heads: token_cls_head (BIOES labels,
+-- num_token_labels = 1 + 4 * num PII types: 37 for pplx, 237 for eraser,
+-- fp32) and sensitivity_head (mean-pooled hidden -> 1 logit -> sigmoid,
+-- fp32). Checkpoint layout is bound directly (backbone.layers.N.*,
+-- token_cls_head.*, sensitivity_head.*); viterbi.* tensors drive the
+-- constrained BIOES decoder, which is post-processing, not part of the graph.
+MODEL_DIM <- ((Config.dim @'backbone.hidden_size' default=1024) :: Dim)
+NUM_LAYERS <- ((Config.dim @'backbone.num_hidden_layers' default=28) :: Dim)
+NUM_HEADS <- ((Config.dim @'backbone.num_attention_heads' default=16) :: Dim)
+KVH <- ((Config.dim @'backbone.num_key_value_heads' default=8) :: Dim)
+HEAD_DIM <- ((Config.dim @'backbone.head_dim' default=128) :: Dim)
+QD <- do
+  return (NUM_HEADS * HEAD_DIM :: Dim)
+KVD <- do
+  return (KVH * HEAD_DIM :: Dim)
+FFN <- ((Config.dim @'backbone.intermediate_size' default=3072) :: Dim)
+EPS <- (Config.float @'backbone.rms_norm_eps' default=1e-06)
+THETA <- (Config.float @'backbone.rope_parameters.rope_theta' default=1000000.0)
+NUM_LABELS <- ((Config.dim @@num_token_labels default=37) :: Dim)
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
+head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+pii_masking_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,NUM_HEADS,S,S] -> Tensor[B,S,D]
+pii_masking_block x rope_sin rope_cos mask additive_mask = do
+  xn <- rms@input_layernorm x
+  a <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=NUM_HEADS |> head_rms@q_norm
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> head_rms@k_norm
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    return attention_gqa_with_additive_mask q k v additive_mask mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
+  return x + m
+
+pplx_pii_masking :: TokenIds[B,S] -> ?Mask[B,S,S] -> (Tensor[B,S,NUM_LABELS], Tensor[B,1])
+pplx_pii_masking input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids HEAD_DIM THETA) :: (Tensor[B,1,S,HEAD_DIM], Tensor[B,1,S,HEAD_DIM]))
+  mask <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  additive_mask <- mask_to_additive_for_input input_ids mask 1 |> Tensor.expand shape=[B, NUM_HEADS, S, S]
+  x <- scope@backbone do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
+      x <- pii_masking_block x rope_sin rope_cos mask additive_mask
+      yield x
+    return rms@norm x
+  -- reference casts last_hidden_state to fp32 before both heads
+  h <- Tensor.cast x dtype="float32"
+  logits <- NN.linear@token_cls_head h dim=NUM_LABELS bias=true
+  pooled <- Tensor.sum h dim=1 keepdim=false
+  pooled <- div pooled S
+  sensitivity <- NN.linear@sensitivity_head pooled dim=1 bias=true |> sigmoid
+  return logits, sensitivity
