@@ -109,10 +109,12 @@ class GraphOptimizeConfig:
 _SPECIALIZE_MODES = {"off", "single-callsite", "monomorphize"}
 _TORCH_BACKEND_INTRINSICS = frozenset(
     {
+        "__torch_add_rmsnorm_noscale",
         "__torch_expert_packed_swiglu_ffn",
         "__torch_expert_swiglu_ffn",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
+        "__torch_rmsnorm_noscale",
         "__torch_rmsnorm_scaled",
         "__torch_sdpa",
         "__torch_selected_expert_clamped_packed_swiglu_ffn",
@@ -120,7 +122,11 @@ _TORCH_BACKEND_INTRINSICS = frozenset(
         "__torch_selected_expert_packed_swiglu_ffn",
         "__torch_selected_expert_relu2_ffn",
         "__torch_selected_expert_swiglu_ffn",
+        "__torch_sigmoid_gated_merge",
+        "__torch_sigmoid_gated_mul",
+        "__torch_split_swiglu",
         "__torch_swiglu_ffn",
+        "__torch_gelu_ffn",
         "__torch_topk_normalize",
         "__torch_weighted_topk_sum",
     }
@@ -159,13 +165,19 @@ _JAX_BACKEND_INTRINSICS = frozenset(
 )
 _TRITON_BACKEND_INTRINSICS = frozenset(
     {
+        "__triton_add_rmsnorm_noscale",
         "__triton_rmsnorm_noscale",
         "__triton_rmsnorm_scaled",
         "__triton_rmsnorm_unit_offset_scaled",
+        "__triton_layernorm",
         "__triton_geglu_tanh_activation",
         "__triton_sdpa",
         "__triton_selected_expert_packed_swiglu_ffn",
+        "__triton_sigmoid_gated_merge",
+        "__triton_sigmoid_gated_mul",
+        "__triton_split_swiglu",
         "__triton_swiglu_activation",
+        "__torch_gelu_ffn",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
     }
@@ -390,7 +402,7 @@ def _maybe_rewrite_node_to_backend_sdpa(
                 local_provenance=local_provenance,
             )
             keep_prov = _graph_value_ref_provenance(keep, local_provenance=local_provenance)
-            if fact.additive_mask != fact.keep and not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
+            if fact.additive_mask != fact.keep and not fact.precomputed_additive_mask and not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
                 continue
         if fact.default_scale or fact.scale is None:
             scale_operand: GraphOperand = GraphLiteral(value=None, type_expr=TypeNull())
@@ -894,6 +906,31 @@ def _collect_parameter_path_keys_from_provenance(
             memo[memo_key] = local
             out.update(local)
             return
+        if provenance.op == "__torch_gelu_ffn" and len(provenance.args) >= 8:
+            for index in (1, 2):
+                key = _path_key_from_provenance(
+                    provenance.args[index],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            if isinstance(provenance.args[3], GraphLiteral) and provenance.args[3].value:
+                key = _path_key_from_provenance(
+                    provenance.args[4],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            if isinstance(provenance.args[5], GraphLiteral) and provenance.args[5].value:
+                key = _path_key_from_provenance(
+                    provenance.args[6],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
         if provenance.op == "_params_param" and provenance.args:
             key = _path_key_from_provenance(
                 provenance.args[0],
@@ -1018,6 +1055,17 @@ def _semantic_parameter_path_counts(
             for operand in (node.inputs[1], node.inputs[2], node.inputs[3]):
                 if isinstance(operand, GraphPath):
                     counts[_graph_path_key(operand)] += 1
+            continue
+        if node.op.name == "__torch_gelu_ffn" and len(node.inputs) >= 8:
+            for operand in (node.inputs[1], node.inputs[2]):
+                if isinstance(operand, GraphPath):
+                    counts[_graph_path_key(operand)] += 1
+            if isinstance(node.inputs[3], GraphLiteral) and bool(node.inputs[3].value):
+                if isinstance(node.inputs[4], GraphPath):
+                    counts[_graph_path_key(node.inputs[4])] += 1
+            if isinstance(node.inputs[5], GraphLiteral) and bool(node.inputs[5].value):
+                if isinstance(node.inputs[6], GraphPath):
+                    counts[_graph_path_key(node.inputs[6])] += 1
             continue
         input_provenances = frozenset(
             item
@@ -1285,7 +1333,7 @@ def _linear_pack_candidate(
         weight_paths.append(weight_path)
         if bias_enabled and isinstance(bias_path, GraphPath):
             bias_paths.append(bias_path)
-        if len(nodes) == 3:
+        if len(nodes) >= 4:
             break
     if len(nodes) < 2:
         return None
@@ -1614,6 +1662,143 @@ def _module_value_ref_counts(module: GraphModule) -> Counter[str]:
     return counts
 
 
+_GELU_EXACT_OPS = {"Activations.gelu", "_activations_gelu"}
+_GELU_TANH_OPS = {
+    "Activations.gelu_new",
+    "Activations.gelu_pytorch_tanh",
+    "_activations_gelu_new",
+    "_activations_gelu_pytorch_tanh",
+}
+
+
+def _gelu_ffn_extract_linear(
+    node: GraphNode,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, bool] | None:
+    if node.op.name in ("NN.linear", "_linear") and len(node.inputs) >= 8:
+        base, x, _dim, bias, transpose, expert, weight_leaf, bias_leaf = node.inputs[:8]
+        if not (
+            isinstance(transpose, GraphLiteral)
+            and transpose.value is False
+            and isinstance(expert, GraphLiteral)
+            and expert.value is None
+        ):
+            return None
+        weight_path = _compose_graph_path_operand(base, weight_leaf)
+        bias_flag = isinstance(bias, GraphLiteral) and bool(bias.value)
+        bias_path = _compose_graph_path_operand(base, bias_leaf) if bias_flag else GraphLiteral(value=None, type_expr=TypeNull())
+        if not isinstance(weight_path, GraphPath):
+            return None
+        if bias_flag and not isinstance(bias_path, GraphPath):
+            return None
+        return x, weight_path, bias_path, bias_flag
+    if node.op.name == "NN.linear" and len(node.inputs) >= 5:
+        x = node.inputs[1]
+        weight_path = node.inputs[3]
+        bias_path = node.inputs[4]
+        if not isinstance(weight_path, GraphPath) or not isinstance(bias_path, GraphPath):
+            return None
+        return x, weight_path, bias_path, True
+    return None
+
+
+def _torch_gelu_ffn_candidate(
+    up_node: GraphNode,
+    gelu_node: GraphNode,
+    down_node: GraphNode,
+    *,
+    value_ref_counts: Mapping[str, int],
+    parameter_path_counts: Mapping[str, int],
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    up_info = _gelu_ffn_extract_linear(up_node)
+    if up_info is None:
+        return None
+    up_x, up_weight_path, up_bias_path, up_bias_flag = up_info
+    if gelu_node.op.name not in _GELU_EXACT_OPS and gelu_node.op.name not in _GELU_TANH_OPS:
+        return None
+    if len(gelu_node.inputs) != 1:
+        return None
+    down_info = _gelu_ffn_extract_linear(down_node)
+    if down_info is None:
+        return None
+    _down_x, down_weight_path, down_bias_path, down_bias_flag = down_info
+    if len(up_node.outputs) != 1 or len(gelu_node.outputs) != 1 or len(down_node.outputs) != 1:
+        return None
+    up_out_name = up_node.outputs[0].name
+    gelu_out_name = gelu_node.outputs[0].name
+    if value_ref_counts.get(up_out_name, 0) != 1:
+        return None
+    if value_ref_counts.get(gelu_out_name, 0) != 1:
+        return None
+    up_out_ref = GraphValueRef(up_out_name, up_node.outputs[0].type_expr, up_node.outputs[0].dims)
+    gelu_out_ref = GraphValueRef(gelu_out_name, gelu_node.outputs[0].type_expr, gelu_node.outputs[0].dims)
+    if gelu_node.inputs[0] != up_out_ref:
+        return None
+    if down_node.inputs[1] != gelu_out_ref:
+        return None
+    if parameter_path_counts.get(_graph_path_key(up_weight_path), 0) != 1:
+        return None
+    if parameter_path_counts.get(_graph_path_key(down_weight_path), 0) != 1:
+        return None
+    if up_bias_flag and parameter_path_counts.get(_graph_path_key(up_bias_path), 0) != 1:
+        return None
+    if down_bias_flag and parameter_path_counts.get(_graph_path_key(down_bias_path), 0) != 1:
+        return None
+    gelu_tanh = gelu_node.op.name in _GELU_TANH_OPS
+    return (
+        up_x,
+        up_weight_path,
+        down_weight_path,
+        GraphLiteral(value=up_bias_flag, type_expr=TypeBool()),
+        up_bias_path if up_bias_flag else GraphLiteral(value=None, type_expr=TypeNull()),
+        GraphLiteral(value=down_bias_flag, type_expr=TypeBool()),
+        down_bias_path if down_bias_flag else GraphLiteral(value=None, type_expr=TypeNull()),
+        GraphLiteral(value=gelu_tanh, type_expr=TypeBool()),
+    )
+
+
+def _rewrite_torch_gelu_ffn_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_gelu_ffn",
+) -> GraphProgram:
+    parameter_path_counts = _direct_parameter_path_counts(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 2 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_gelu_ffn_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                value_ref_counts=value_ref_counts,
+                parameter_path_counts=parameter_path_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            down_node = module.nodes[index + 2]
+            changed = True
+            new_nodes.append(
+                replace(
+                    down_node,
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 3
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
 def _torch_swiglu_ffn_candidate(
     gate_up_node: GraphNode,
     silu_node: GraphNode,
@@ -1763,6 +1948,40 @@ def _triton_swiglu_activation_candidate(
     return None
 
 
+def _triton_sigmoid_gated_mul_candidate(
+    mul_node: GraphNode,
+    *,
+    output_provenance: GraphProvenance | None,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand] | None:
+    if mul_node.op.name not in {"_mul", "core.binary.*"}:
+        return None
+    if len(mul_node.outputs) != 1:
+        return None
+    if output_provenance is None or output_provenance.kind != "op":
+        return None
+    if output_provenance.op not in {"_mul", "core.binary.*"} or len(output_provenance.args) != 2:
+        return None
+    left, right = output_provenance.args
+    if left.kind == "op" and left.op == "_activations_sigmoid" and len(left.args) == 1:
+        gate = _provenance_to_graph_operand(left.args[0], provenance_to_operand=provenance_to_operand)
+        up = _provenance_to_graph_operand(right, provenance_to_operand=provenance_to_operand)
+        if gate is not None and up is not None:
+            lt = graph_operand_type(gate)
+            rt = graph_operand_type(up)
+            if isinstance(lt, TypeTensor) and isinstance(rt, TypeTensor):
+                return (gate, up)
+    if right.kind == "op" and right.op == "_activations_sigmoid" and len(right.args) == 1:
+        gate = _provenance_to_graph_operand(right.args[0], provenance_to_operand=provenance_to_operand)
+        up = _provenance_to_graph_operand(left, provenance_to_operand=provenance_to_operand)
+        if gate is not None and up is not None:
+            lt = graph_operand_type(gate)
+            rt = graph_operand_type(up)
+            if isinstance(lt, TypeTensor) and isinstance(rt, TypeTensor):
+                return (gate, up)
+    return None
+
+
 def _triton_geglu_tanh_activation_candidate(
     mul_node: GraphNode,
     *,
@@ -1826,6 +2045,45 @@ def _triton_rmsnorm_noscale_candidate(
     ):
         return None
     return x, eps, dim, cast_float
+
+
+def _triton_layernorm_candidate(
+    node: GraphNode,
+    *,
+    output_provenance: GraphProvenance | None,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    if len(node.outputs) != 1:
+        return None
+    if output_provenance is None or output_provenance.kind != "op":
+        return None
+    if output_provenance.op != "_layernorm" or len(output_provenance.args) < 7:
+        return None
+    base = _provenance_to_graph_operand(output_provenance.args[0], provenance_to_operand=provenance_to_operand)
+    x = _provenance_to_graph_operand(output_provenance.args[1], provenance_to_operand=provenance_to_operand)
+    eps_prov = output_provenance.args[2]
+    eps = _provenance_to_graph_operand(eps_prov, provenance_to_operand=provenance_to_operand)
+    if eps is None and eps_prov.kind == "global" and eps_prov.name:
+        eps = GraphValueRef(eps_prov.name, TypeFloat(), None)
+    dim = _provenance_to_graph_operand(output_provenance.args[3], provenance_to_operand=provenance_to_operand)
+    weight_leaf = _provenance_to_graph_operand(output_provenance.args[4], provenance_to_operand=provenance_to_operand)
+    bias_flag = _provenance_to_graph_operand(output_provenance.args[5], provenance_to_operand=provenance_to_operand)
+    bias_leaf = _provenance_to_graph_operand(output_provenance.args[6], provenance_to_operand=provenance_to_operand)
+    if any(o is None for o in (base, x, eps, dim, weight_leaf, bias_flag, bias_leaf)):
+        return None
+    if not (
+        isinstance(dim, GraphLiteral)
+        and (dim.value is None or dim.value == -1)
+    ):
+        return None
+    weight_path = _compose_graph_path_operand(base, weight_leaf)
+    bias_path = _compose_graph_path_operand(base, bias_leaf)
+    if not isinstance(weight_path, GraphPath):
+        return None
+    bias_enabled = isinstance(bias_flag, GraphLiteral) and bool(bias_flag.value)
+    if bias_enabled and not isinstance(bias_path, GraphPath):
+        return None
+    return x, eps, dim, weight_path, bias_flag, bias_path if bias_enabled else GraphLiteral(value=None, type_expr=TypeNull())
 
 
 def _triton_rmsnorm_scaled_candidate(
@@ -2079,7 +2337,45 @@ def _rewrite_triton_rmsnorm_noscale_intrinsics(graph: GraphProgram) -> GraphProg
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
-def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_triton_layernorm_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_layernorm_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp("__triton_layernorm"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_swiglu_activation_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     changed = False
     new_modules: list[GraphModule] = []
@@ -2108,7 +2404,50 @@ def _rewrite_triton_swiglu_activation_intrinsics(graph: GraphProgram) -> GraphPr
             new_nodes.append(
                 replace(
                     mul_node,
-                    op=GraphOp("__triton_swiglu_activation"),
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 1
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_sigmoid_gated_mul_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            node = module.nodes[index]
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _triton_sigmoid_gated_mul_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            mul_node = node
+            changed = True
+            new_nodes.append(
+                replace(
+                    mul_node,
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -5056,14 +5395,34 @@ def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram) -> GraphProgra
     has_candidate_shape = False
     for module in graph.modules:
         names = [node.op.name for node in module.nodes]
+        cumsum_names = {"_cumsum", "Tensor.cumsum"}
+        slice_names = {"_slice", "Tensor.slice"}
+        cast_names = {"_cast_like", "Tensor.cast_like"}
+        div_names = {"core.binary./", "_div"}
         for index in range(len(names)):
-            if names[index : index + 4] == ["_cumsum", "_slice", "core.binary./", "_cast_like"]:
+            if (
+                names[index] in cumsum_names
+                and index + 3 < len(names)
+                and names[index + 2] in slice_names
+                and names[index + 3] in div_names
+            ):
                 has_candidate_shape = True
                 break
-            if names[index : index + 4] == ["_cumsum", "_slice", "_div", "_cast_like"]:
+            if (
+                names[index] in cumsum_names
+                and index + 2 < len(names)
+                and names[index + 1] in slice_names
+                and names[index + 2] in cast_names
+            ):
                 has_candidate_shape = True
                 break
-            if names[index : index + 3] == ["_cumsum", "_slice", "_cast_like"]:
+            if (
+                names[index] in cumsum_names
+                and index + 3 < len(names)
+                               and names[index + 1] in slice_names
+                and names[index + 2] in div_names
+                and names[index + 3] in cast_names
+            ):
                 has_candidate_shape = True
                 break
         if has_candidate_shape:
@@ -5746,6 +6105,7 @@ def _rewrite_mlx_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgram:
             and module.nodes[0].op.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
             and module.nodes[1].op.name == "Params.param_scale"
             and len(module.nodes[1].inputs) >= 2
+            and all(isinstance(out, GraphValue) for out in module.outputs)
         ):
             rmsnorm_node = module.nodes[0]
             param_scale_node = module.nodes[1]
@@ -5789,6 +6149,7 @@ def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgra
             and module.nodes[0].op.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
             and module.nodes[1].op.name == "Params.param_scale"
             and len(module.nodes[1].inputs) >= 2
+            and all(isinstance(out, GraphValue) for out in module.outputs)
         ):
             rmsnorm_node = module.nodes[0]
             param_scale_node = module.nodes[1]
@@ -5821,6 +6182,294 @@ def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgra
             changed = True
         else:
             new_modules.append(module)
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_rmsnorm_noscale_module_calls(
+    graph: GraphProgram,
+    *,
+    op_name: str,
+) -> GraphProgram:
+    modules_by_name = {m.name: m for m in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        if module.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1"):
+            new_modules.append(module)
+            continue
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if (
+                node.op.name not in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
+                or len(node.outputs) != 1
+                or node.attrs
+            ):
+                new_nodes.append(node)
+                continue
+            callee = modules_by_name.get(node.op.name)
+            if callee is None or len(callee.nodes) != 1:
+                new_nodes.append(node)
+                continue
+            rmsnorm_node = callee.nodes[0]
+            if rmsnorm_node.op.name != "_rmsnorm" or len(rmsnorm_node.inputs) < 4:
+                new_nodes.append(node)
+                continue
+            formal_to_actual = {
+                formal.name: actual
+                for formal, actual in zip(callee.inputs, node.inputs, strict=False)
+            }
+            x = formal_to_actual.get("x")
+            if x is None:
+                new_nodes.append(node)
+                continue
+            eps = formal_to_actual.get(
+                "eps",
+                rmsnorm_node.inputs[1]
+                if len(rmsnorm_node.inputs) > 1
+                else GraphLiteral(value=1e-06, type_expr=TypeFloat()),
+            )
+            dim = formal_to_actual.get(
+                "dim",
+                rmsnorm_node.inputs[2]
+                if len(rmsnorm_node.inputs) > 2
+                else GraphLiteral(value=None, type_expr=None),
+            )
+            cast_float = formal_to_actual.get(
+                "cast_float",
+                rmsnorm_node.inputs[3]
+                if len(rmsnorm_node.inputs) > 3
+                else GraphLiteral(value=False, type_expr=TypeBool()),
+            )
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp(op_name),
+                    inputs=(x, eps, dim, cast_float),
+                    attrs={},
+                )
+            )
+            changed = True
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_add_rmsnorm_noscale_intrinsics(
+    graph: GraphProgram,
+    *,
+    rmsnorm_op: str,
+    fused_op: str,
+) -> GraphProgram:
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        producer: dict[str, GraphNode] = {}
+        for node in module.nodes:
+            for out in node.outputs:
+                producer[out.name] = node
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if (
+                node.op.name == rmsnorm_op
+                and len(node.inputs) >= 4
+                and len(node.outputs) == 1
+                and not node.attrs
+            ):
+                x_operand = node.inputs[0]
+                if isinstance(x_operand, GraphValueRef):
+                    add_node = producer.get(x_operand.name)
+                    if (
+                        add_node is not None
+                        and add_node.op.name == "core.binary.+"
+                        and len(add_node.inputs) == 2
+                    ):
+                        eps = node.inputs[1]
+                        dim = node.inputs[2]
+                        cast_float = node.inputs[3]
+                        new_nodes.append(
+                            replace(
+                                node,
+                                op=GraphOp(fused_op),
+                                inputs=(add_node.inputs[0], add_node.inputs[1], eps, dim, cast_float),
+                                attrs={},
+                            )
+                        )
+                        changed = True
+                        continue
+            new_nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_split_swiglu_intrinsics(
+    graph: GraphProgram,
+    *,
+    swiglu_op: str,
+    fused_op: str,
+) -> GraphProgram:
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        producer: dict[str, GraphNode] = {}
+        for node in module.nodes:
+            for out in node.outputs:
+                producer[out.name] = node
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if (
+                node.op.name == swiglu_op
+                and len(node.inputs) == 2
+                and len(node.outputs) == 1
+                and not node.attrs
+            ):
+                gate_ref = node.inputs[0]
+                up_ref = node.inputs[1]
+                if isinstance(gate_ref, GraphValueRef) and isinstance(up_ref, GraphValueRef):
+                    gate_split = producer.get(gate_ref.name)
+                    up_split = producer.get(up_ref.name)
+                    if (
+                        gate_split is not None
+                        and gate_split is up_split
+                        and gate_split.op.name == "_split"
+                        and len(gate_split.outputs) == 2
+                        and gate_split.outputs[0].name == gate_ref.name
+                        and gate_split.outputs[1].name == up_ref.name
+                        and len(gate_split.inputs) >= 3
+                    ):
+                        tensor_in = gate_split.inputs[0]
+                        dim_in = gate_split.inputs[1]
+                        sizes_expr = gate_split.inputs[2]
+                        if isinstance(sizes_expr, GraphExpr) and len(sizes_expr.inputs) >= 2:
+                            size0 = sizes_expr.inputs[0]
+                            size1 = sizes_expr.inputs[1]
+                            new_nodes.append(
+                                replace(
+                                    node,
+                                    op=GraphOp(fused_op),
+                                    inputs=(tensor_in, dim_in, size0, size1),
+                                    attrs={},
+                                )
+                            )
+                            changed = True
+                            continue
+            new_nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_sigmoid_gated_merge_intrinsics(
+    graph: GraphProgram,
+    *,
+    sigmoid_op: str,
+    fused_op: str,
+) -> GraphProgram:
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        producer: dict[str, GraphNode] = {}
+        use_count: dict[str, int] = {}
+        node_by_output: dict[str, int] = {}
+        for idx, node in enumerate(module.nodes):
+            for out in node.outputs:
+                producer[out.name] = node
+                node_by_output[out.name] = idx
+                use_count[out.name] = 0
+        for node in module.nodes:
+            for inp in node.inputs:
+                if isinstance(inp, GraphValueRef):
+                    use_count[inp.name] = use_count.get(inp.name, 0) + 1
+                elif isinstance(inp, GraphExpr):
+                    for einp in inp.inputs:
+                        if isinstance(einp, GraphValueRef):
+                            use_count[einp.name] = use_count.get(einp.name, 0) + 1
+
+        skip_names: set[str] = set()
+        replacements: dict[str, GraphNode] = {}
+        for node in module.nodes:
+            if (
+                node.op.name == "_reshape"
+                and len(node.inputs) >= 2
+                and len(node.outputs) == 1
+                and isinstance(node.inputs[0], GraphValueRef)
+            ):
+                permute_node = producer.get(node.inputs[0].name)
+                if (
+                    permute_node is not None
+                    and permute_node.op.name == "_permute"
+                    and len(permute_node.inputs) >= 2
+                    and isinstance(permute_node.inputs[0], GraphValueRef)
+                ):
+                    perm_dims_input = permute_node.inputs[1]
+                    perm_dims: list[int] | None = None
+                    if isinstance(perm_dims_input, GraphExpr):
+                        if (
+                            perm_dims_input.op.name == "core.list"
+                            and len(perm_dims_input.inputs) == 4
+                            and all(isinstance(d, GraphLiteral) for d in perm_dims_input.inputs)
+                        ):
+                            perm_dims = [int(perm_dims_input.inputs[i].value) for i in range(4)]
+                    elif isinstance(perm_dims_input, GraphValueRef):
+                        dims_producer = producer.get(perm_dims_input.name)
+                        if (
+                            dims_producer is not None
+                            and dims_producer.op.name == "core.list"
+                            and len(dims_producer.inputs) == 4
+                            and all(isinstance(d, GraphLiteral) for d in dims_producer.inputs)
+                        ):
+                            perm_dims = [int(dims_producer.inputs[i].value) for i in range(4)]
+                    sig_node = None
+                    if perm_dims == [0, 2, 1, 3]:
+                        sig_node = producer.get(permute_node.inputs[0].name)
+                    if (
+                        sig_node is not None
+                        and sig_node.op.name == sigmoid_op
+                        and len(sig_node.inputs) == 2
+                        and len(sig_node.outputs) == 1
+                        and use_count.get(sig_node.outputs[0].name, 0) == 1
+                    ):
+                        gate_in = sig_node.inputs[0]
+                        a_in = sig_node.inputs[1]
+                        fused_node = replace(
+                            node,
+                            op=GraphOp(fused_op),
+                            inputs=(gate_in, a_in),
+                            attrs={},
+                        )
+                        replacements[node.outputs[0].name] = fused_node
+                        skip_names.add(sig_node.outputs[0].name)
+                        skip_names.add(permute_node.outputs[0].name)
+                        permute_idx = node_by_output[permute_node.outputs[0].name]
+                        reshape_idx = node_by_output[node.outputs[0].name]
+                        for mid_idx in range(permute_idx + 1, reshape_idx):
+                            mid_node = module.nodes[mid_idx]
+                            all_inputs_internal = True
+                            for inp in mid_node.inputs:
+                                if isinstance(inp, GraphValueRef):
+                                    if inp.name not in skip_names and inp.name != permute_node.outputs[0].name:
+                                        all_inputs_internal = False
+                                        break
+                                elif isinstance(inp, GraphExpr):
+                                    for einp in inp.inputs:
+                                        if isinstance(einp, GraphValueRef) and einp.name not in skip_names and einp.name != permute_node.outputs[0].name:
+                                            all_inputs_internal = False
+                                            break
+                            if all_inputs_internal:
+                                for out in mid_node.outputs:
+                                    skip_names.add(out.name)
+                        changed = True
+
+        if not replacements and not skip_names:
+            new_modules.append(module)
+            continue
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            out_name = node.outputs[0].name if len(node.outputs) == 1 else None
+            if out_name in replacements:
+                new_nodes.append(replacements[out_name])
+            elif any(out.name in skip_names for out in node.outputs):
+                continue
+            else:
+                new_nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
@@ -15430,6 +16079,16 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="torch_swiglu_ffn_intrinsics")
                 current = candidate
             candidate = (
+                _rewrite_torch_gelu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_gelu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_gelu_ffn_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_torch_expert_swiglu_ffn_intrinsics(current)
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_expert_swiglu_ffn")
                 else current
@@ -15498,6 +16157,66 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_rmsnorm_scaled_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_rmsnorm_noscale_module_calls(current, op_name="__torch_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_rmsnorm_noscale_module_calls")
+                current = candidate
+            candidate = (
+                _rewrite_add_rmsnorm_noscale_intrinsics(current, rmsnorm_op="__torch_rmsnorm_noscale", fused_op="__torch_add_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_add_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_add_rmsnorm_noscale_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_swiglu_activation_intrinsics(current, op_name="__torch_swiglu_activation")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_swiglu_activation")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_swiglu_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_split_swiglu_intrinsics(current, swiglu_op="__torch_swiglu_activation", fused_op="__torch_split_swiglu")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_split_swiglu")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_split_swiglu_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_mul_intrinsics(current, op_name="__torch_sigmoid_gated_mul")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_sigmoid_gated_mul")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_sigmoid_gated_mul_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_merge_intrinsics(current, sigmoid_op="__torch_sigmoid_gated_mul", fused_op="__torch_sigmoid_gated_merge")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_sigmoid_gated_merge")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_sigmoid_gated_merge_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-tinygrad":
             candidate = (
@@ -15781,6 +16500,16 @@ def optimize_graph_program(
                     _validate_optimizer_graph(candidate, phase="triton_gqa_repeat_elimination")
                 current = candidate
             candidate = (
+                _rewrite_torch_gelu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_gelu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_gelu_ffn_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_triton_rmsnorm_scaled_intrinsics(current)
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_rmsnorm_scaled")
                 else current
@@ -15801,6 +16530,26 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="triton_rmsnorm_noscale_intrinsics")
                 current = candidate
             candidate = (
+                _rewrite_rmsnorm_noscale_module_calls(current, op_name="__triton_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_rmsnorm_noscale_module_calls")
+                current = candidate
+            candidate = (
+                _rewrite_add_rmsnorm_noscale_intrinsics(current, rmsnorm_op="__triton_rmsnorm_noscale", fused_op="__triton_add_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_add_rmsnorm_noscale")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_add_rmsnorm_noscale_intrinsics")
+                current = candidate
+            candidate = (
                 _rewrite_triton_rmsnorm_unit_offset_scaled_intrinsics(current)
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_rmsnorm_unit_offset_scaled")
                 else current
@@ -15809,6 +16558,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_rmsnorm_unit_offset_scaled_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_triton_layernorm_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_layernorm")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_layernorm_intrinsics")
                 current = candidate
             candidate = (
                 _rewrite_triton_geglu_tanh_activation_intrinsics(current)
@@ -15838,7 +16597,7 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="triton_selected_expert_intrinsics")
                 current = candidate
             candidate = (
-                _rewrite_triton_swiglu_activation_intrinsics(current)
+                _rewrite_swiglu_activation_intrinsics(current, op_name="__triton_swiglu_activation")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_swiglu_activation")
                 else current
             )
@@ -15846,6 +16605,36 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_swiglu_activation_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_split_swiglu_intrinsics(current, swiglu_op="__triton_swiglu_activation", fused_op="__triton_split_swiglu")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_split_swiglu")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_split_swiglu_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_mul_intrinsics(current, op_name="__triton_sigmoid_gated_mul")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sigmoid_gated_mul")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_sigmoid_gated_mul_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_sigmoid_gated_merge_intrinsics(current, sigmoid_op="__triton_sigmoid_gated_mul", fused_op="__triton_sigmoid_gated_merge")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__triton_sigmoid_gated_merge")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="triton_sigmoid_gated_merge_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-vllm":
             candidate = (

@@ -2010,6 +2010,34 @@ class Codegen2GraphModel(nn.Module):
         hidden = self._move_to(hidden, down_weight.device)
         return F.linear(hidden, down_weight, None)
 
+    def _gelu_ffn(
+        self,
+        x: Any,
+        up_weight_path: Any,
+        down_weight_path: Any,
+        up_bias_flag: Any = True,
+        up_bias_path: Any = None,
+        down_bias_flag: Any = True,
+        down_bias_path: Any = None,
+        gelu_tanh: Any = False,
+    ) -> Any:
+        up_weight = self._required_param(str(up_weight_path), field="gelu_ffn.up.weight")
+        up_bias = None
+        if up_bias_flag and up_bias_path is not None:
+            up_bias = self._required_param(str(up_bias_path), field="gelu_ffn.up.bias")
+        x = self._move_to(x, up_weight.device)
+        hidden = F.linear(x, up_weight, up_bias)
+        if gelu_tanh:
+            hidden = F.gelu(hidden, approximate='tanh')
+        else:
+            hidden = F.gelu(hidden)
+        down_weight = self._required_param(str(down_weight_path), field="gelu_ffn.down.weight")
+        down_bias = None
+        if down_bias_flag and down_bias_path is not None:
+            down_bias = self._required_param(str(down_bias_path), field="gelu_ffn.down.bias")
+        hidden = self._move_to(hidden, down_weight.device)
+        return F.linear(hidden, down_weight, down_bias)
+
     def _expert_swiglu_ffn(
         self,
         x: Any,
@@ -2303,6 +2331,37 @@ class Codegen2GraphModel(nn.Module):
             out(self._swiglu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
             return True
 
+        if primitive == "_torch_swiglu_activation":
+            out(F.silu(args[0]) * args[1])
+            return True
+
+        if primitive == "_torch_split_swiglu":
+            x = args[0]
+            dim = int(args[1])
+            size0 = int(args[2])
+            size1 = int(args[3])
+            gate = x.narrow(dim, 0, size0)
+            up = x.narrow(dim, size0, size1)
+            out(F.silu(gate) * up)
+            return True
+
+        if primitive == "_torch_sigmoid_gated_mul":
+            out(torch.sigmoid(args[0]) * args[1])
+            return True
+
+        if primitive == "_torch_sigmoid_gated_merge":
+            gate = args[0]
+            a = args[1]
+            result = (torch.sigmoid(gate) * a).permute(0, 2, 1, 3).contiguous()
+            out(result.reshape(gate.shape[0], gate.shape[2], -1))
+            return True
+
+        if primitive == "_torch_gelu_ffn":
+            if len(args) < 8:
+                raise ValueError("__torch_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
+            out(self._gelu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]))
+            return True
+
         if primitive == "_torch_expert_swiglu_ffn":
             if len(args) < 5:
                 raise ValueError("__torch_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
@@ -2474,6 +2533,34 @@ class Codegen2GraphModel(nn.Module):
             else:
                 y = x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
                 y = weight * y
+            out(y)
+            return True
+
+        if primitive == "_torch_rmsnorm_noscale":
+            x = args[0]
+            eps = float(args[1]) if len(args) > 1 and not self._is_null(args[1]) else 1e-6
+            dim = args[2] if len(args) > 2 and not self._is_null(args[2]) else None
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else False
+            if dim is not None and int(dim) != -1:
+                raise ValueError("_torch_rmsnorm_noscale only supports dim=None/-1")
+            if cast_float:
+                x_f = x.float()
+                y = x_f * torch.rsqrt(torch.mean(x_f * x_f, dim=-1, keepdim=True) + eps)
+                out(y.to(dtype=x.dtype))
+            else:
+                out(x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps))
+            return True
+
+        if primitive == "_torch_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = float(args[2]) if len(args) > 2 and not self._is_null(args[2]) else 1e-6
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else True
+            s = x + r
+            x_calc = s.float() if cast_float else s
+            y = x_calc * torch.rsqrt(torch.mean(x_calc * x_calc, dim=-1, keepdim=True) + eps)
+            if cast_float:
+                y = y.to(dtype=x.dtype)
             out(y)
             return True
 
@@ -3901,6 +3988,20 @@ class _DirectTorchEmitter:
         add(lines, 8, "down_weight = self._param(down_weight_path)")
         add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
         add(lines, 8, "return F.linear(hidden, down_weight, None)")
+        add(lines, 4, "")
+        add(lines, 4, "def _gelu_ffn(self, x, up_weight_path, down_weight_path, up_bias_flag=True, up_bias_path=None, down_bias_flag=True, down_bias_path=None, gelu_tanh=False):")
+        add(lines, 8, "up_weight = self._param(up_weight_path)")
+        add(lines, 8, "up_bias = self._param(up_bias_path) if up_bias_flag and up_bias_path is not None else None")
+        add(lines, 8, "x = self._move_to(x, up_weight.device)")
+        add(lines, 8, "hidden = F.linear(x, up_weight, up_bias)")
+        add(lines, 8, "if gelu_tanh:")
+        add(lines, 12, "hidden = F.gelu(hidden, approximate='tanh')")
+        add(lines, 8, "else:")
+        add(lines, 12, "hidden = F.gelu(hidden)")
+        add(lines, 8, "down_weight = self._param(down_weight_path)")
+        add(lines, 8, "down_bias = self._param(down_bias_path) if down_bias_flag and down_bias_path is not None else None")
+        add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
+        add(lines, 8, "return F.linear(hidden, down_weight, down_bias)")
         add(lines, 4, "")
         add(lines, 4, "def _expert_linear_weight(self, x, expert_idx, weight_path, bias_value=None, transpose=False):")
         add(lines, 8, "weight = self._param(weight_path)")
@@ -5981,6 +6082,28 @@ class _DirectTorchEmitter:
                 f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
                 f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
             )
+        if primitive == "_torch_swiglu_activation":
+            return f"(F.silu({args[0]}) * {args[1]})"
+        if primitive == "_torch_split_swiglu":
+            x = args[0]
+            dim = args[1]
+            size0 = args[2]
+            size1 = args[3]
+            return f"(F.silu({x}.narrow(int({dim}), 0, int({size0}))) * {x}.narrow(int({dim}), int({size0}), int({size1})))"
+        if primitive == "_torch_sigmoid_gated_mul":
+            return f"(torch.sigmoid({args[0]}) * {args[1]})"
+        if primitive == "_torch_sigmoid_gated_merge":
+            g = args[0]
+            a = args[1]
+            return f"((torch.sigmoid({g}) * {a}).permute(0, 2, 1, 3).contiguous().reshape({g}.shape[0], {g}.shape[2], -1))"
+        if primitive == "_torch_gelu_ffn":
+            if len(args) < 8:
+                raise ValueError("__torch_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
+            return (
+                f"self._gelu_ffn({args[0]}, {args[1]}, {args[2]}, "
+                f"up_bias_flag={args[3]}, up_bias_path={args[4]}, "
+                f"down_bias_flag={args[5]}, down_bias_path={args[6]}, gelu_tanh={args[7]})"
+            )
         if primitive == "_torch_expert_swiglu_ffn":
             if len(args) < 5:
                 raise ValueError("__torch_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
@@ -6140,6 +6263,32 @@ class _DirectTorchEmitter:
             x_float = f"{x}.float()"
             y_float = f"({weight} * ({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype))"
             y = f"({weight} * ({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps})))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
+            return f"({y_float} if {cast_float} else {y})"
+        if primitive == "_torch_rmsnorm_noscale":
+            x = args[0]
+            eps = float_arg(1, "1e-6")
+            cast_float = bool_arg(3, "False")
+            x_float = f"{x}.float()"
+            y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
+            y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
+            if cast_float == "True":
+                return y_float
+            if cast_float == "False":
+                return y
+            return f"({y_float} if {cast_float} else {y})"
+        if primitive == "_torch_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = float_arg(2, "1e-6")
+            cast_float = bool_arg(3, "True")
+            s = f"({x} + {r})"
+            s_float = f"{s}.float()"
+            y_float = f"({s_float} * torch.rsqrt(torch.mean({s_float} * {s_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
+            y = f"({s} * torch.rsqrt(torch.mean({s} * {s}, dim=-1, keepdim=True) + {eps}))"
             if cast_float == "True":
                 return y_float
             if cast_float == "False":
