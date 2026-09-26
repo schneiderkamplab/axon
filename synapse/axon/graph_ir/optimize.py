@@ -1369,9 +1369,23 @@ def _direct_parameter_path_counts(graph: GraphProgram) -> Counter[str]:
     counts: Counter[str] = Counter()
     for module in graph.modules:
         for node in module.nodes:
-            for operand in (*node.inputs, *node.attrs.values()):
+            # Parameter leaves are counted by their composed semantic read below.
+            # Absolute leaves otherwise count twice and incorrectly block packing.
+            parameter_operands = (
+                {0, 6, 7} if node.op.name == "_linear" and len(node.inputs) >= 8
+                else {0, 4, 6} if node.op.name == "_layernorm" and len(node.inputs) >= 7
+                else set()
+            )
+            for operand in (
+                *(value for index, value in enumerate(node.inputs) if index not in parameter_operands),
+                *node.attrs.values(),
+            ):
                 _collect_direct_graph_path_keys(operand, counts)
-            if node.op.name == "_linear" and len(node.inputs) >= 8:
+            if node.op.name == "_embedding" and node.inputs:
+                weight_path = _compose_graph_path_operand(node.inputs[0], GraphPath(False, ("weight",)))
+                if isinstance(weight_path, GraphPath):
+                    counts[_graph_path_key(weight_path)] += 1
+            elif node.op.name == "_linear" and len(node.inputs) >= 8:
                 base, _x, _dim, bias, _transpose, _expert, weight_leaf, bias_leaf = node.inputs[:8]
                 weight_path = _compose_graph_path_operand(base, weight_leaf)
                 if isinstance(weight_path, GraphPath):
@@ -14860,7 +14874,7 @@ def _can_inline_forwarded_call_node(node: GraphNode, callee: GraphModule, inner:
         return (
             (
                 len(node.outputs) > 1
-                or forwarded.op.name in {"_reshape", "_permute", "_transpose", "_matmul", "_repeat"}
+                or forwarded.op.name in {"_reshape", "_permute", "_transpose", "_matmul", "_repeat", "_linear"}
             )
             and forwarded_output_types is not None
             and len(forwarded_output_types) == len(node.outputs)

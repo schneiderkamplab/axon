@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -151,3 +152,87 @@ def test_mlx_source_can_be_generated_without_running_mlx():
         },
     )
     ast.parse(code)
+    assert "_PACKED_PARAMETER_SPECS = ({" in code
+    assert "_common_parameter_pack_bindings(tensors, spec)" in code
+
+
+def test_optimized_encoder_packs_projections_on_load_and_reloads_without_stale_weights():
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    config = BertConfig(
+        vocab_size=89,
+        hidden_size=24,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        intermediate_size=48,
+        num_labels=7,
+    )
+    reference = BertForTokenClassification(config).eval()
+    model = generated_model(SOURCE, config, reference.state_dict(), optimized=True)
+    assert sum(key.startswith("__packed.") for key in model.state_dict_tensors) == 4
+    counts = Counter()
+
+    class CountOps(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            counts[str(func)] += 1
+            return func(*args, **(kwargs or {}))
+
+    ids = torch.ones((2, 11), dtype=torch.long)
+    with CountOps():
+        before = model(input_ids=ids, attn_mask=ids)
+    # Two embedding additions and two residuals per encoder layer, each once.
+    assert counts["aten.add.Tensor"] == 2 + 2 * config.num_hidden_layers
+    assert counts["aten.cat.default"] == 0
+    with torch.no_grad():
+        reference.bert.encoder.layer[0].attention.self.query.bias.add_(0.5)
+    model.load_state_dict(reference.state_dict())
+    after = model(input_ids=ids, attn_mask=ids)
+    with torch.inference_mode():
+        expected = reference(input_ids=ids, attention_mask=ids).logits
+    torch.testing.assert_close(after, expected, atol=1e-6, rtol=1e-5)
+    assert not torch.equal(before, after)
+
+
+@pytest.mark.parametrize("inference", [False, True])
+def test_generated_eval_forward_supports_fullgraph_aot_with_mask_views(inference):
+    config = BertConfig(
+        vocab_size=23,
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        num_labels=3,
+    )
+    reference = BertForTokenClassification(config).eval()
+    model = generated_model(SOURCE, config, reference.state_dict(), optimized=True)
+    compiled = torch.compile(model, backend="aot_eager", fullgraph=True)
+    with torch.inference_mode() if inference else torch.no_grad():
+        ids = torch.ones((2, 7), dtype=torch.long)
+        mask = torch.ones_like(ids)
+        mask[0, 4:] = 0
+        torch.testing.assert_close(
+            compiled(input_ids=ids, attn_mask=mask), model(input_ids=ids, attn_mask=mask)
+        )
+
+
+@pytest.mark.parametrize("window", [None, 0, 2])
+def test_bidirectional_padding_mask_preserves_shape_window_and_left_crop(tmp_path, window):
+    path = tmp_path / "unrelated.axon"
+    path.write_text("""import Masking (bidirectional_mask)
+main :: Tensor[B,H,Q,D] -> Tensor[B,H,K,D] -> Tensor[B,SM] -> ?Dim -> Tensor[B,1,Q,K]
+main q k padding window = bidirectional_mask q k padding_mask=padding window=window
+""")
+    graph = graph_for(path, "codegen2-torch:__torch_sdpa")
+    namespace = {}
+    exec(emit_model_code_from_graph_ir(graph), namespace)
+    model = namespace["GeneratedAxonModel"].from_state_dict({}).eval()
+    padding = torch.tensor([[1, 0, 1, 0, 1, 1], [0, 1, 1, 0, 0, 1]])
+    actual = model(
+        q=torch.zeros(2, 2, 3, 4), k=torch.zeros(2, 2, 5, 4), padding=padding, window=window
+    )
+    expected = padding[:, -5:].bool()[:, None, None, :].expand(2, 1, 3, 5)
+    if window is not None:
+        distance = torch.arange(5)[None, :] - (torch.arange(3)[:, None] + 2)
+        expected = expected & (distance.abs() <= window)
+    assert actual.shape == (2, 1, 3, 5)
+    torch.testing.assert_close(actual, expected)

@@ -6243,7 +6243,8 @@ def test_graph_optimizer_rewrites_dense_gate_up_linear_pair_for_torch() -> None:
     assert len(fused_keys) == 1
 
 
-def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_safety() -> None:
+@pytest.mark.parametrize("absolute_leaves", [False, True])
+def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_safety(absolute_leaves) -> None:
     x_type = _tensor("B", "S", 3)
     q_type = _tensor("B", "S", 5)
     k_type = _tensor("B", "S", 2)
@@ -6270,8 +6271,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
                             GraphLiteral(True, TypeBool()),
                             GraphLiteral(False, TypeBool()),
                             GraphLiteral(None, TypeNull()),
-                            GraphLiteral("weight", TypeString()),
-                            GraphLiteral("bias", TypeString()),
+                            GraphPath(True, ("q_proj", "weight")) if absolute_leaves else GraphLiteral("weight", TypeString()),
+                            GraphPath(True, ("q_proj", "bias")) if absolute_leaves else GraphLiteral("bias", TypeString()),
                         ),
                         attrs={},
                         outputs=(GraphValue("q", q_type, dims=q_type.dims),),
@@ -6299,8 +6300,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
                             GraphLiteral(True, TypeBool()),
                             GraphLiteral(False, TypeBool()),
                             GraphLiteral(None, TypeNull()),
-                            GraphLiteral("weight", TypeString()),
-                            GraphLiteral("bias", TypeString()),
+                            GraphPath(True, ("k_proj", "weight")) if absolute_leaves else GraphLiteral("weight", TypeString()),
+                            GraphPath(True, ("k_proj", "bias")) if absolute_leaves else GraphLiteral("bias", TypeString()),
                         ),
                         attrs={},
                         outputs=(GraphValue("k", k_type, dims=k_type.dims),),
@@ -6318,8 +6319,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
                             GraphLiteral(True, TypeBool()),
                             GraphLiteral(False, TypeBool()),
                             GraphLiteral(None, TypeNull()),
-                            GraphLiteral("weight", TypeString()),
-                            GraphLiteral("bias", TypeString()),
+                            GraphPath(True, ("v_proj", "weight")) if absolute_leaves else GraphLiteral("weight", TypeString()),
+                            GraphPath(True, ("v_proj", "bias")) if absolute_leaves else GraphLiteral("bias", TypeString()),
                         ),
                         attrs={},
                         outputs=(GraphValue("v", v_type, dims=v_type.dims),),
@@ -6371,7 +6372,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
     assert "v_proj.weight" not in model.state_dict_tensors
 
 
-def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere() -> None:
+@pytest.mark.parametrize("other_read", ["parameter", "embedding"])
+def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere(other_read) -> None:
     x_type = _tensor("B", "S", 3)
     q_type = _tensor("B", "S", 5)
     k_type = _tensor("B", "S", 2)
@@ -6448,8 +6450,12 @@ def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere() -> No
                     ),
                     GraphNode(
                         id="main:4",
-                        op=GraphOp("_params_param"),
-                        inputs=(GraphPath(True, ("k_proj", "weight")),),
+                        op=GraphOp("_embedding" if other_read == "embedding" else "_params_param"),
+                        inputs=(
+                            (GraphPath(True, ("k_proj",)), GraphValueRef("x", x_type, dims=x_type.dims), GraphLiteral(3, TypeDim()))
+                            if other_read == "embedding"
+                            else (GraphPath(True, ("k_proj", "weight")),)
+                        ),
                         attrs={},
                         outputs=(GraphValue("k_weight", TypeAny()),),
                         source_module="main",
