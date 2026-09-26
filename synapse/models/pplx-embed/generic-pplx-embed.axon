@@ -1,7 +1,7 @@
 {-# CHECKPOINTS ["perplexity-ai/pplx-embed-v1-0.6b"] #-}
 
 import Activations (silu)
-import Attention (attention, merge_heads, reshape_heads)
+import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
 import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
 import Math (div, mul)
 import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
@@ -38,17 +38,15 @@ rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
 head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-pplx_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
-pplx_block x rope_sin rope_cos mask = do
+pplx_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,NUM_HEADS,S,S] -> Tensor[B,S,D]
+pplx_block x rope_sin rope_cos mask additive_mask = do
   xn <- rms@input_layernorm x
   a <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=NUM_HEADS |> head_rms@q_norm
     k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> head_rms@k_norm
     v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- rope_pair_base_factors q k rope_sin rope_cos
-    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
-    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    return attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return attention_gqa_with_additive_mask q k v additive_mask mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
@@ -75,9 +73,10 @@ pplx_embed input_ids attn_mask = do
   pos_ids <- position_ids input_ids
   rope_sin, rope_cos <- ((rope_base_factors pos_ids HEAD_DIM THETA) :: (Tensor[B,1,S,HEAD_DIM], Tensor[B,1,S,HEAD_DIM]))
   mask <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  additive_mask <- mask_to_additive_for_input input_ids mask 1 |> Tensor.expand shape=[B, NUM_HEADS, S, S]
   x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
   x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
-    x <- pplx_block x rope_sin rope_cos mask
+    x <- pplx_block x rope_sin rope_cos mask additive_mask
     yield x
   x <- rms@norm x
   h <- Tensor.cast x dtype="float32"

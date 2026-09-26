@@ -69,27 +69,6 @@ synapse axon-test synapse/models/gemma3/gemma-3-270m.axon models/gemma-3-270m \
   --dtype float32 --max-len 128
 ```
 
-### Compiling pplx-pii-masking / eraser (bidirectional Qwen3 token classifiers)
-
-`synapse/models/pplx-embed/` holds the `perplexity-ai/pplx-embed-v1-0.6b` encoder family:
-`generic-pplx-pii-masking.axon` (token classification, covers `perplexity-ai/pplx-pii-masking`
-and its fine-tunes such as `blackpen-sk/eraser`; label count comes from `num_token_labels`) and
-`generic-pplx-embed.axon` (mean-pooled sentence embeddings). Local checkpoint directories live
-under `models/<org>/<name>` (gitignored).
-
-```bash
-# Materialize per-checkpoint files next to the generic source
-synapse axon-materialize synapse/models/pplx-embed/generic-pplx-pii-masking.axon --models-root models
-
-# Parity against the published reference forward (fp32)
-synapse axon-test synapse/models/pplx-embed/generic-pplx-pii-masking.axon models/perplexity-ai/pplx-pii-masking --dtype float32 --max-len 128
-synapse axon-test synapse/models/pplx-embed/generic-pplx-pii-masking.axon models/blackpen-sk/eraser --dtype float32 --max-len 128
-
-# MLX module (dims and label count are read from config.json when the weights are loaded)
-synapse axon-codegen-dump synapse/models/pplx-embed/generic-pplx-pii-masking.axon eraser_mlx.py \
-  --backend codegen2-mlx --optimize-ast --optimize-graph
-```
-
 ---
 
 ## The Axon Language

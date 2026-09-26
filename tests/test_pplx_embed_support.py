@@ -63,12 +63,12 @@ def test_pplx_fixtures_and_specs_are_declared() -> None:
     assert MODEL_SPECS["pplx_pii_masking"].repo_id == "perplexity-ai/pplx-pii-masking"
     assert MODEL_SPECS["pplx_pii_masking"].local_dir == "pplx_pii_masking"
     assert MODEL_SPECS["pplx_embed"].repo_id == "perplexity-ai/pplx-embed-v1-0.6b"
-    assert ("pplx_pii_masking", "pplx_pii_masking") in MATRIX_AXON_MODEL_DIR_PAIRS
+    assert ("pplx-pii-masking", "pplx_pii_masking") in MATRIX_AXON_MODEL_DIR_PAIRS
 
 
 def test_matrix_routes_pplx_pii_masking_as_masked_lm(tmp_path: Path) -> None:
     pair = _Pair(
-        axon_path=tmp_path / "pplx_pii_masking.axon", model_dir=tmp_path / "pplx_pii_masking"
+        axon_path=MODEL_DIR / "pplx-pii-masking.axon", model_dir=tmp_path / "checkpoint"
     )
     assert _resolve_model_task_for_pair(pair) == "masked_lm"
 
@@ -76,24 +76,17 @@ def test_matrix_routes_pplx_pii_masking_as_masked_lm(tmp_path: Path) -> None:
 def test_matrix_resolves_pplx_pii_masking_pair(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    examples_dir = tmp_path / "examples"
     models_dir = tmp_path / "models"
-    examples_dir.mkdir(parents=True, exist_ok=True)
-    models_dir.mkdir(parents=True, exist_ok=True)
-    (examples_dir / "pplx_pii_masking.axon").write_text(
-        "pplx_pii_masking :: Tensor -> Tensor\npplx_pii_masking x = x\n",
-        encoding="utf-8",
-    )
     (models_dir / "pplx_pii_masking").mkdir(parents=True, exist_ok=True)
     exit_code = run_axon_test_matrix(
-        examples_dir=examples_dir,
+        examples_dir=MODEL_DIR,
         models_dir=models_dir,
         dry_run=True,
         include=["pplx_pii_masking"],
     )
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "pplx_pii_masking.axon" in out
+    assert "pplx-pii-masking.axon" in out
     assert "/models/pplx_pii_masking" in out
 
 
@@ -173,11 +166,97 @@ def _mlx_graph(axon_path: Path):
 
 
 @pytest.mark.parametrize(
-    "axon_path", [GENERIC_PII_MASKING, GENERIC_EMBED], ids=["pii_masking", "embed"]
+    "axon_path",
+    [GENERIC_PII_MASKING, GENERIC_EMBED, MODEL_DIR / "pplx-pii-masking.axon",
+     MODEL_DIR / "eraser.axon", MODEL_DIR / "pplx-embed-v1-0.6b.axon"],
+    ids=["pii_masking", "embed", "pii_materialized", "eraser", "embed_materialized"],
 )
-def test_pplx_generic_files_lower_to_mlx(axon_path: Path) -> None:
+def test_pplx_files_lower_to_native_mlx_gqa(axon_path: Path) -> None:
     graph = _mlx_graph(axon_path)
     assert non_obvious_mlx_ops(graph) == ()
+    nodes = [node for module in graph.modules for node in module.nodes]
+    attention = [node for node in nodes if node.op.name == "__mlx_sdpa"]
+    assert attention
+    assert all(node.inputs[0].type_expr.dims[1] != node.inputs[1].type_expr.dims[1]
+               for node in attention)
+    assert not any(node.op.name == "_repeat" for node in nodes)
     code = emit_model_code_from_graph_ir(graph)
     assert "class AxonMlxModel" in code
     assert "import mlx.core as mx" in code
+
+
+@pytest.mark.parametrize("encoder_only", [False, True], ids=["classifier", "embedding"])
+def test_pplx_mlx_gqa_matches_qwen3_reference(encoder_only: bool) -> None:
+    mx = pytest.importorskip("mlx.core", exc_type=ImportError)
+    import numpy as np
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3Model
+
+    from synapse.axon.codegen2_mlx import torch_state_dict_to_mlx
+
+    torch.manual_seed(17)
+    payload = _tiny_pii_masking_payload()
+    # As in the real checkpoint, the query projection is wider than hidden_size.
+    payload["backbone"]["head_dim"] = 32
+    config = axon_test_module._build_pii_masking_hf_config(payload)
+    reference = axon_test_module._PiiMaskingTokenClassificationReference(
+        backbone=Qwen3Model(config).float().eval(),
+        cls_weight=torch.randn(37, 64),
+        cls_bias=torch.randn(37),
+    ).eval()
+    sensitivity_weight = torch.randn(1, 64) * 0.1
+    sensitivity_bias = torch.randn(1) * 0.1
+    state = dict(reference.backbone.state_dict())
+    if not encoder_only:
+        state = {f"backbone.{key}": value for key, value in state.items()}
+        state.update({
+            "token_cls_head.weight": reference.cls_weight.detach(),
+            "token_cls_head.bias": reference.cls_bias.detach(),
+            "sensitivity_head.weight": sensitivity_weight,
+            "sensitivity_head.bias": sensitivity_bias,
+        })
+    graph = _mlx_graph(GENERIC_EMBED if encoder_only else GENERIC_PII_MASKING)
+    namespace = {}
+    exec(emit_model_code_from_graph_ir(graph), namespace)
+    model = namespace["AxonMlxModel"].from_state_dict(
+        torch_state_dict_to_mlx(state),
+        model_config=payload["backbone"] if encoder_only else payload,
+    )
+    hidden = []
+    hook = reference.backbone.register_forward_hook(
+        lambda _module, _args, output: hidden.append(output.last_hidden_state)
+    )
+    try:
+        cases = [
+            ([[5]], None),
+            ([[5, 6, 7, 8, 9]], None),
+            ([[5, 6, 7, 8, 9], [5, 6, 7, 0, 0]], [[1, 1, 1, 1, 1], [1, 1, 1, 0, 0]]),
+            ([[0, 0, 5, 6, 7]], [[0, 0, 1, 1, 1]]),
+        ]
+        for ids_list, mask_list in cases:
+            ids = torch.tensor(ids_list)
+            mask = torch.tensor(mask_list) if mask_list is not None else None
+            hidden.clear()
+            with torch.no_grad():
+                expected = reference(input_ids=ids, attention_mask=mask)["logits"]
+                h = hidden[0]
+                sensitivity = torch.sigmoid(torch.nn.functional.linear(
+                    h.mean(dim=1), sensitivity_weight, sensitivity_bias
+                ))
+                if mask is None:
+                    embedding = h.mean(dim=1)
+                else:
+                    mf = mask.float().unsqueeze(-1)
+                    embedding = (h * mf).sum(dim=1) / mf.sum(dim=1)
+            actual = model.forward(
+                input_ids=mx.array(ids.numpy()),
+                attn_mask=mx.array(mask.numpy()) if mask is not None else None,
+            )
+            mx.eval(actual)
+            if encoder_only:
+                np.testing.assert_allclose(np.array(actual), embedding.numpy(), atol=1e-5, rtol=1e-5)
+            else:
+                assert set(actual) == {"logits", "sensitivity"}
+                np.testing.assert_allclose(np.array(actual["logits"]), expected.numpy(), atol=2e-5, rtol=1e-5)
+                np.testing.assert_allclose(np.array(actual["sensitivity"]), sensitivity.numpy(), atol=1e-6, rtol=1e-5)
+    finally:
+        hook.remove()

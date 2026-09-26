@@ -299,7 +299,7 @@ MATRIX_AXON_MODEL_DIRS: dict[str, tuple[str, ...]] = {
         "phi3_medium_128k_instruct",
     ),
     "phi3small": ("phi3_small_8k_instruct", "phi3_small_128k_instruct"),
-    "pplx_pii_masking": ("pplx_pii_masking",),
+    "pplx-pii-masking": ("pplx_pii_masking",),
     "qwen2_5_0_5b": ("qwen2_5_0_5b",),
     "roberta": ("roberta", "camembert", "xlm_roberta"),
     "smollm": (
