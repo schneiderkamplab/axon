@@ -7,7 +7,7 @@ from typing import Any
 
 from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
 from ..codegen2_common import normalize_primitive_op
-from ..codegen2_torch.core import _DirectTorchEmitter, graph_main_output_names
+from ..codegen2_torch.core import _DirectTorchEmitter, _packed_parameter_spec_payload, graph_main_output_names
 from ..graph_ir import GraphProgram, validate_graph_program
 
 SHARED_COMMON_PRIMITIVES: frozenset[str] = frozenset({
@@ -1371,7 +1371,11 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
 
     def _emit_load_state_dict(self, lines: list[str]) -> None:
         add = self._add
+        add(lines, 4, f"_PACKED_PARAMETER_SPECS = {tuple(_packed_parameter_spec_payload(item) for item in self.program.packed_parameters)!r}")
         add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, quantized=False, dtype=None):")
+        if self.program.packed_parameters:
+            add(lines, 8, "if quantize or quantized:")
+            add(lines, 12, "raise ValueError('Parameter packing requires unquantized weights')")
         add(lines, 8, "if quantized:")
         add(lines, 12, "state_dict = self._materialize_int8_quantized(dict(state_dict))")
         add(lines, 8, "else:")
@@ -1387,6 +1391,19 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "else:")
         add(lines, 16, "arr = self._from_numpy(v)")
         add(lines, 16, "tensors[str(k)] = arr.astype(target) if target is not None else arr")
+        if self.program.packed_parameters:
+            add(lines, 8, "for spec in self._PACKED_PARAMETER_SPECS:")
+            add(lines, 12, "for key, inputs in _common_parameter_pack_bindings(tensors, spec):")
+            add(lines, 16, "if key in tensors:")
+            add(lines, 20, "continue")
+            add(lines, 16, "values = [tensors.get(name) for name in inputs]")
+            add(lines, 16, "if not values or any(value is None for value in values):")
+            add(lines, 20, "continue")
+            add(lines, 16, "tensors[key] = mx.concatenate(values, axis=spec['dim'])")
+            add(lines, 16, "mx.eval(tensors[key])")
+            add(lines, 16, "if spec['remove_inputs']:")
+            add(lines, 20, "for name in inputs:")
+            add(lines, 24, "tensors.pop(name, None)")
         add(lines, 8, "")
         for path, op_type in sorted(self._static_param_ops.items()):
             safe = _path_to_safe_attr(path)
@@ -2016,6 +2033,7 @@ def emit_model_code_from_graph_ir(
             "    config_value as _common_config_value,",
             "    has_config_value as _common_has_config_value,",
             "    optional_state_value as _common_optional_state_value,",
+            "    parameter_pack_bindings as _common_parameter_pack_bindings,",
             "    render_path as _common_render_path,",
             "    required_state_value as _common_required_state_value,",
             "    require_value as _common_require_value,",

@@ -613,6 +613,7 @@ def test_worker_log_path_includes_pid_axon_and_model(tmp_path: Path) -> None:
 
 
 def test_run_worker_loop_writes_log_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_fixture_pair(tmp_path, "gpt2")
     pair = matrix_mod._Pair(tmp_path / "examples" / "gpt2.axon", tmp_path / "models" / "gpt2")
     seen: list[tuple] = []
 

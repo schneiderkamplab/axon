@@ -1,7 +1,60 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
+
+
+def parameter_pack_bindings(
+    state_keys: Iterable[str], spec: Mapping[str, Any], *, target_key: str | None = None
+) -> Iterator[tuple[str, list[str]]]:
+    """Resolve a parameter-pack recipe, including multi-segment path captures."""
+
+    def pattern_regex(pattern: str) -> re.Pattern[str]:
+        pieces, used, cursor = [], set(), 0
+        for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", pattern):
+            pieces.append(re.escape(pattern[cursor : match.start()]))
+            name = match.group(1)
+            pieces.append(f"(?P={name})" if name in used else f"(?P<{name}>.+?)")
+            used.add(name)
+            cursor = match.end()
+        pieces.append(re.escape(pattern[cursor:]))
+        return re.compile("^" + "".join(pieces) + "$")
+
+    def substitute(pattern: str, values: Mapping[str, str]) -> str:
+        for name, value in values.items():
+            pattern = pattern.replace("{" + name + "}", value)
+        return pattern
+
+    output = str(spec["output"])
+    inputs = tuple(str(item) for item in spec["inputs"])
+    candidates = []
+    regex = pattern_regex(output)
+    if target_key is not None:
+        match = regex.fullmatch(str(target_key))
+        if match is not None:
+            candidates.append((str(target_key), match.groupdict()))
+    elif "{" not in output:
+        candidates.append((output, {}))
+    else:
+        keys = tuple(str(key) for key in state_keys)
+        for key in keys:
+            match = regex.fullmatch(key)
+            if match is not None:
+                candidates.append((key, match.groupdict()))
+        if inputs:
+            input_regex = pattern_regex(inputs[0])
+            for key in keys:
+                match = input_regex.fullmatch(key)
+                if match is not None:
+                    values = match.groupdict()
+                    candidates.append((substitute(output, values), values))
+    seen = set()
+    for key, values in candidates:
+        if key in seen:
+            continue
+        seen.add(key)
+        yield key, [substitute(pattern, values) for pattern in inputs]
 
 
 def normalize_primitive_op(name: str) -> str:
@@ -184,6 +237,7 @@ __all__ = [
     "lookup_config",
     "normalize_primitive_op",
     "optional_state_value",
+    "parameter_pack_bindings",
     "path_parts",
     "read_config_value",
     "render_path",

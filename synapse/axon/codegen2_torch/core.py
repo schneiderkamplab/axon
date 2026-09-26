@@ -39,6 +39,7 @@ from ..codegen2_common import (
     is_null,
     lookup_config,
     normalize_primitive_op,
+    parameter_pack_bindings,
     path_parts,
 )
 from ..graph_ir import (
@@ -102,30 +103,6 @@ def _packed_parameter_spec_payload(packed: GraphPackedParameter) -> dict[str, An
     }
 
 
-def _path_pattern_regex(pattern: str) -> re.Pattern[str]:
-    pieces: list[str] = []
-    cursor = 0
-    used: set[str] = set()
-    for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", pattern):
-        pieces.append(re.escape(pattern[cursor : match.start()]))
-        name = match.group(1)
-        if name in used:
-            pieces.append(f"(?P={name})")
-        else:
-            pieces.append(f"(?P<{name}>[^.]+)")
-            used.add(name)
-        cursor = match.end()
-    pieces.append(re.escape(pattern[cursor:]))
-    return re.compile("^" + "".join(pieces) + "$")
-
-
-def _format_path_pattern(pattern: str, values: Mapping[str, str]) -> str:
-    out = pattern
-    for key, value in values.items():
-        out = out.replace("{" + key + "}", str(value))
-    return out
-
-
 def _materialize_joined_parameter(
     state: dict[str, torch.Tensor],
     output_key: str,
@@ -161,42 +138,9 @@ def _materialize_packed_parameters(
     target_key: str | None = None,
 ) -> None:
     for spec in specs:
-        output_pattern = str(spec["output"])
-        regex = _path_pattern_regex(output_pattern)
-        candidates: list[tuple[str, dict[str, str]]] = []
-        if target_key is not None:
-            match = regex.match(str(target_key))
-            if match is not None:
-                candidates.append((str(target_key), match.groupdict()))
-        else:
-            literal = "{" not in output_pattern
-            if literal:
-                candidates.append((output_pattern, {}))
-            else:
-                keys = list(state)
-                for key in keys:
-                    match = regex.match(str(key))
-                    if match is not None:
-                        candidates.append((str(key), match.groupdict()))
-                input_patterns = tuple(str(item) for item in spec["inputs"])
-                if input_patterns:
-                    input_regex = _path_pattern_regex(input_patterns[0])
-                    for key in keys:
-                        match = input_regex.match(str(key))
-                        if match is None:
-                            continue
-                        values = match.groupdict()
-                        output_key = _format_path_pattern(output_pattern, values)
-                        candidates.append((output_key, values))
-        seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-        for output_key, values in candidates:
-            candidate_key = (output_key, tuple(sorted(values.items())))
-            if candidate_key in seen:
-                continue
-            seen.add(candidate_key)
+        for output_key, input_keys in parameter_pack_bindings(state, spec, target_key=target_key):
             if torch.is_tensor(state.get(output_key)):
                 continue
-            input_keys = [_format_path_pattern(str(item), values) for item in spec["inputs"]]
             _materialize_joined_parameter(
                 state,
                 output_key,
@@ -4420,6 +4364,9 @@ class _DirectTorchEmitter:
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
         add(lines, 8, "if self.training:")
         add(lines, 12, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "if torch.compiler.is_compiling():")
+        add(lines, 12, "with torch.no_grad():")
+        add(lines, 16, "return self._forward(input_ids, **inputs)")
         add(lines, 8, "with torch.inference_mode():")
         add(lines, 12, "return self._forward(input_ids, **inputs)")
 
@@ -5408,14 +5355,17 @@ class _DirectTorchEmitter:
             if self.align_devices
             else args[1]
         )
+        # The shape query must not evaluate an inlined tensor expression twice.
+        input_name = f"{target}__input"
+        self._add(lines, indent, f"{input_name} = {x_expr}")
         bias_expr = (
             f"(self._move_to({bias_name}, {weight_name}.device) if {bias_name} is not None else None)"
             if self.align_devices
             else bias_name
         )
         op_expr = (
-            f"F.layer_norm({x_expr}, "
-            f"({args[1]}.shape[-1],), weight={weight_name}, "
+            f"F.layer_norm({input_name}, "
+            f"({input_name}.shape[-1],), weight={weight_name}, "
             f"bias={bias_expr}, "
             f"eps={eps})"
         )
@@ -6241,7 +6191,7 @@ class _DirectTorchEmitter:
                 if self.align_devices
                 else bias_expr
             )
-            return f"F.layer_norm({x}, ({args[1]}.shape[-1],), weight={weight}, bias={moved_bias}, eps={eps})"
+            return f"(lambda _ln_x: F.layer_norm(_ln_x, (_ln_x.shape[-1],), weight={weight}, bias={moved_bias}, eps={eps}))({x})"
         if primitive == "rmsnorm":
             x = args[0]
             eps = float_arg(1, "1e-6")
