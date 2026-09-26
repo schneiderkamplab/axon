@@ -34,6 +34,7 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoModelForMaskedLM,
     AutoModelForSeq2SeqLM,
+    AutoModelForTokenClassification,
 )
 from transformers.generation import GenerationConfig, GenerationMixin
 from transformers.utils import import_utils as transformers_import_utils
@@ -267,10 +268,12 @@ def _resolve_model_task(name: str) -> str:
         return normalized
     if normalized == "masked_lm":
         return normalized
+    if normalized == "token_classification":
+        return normalized
     if normalized == "seq2seq_lm":
         return normalized
     raise ValueError(
-        f"Unsupported model_task: {name!r} (expected 'auto', 'causal_lm', 'masked_lm', or 'seq2seq_lm')"
+        f"Unsupported model_task: {name!r} (expected 'auto', 'causal_lm', 'masked_lm', 'token_classification', or 'seq2seq_lm')"
     )
 
 
@@ -305,11 +308,11 @@ def _task_pragma_from_axon(*, axon_file: Path) -> str | None:
     if raw is None:
         return None
     normalized = str(raw).strip().lower()
-    if normalized in {"causal_lm", "masked_lm", "seq2seq_lm"}:
+    if normalized in {"causal_lm", "masked_lm", "token_classification", "seq2seq_lm"}:
         return normalized
     raise ValueError(
         f"Unsupported TASK pragma in {axon_file}: {raw!r}"
-        " (expected 'causal_lm', 'masked_lm', or 'seq2seq_lm')"
+        " (expected 'causal_lm', 'masked_lm', 'token_classification', or 'seq2seq_lm')"
     )
 
 
@@ -4093,7 +4096,7 @@ def _run_axon_test_single(
         reference_quant_config: Any | None = None
         from_pretrained_quant_config: Any | None = None
         reference_quant_method: str | None = None
-        if resolved_model_task in {"masked_lm", "seq2seq_lm"} or resolved_model_type in {
+        if resolved_model_task in {"masked_lm", "token_classification", "seq2seq_lm"} or resolved_model_type in {
             "phi3",
             "phi3small",
             "deepseek",
@@ -4450,6 +4453,19 @@ def _run_axon_test_single(
                     trust_remote_code=effective_trust_remote_code,
                     model_config=model_config,
                 )
+                hf_model = hf
+            elif resolved_model_task == "token_classification":
+                if reference_quant_config is not None:
+                    raise RuntimeError(
+                        "token_classification reference path does not support mxfp4 quantization"
+                    )
+                hf = AutoModelForTokenClassification.from_pretrained(
+                    str(resolved_hf_model_dir),
+                    local_files_only=True,
+                    config=hf_config,
+                    torch_dtype=resolved_dtype,
+                    trust_remote_code=effective_trust_remote_code,
+                ).to(target_device).eval()
                 hf_model = hf
             elif resolved_model_task == "seq2seq_lm":
                 _ensure_transformers_import_compat()

@@ -37,6 +37,13 @@ dependencies = [
 
 [project.optional-dependencies]
 mlx = ["mlx"]
+ner-benchmark = [
+    "datasets",
+    "onnx",
+    "onnxscript",
+    "onnxruntime-gpu; sys_platform == 'linux'",
+    "onnxruntime; sys_platform == 'darwin'",
+]
 dev = ["build", "mypy", "pre-commit", "pytest-xdist", "ruff", "twine", "mlx"]
 
 [project.urls]

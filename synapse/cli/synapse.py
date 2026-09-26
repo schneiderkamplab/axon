@@ -806,7 +806,7 @@ def axon_test(
     model_task: str = typer.Option(
         "auto",
         "--model-task",
-        help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
+        help="Model execution task (auto, causal_lm, masked_lm, token_classification, or seq2seq_lm).",
     ),
     benchmark_mode: str = typer.Option(
         "auto",
@@ -1064,7 +1064,7 @@ def axon_benchmark(
     model_task: str = typer.Option(
         "auto",
         "--model-task",
-        help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
+        help="Model execution task (auto, causal_lm, masked_lm, token_classification, or seq2seq_lm).",
     ),
     benchmark_mode: str = typer.Option(
         "auto",
@@ -1541,7 +1541,7 @@ def axon_test_matrix(
     model_task: str = typer.Option(
         "auto",
         "--model-task",
-        help="Execution task override: auto/causal_lm/masked_lm/seq2seq_lm.",
+        help="Execution task override: auto/causal_lm/masked_lm/token_classification/seq2seq_lm.",
     ),
 ) -> None:
     """Run synapse axon-test across matching examples/*.axon and models/* directories."""
