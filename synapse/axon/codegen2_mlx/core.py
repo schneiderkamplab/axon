@@ -1718,16 +1718,20 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             if expert == "None":
-                if weight_leaf == "'weight'":
+                # Resolve Path operands before rendering; @leaf stays relative
+                # to its base, while @@leaf is an absolute parameter path.
+                path_expr = self._param_key_expr(
+                    node.inputs[0], node.inputs[6] if len(node.inputs) > 6 else "weight",
+                    local=local, symbols_dict=symbols_dict,
+                )
+                if path_expr is None:
                     path_expr = f"self._compose_path({args[0]}, {weight_leaf})"
-                else:
-                    path_expr = weight_leaf
                 if bias == "False":
                     return f"self._linear_matmul({path_expr}, {args[1]}, transpose=bool({transpose}))"
-                if bias_leaf == "'bias'":
-                    b_expr = f"self._optional_param(self._compose_path({args[0]}, {bias_leaf}))"
-                else:
-                    b_expr = f"self._optional_param({bias_leaf})"
+                b_expr = self._param_expr_for_path(
+                    node.inputs[0], node.inputs[7] if len(node.inputs) > 7 else "bias",
+                    optional=True, local=local, symbols_dict=symbols_dict,
+                )
                 return f"self._linear_matmul({path_expr}, {args[1]}, bias={b_expr}, transpose=bool({transpose}))"
             return (
                 f"(lambda _w, _b: "

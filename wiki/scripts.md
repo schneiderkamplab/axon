@@ -31,3 +31,11 @@ Apple Metal/Core ML. Preserve failed quality gates in reporting.
 Regenerate Axon Python exports after compiler changes before packaging. A new
 checkout does not replace code in an old archive. Use a fresh versioned bundle
 directory and its recorded source revision; never replace a frozen handoff in place.
+
+Mac validation found that the initial optimized MLX export dropped packed
+projection bases for relative paths. Fixed emission uses graph operand path
+semantics. Evidence: `log/ner-mlx-path-fix-20260926/`, including 16 path regressions
+and emitted lookups checked against real checkpoint/packed keys, without MLX
+execution. Source parsing alone is insufficient validation of emitted lookups.
+The `-mlxfix` handoff supersedes the initial optimized bundle for Mac MLX runs;
+the small overlay is applied to a fresh copy of the existing bundle.

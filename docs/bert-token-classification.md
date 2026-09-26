@@ -207,6 +207,12 @@ alongside the automatically recorded package versions. Keep Mac and Linux
 results in separate tables. No Apple Silicon or Core ML result is implied by
 successful source generation or CUDA parity.
 
+The initial optimized MLX export at `9f79960` incorrectly treated relative
+packed-projection parameter paths as root paths. Updated emission preserves
+their base scope and absolute-path overrides. Regenerate the MLX export or use
+the corrected `-mlxfix` bundle before rerunning MLX quality in a fresh results
+directory. The checkpoint, Torch/ONNX exports, and Linux measurements are unchanged.
+
 ## Sources
 
 - [Few-NERD dataset and original benchmark](https://huggingface.co/datasets/DFKI-SLT/few-nerd)
