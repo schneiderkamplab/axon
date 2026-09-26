@@ -153,12 +153,34 @@ Extract `ner-mac.tar.gz` below `log/` in the matching checkout on the Mac.
 The archive's `MAC_RUN.md` includes setup and execution instructions.
 
 ```bash
-OMP_NUM_THREADS=4 python scripts/run_ner_benchmarks.py --run-dir log/ner-mac --suite mlx
-OMP_NUM_THREADS=4 python scripts/run_ner_benchmarks.py --run-dir log/ner-mac --suite cpu
-OMP_NUM_THREADS=4 python scripts/run_ner_benchmarks.py --run-dir log/ner-mac --suite coreml
+OMP_NUM_THREADS=4 python scripts/run_ner_benchmarks.py --run-dir log/ner-mac --results-dir log/ner-mac-comparison/results --suite mac-compare --stage quality --keep-going
+OMP_NUM_THREADS=4 python scripts/run_ner_benchmarks.py --run-dir log/ner-mac --results-dir log/ner-mac-comparison/results --suite mac-compare --stage performance --repetitions 3 --keep-going
 ```
 
-MLX runs FP32 and compiled FP16 on Metal. The compiled function wraps the Axon
+Run quality first. If it fails, retain the logs/JSON and investigate before running
+performance; gates are unchanged. `--keep-going` collects failures while trying
+the other configurations, then exits nonzero. `--resume` retains complete outputs;
+failed/incomplete artifacts require a fresh output directory to retry. Existing
+logs are never overwritten. `--dry-run` prints the planned commands without work.
+
+`mac-compare` has ten configurations: HF and Axon Torch CPU FP32; HF and Axon
+Torch MPS FP32/FP16; and Axon MLX Metal FP32/FP16, each uncompiled and compiled.
+MPS requires actual MPS availability and runs with CPU fallback disabled; unsupported
+operators are reported as failures. Torch CPU/MPS configurations use eager execution.
+Model-call timings finish with host logits, so GPU execution is completed before
+the timer stops. These MPS configurations require validation on the target Mac.
+
+Three performance repetitions run in fresh sequential processes with shuffled
+configuration order and separate `-r0`, `-r1`, `-r2` artifacts. Each process uses
+10 warmups and 50 timed samples per case. This differs from the older default
+single process with three contiguous sample groups; record the protocol used.
+Use a fresh `--results-dir` for each machine or rerun, preserving the frozen bundle.
+
+Optional additional baselines are available through `--suite cpu` (includes ORT)
+and `--suite coreml`; `--suite mps` and `--suite mlx` run their respective subsets.
+`--suite mac` runs all Mac baselines, including ORT/Core ML.
+
+MLX runs both FP32 and FP16, uncompiled and compiled, on Metal. The compiled function wraps the Axon
 encoder graph directly with `mx.compile`; every call materializes host logits.
 Core ML runs `ALL`, `CPUAndGPU`, and `CPUAndNeuralEngine`, each with dynamic
 inputs and fixed 32/128/512-token buckets. The latter compiles distinct batch

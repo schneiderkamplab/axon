@@ -71,21 +71,26 @@ Extract this archive below its `log/` directory; the commands below assume
 ```bash
 uv venv --python 3.13
 uv pip install --python .venv/bin/python -e '.[mlx,ner-benchmark]'
-OMP_NUM_THREADS=4 .venv/bin/python scripts/run_ner_benchmarks.py --run-dir log/{target.name} --suite mlx
-OMP_NUM_THREADS=4 .venv/bin/python scripts/run_ner_benchmarks.py --run-dir log/{target.name} --suite cpu
-OMP_NUM_THREADS=4 .venv/bin/python scripts/run_ner_benchmarks.py --run-dir log/{target.name} --suite coreml
+OMP_NUM_THREADS=4 .venv/bin/python scripts/run_ner_benchmarks.py --run-dir log/{target.name} --results-dir log/{target.name}-comparison/results --suite mac-compare --stage quality --keep-going
+# Run performance only after the quality suite succeeds:
+OMP_NUM_THREADS=4 .venv/bin/python scripts/run_ner_benchmarks.py --run-dir log/{target.name} --results-dir log/{target.name}-comparison/results --suite mac-compare --stage performance --repetitions 3 --keep-going
 ```
 
 Each suite runs configurations sequentially. `--resume` skips completed results
-after an interruption. Quality failures retain their JSON and stop the suite.
+after an interruption. `--keep-going` retains failures, tries the remaining
+configurations, and exits nonzero if any failed. Existing logs are never overwritten.
 Keep failed results; do not loosen a gate to obtain a performance comparison.
-Use a fresh bundle directory for repeated runs. Return `results/` (JSON and logs),
+Use a fresh results directory for repeated runs. Return the comparison `results/` (JSON and logs),
 plus Mac chip, GPU cores, memory, macOS, power mode, and thermal conditions.
 
-MLX uses the generated encoder directly, including compiled FP16. Core ML tests
+The primary suite compares HF and Axon Torch CPU FP32, HF and Axon Torch MPS
+FP32/FP16, and Axon MLX Metal FP32/FP16 with and without compilation. MPS CPU
+fallback is disabled; missing support fails explicitly. Three performance
+repetitions use fresh shuffled processes, each with 10 warmups and 50 samples per case.
+MLX uses the generated encoder directly. Optional `--suite coreml` tests
 three compute-unit settings and static/dynamic inputs. Provider placement is
 recorded; CPU-only fallback cannot produce a successful accelerator timing row.
-MLX and Core ML have not been executed on the Linux source machine.
+MPS, MLX and Core ML have not been executed on the Linux source machine.
 
 The frozen checkpoint SHA-256 is `{frozen["checkpoint_sha256"]}`.
 `bundle.json` contains file checksums. `export/export.json` also describes Linux

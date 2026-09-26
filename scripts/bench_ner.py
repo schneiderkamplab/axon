@@ -13,6 +13,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
+import os
 import platform
 import resource
 import time
@@ -41,6 +42,13 @@ class Backend:
         self.sessions = {}
         self.config = json.loads((self.root / "checkpoint/config.json").read_text())
         started = time.perf_counter()
+        if args.device == "mps":
+            if not torch.backends.mps.is_available():
+                raise RuntimeError(
+                    "MPS is unavailable; use an Apple Silicon Mac with an MPS-enabled PyTorch build"
+                )
+            if os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") != "0":
+                raise RuntimeError("MPS comparisons require PYTORCH_ENABLE_MPS_FALLBACK=0")
         if args.backend in {"hf", "axon"}:
             dtype = torch.float16 if args.dtype == "fp16" else torch.float32
             if args.backend == "hf":
@@ -413,7 +421,9 @@ def main():
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--backend", choices=["hf", "axon", "ort", "mlx"], required=True)
-    parser.add_argument("--device", choices=["cpu", "cuda:0", "coreml", "metal"], default="cpu")
+    parser.add_argument(
+        "--device", choices=["cpu", "cuda:0", "mps", "coreml", "metal"], default="cpu"
+    )
     parser.add_argument("--dtype", choices=["fp32", "fp16", "int8"], default="fp32")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--coreml-static", action="store_true")
@@ -435,9 +445,9 @@ def main():
         parser.error("INT8 is the ORT CPU configuration")
     if args.backend == "mlx" and args.device != "metal":
         parser.error("Use --device metal for the Mac MLX run")
-    if args.backend in {"hf", "axon"} and args.device not in {"cpu", "cuda:0"}:
-        parser.error("HF and Axon Torch use --device cpu or cuda:0")
-    if args.backend == "ort" and args.device == "metal":
+    if args.backend in {"hf", "axon"} and args.device not in {"cpu", "cuda:0", "mps"}:
+        parser.error("HF and Axon Torch use --device cpu, cuda:0, or mps")
+    if args.backend == "ort" and args.device in {"metal", "mps"}:
         parser.error("ORT on Apple accelerators uses --device coreml")
     if args.coreml_static and (args.backend != "ort" or args.device != "coreml"):
         parser.error("--coreml-static requires ORT Core ML")
@@ -473,6 +483,9 @@ def main():
         "versions": {},
         "timing_scope": "host token arrays -> completed host logits; transfers included",
         "load": backend.info,
+        "mps_cpu_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0")
+        if args.device == "mps"
+        else None,
     }
     for package in ("torch", "transformers", "numpy", "onnxruntime-gpu", "onnxruntime", "mlx"):
         try:
