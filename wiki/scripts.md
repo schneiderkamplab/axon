@@ -7,6 +7,13 @@ for Linux training, export, quality, and timing runs; Mac execution remains pend
 Uses: [public runbook](../docs/bert-token-classification.md).
 Validated-by: [measured report](../docs/bert-token-classification-results.md) and
 `log/bert-ner-20260926/public-results.json.gz` (all ten configurations passed quality gates).
+The [optimized comparison](../docs/bert-token-classification-optimized-results.md)
+uses `log/ner-optimized-20260926/` with fresh production exports and three
+process-level timing repetitions. Full CPU/CUDA quality passed; weights and
+ONNX artifact hashes are unchanged. The run-local `run_validation.py`,
+`check_compile.py`, and `summarize.py` document this follow-up's execution and
+aggregation. `report_ner.py` covers the original single-process result naming;
+do not treat individual `-r0/-r1/-r2` files as one contiguous sampling run.
 
 | Script | Purpose / CLI | Inputs | Outputs |
 |---|---|---|---|
@@ -21,3 +28,6 @@ Validated-by: [measured report](../docs/bert-token-classification-results.md) an
 Raw artifacts belong in `log/`. Public reports must keep equal-precision and
 reduced-precision comparisons identifiable, and distinguish Linux CUDA from
 Apple Metal/Core ML. Preserve failed quality gates in reporting.
+Regenerate Axon Python exports after compiler changes before packaging. A new
+checkout does not replace code in an old archive. Use a fresh versioned bundle
+directory and its recorded source revision; never replace a frozen handoff in place.

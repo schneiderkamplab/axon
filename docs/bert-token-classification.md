@@ -1,6 +1,7 @@
 # BERT token classification
 
-Measured Linux CPU/CUDA results: [MiniLM / Few-NERD report](bert-token-classification-results.md).
+Measured Linux CPU/CUDA results: [optimized HF/Axon comparison](bert-token-classification-optimized-results.md)
+and [original report including ONNX](bert-token-classification-results.md).
 Apple Silicon measurements are pending.
 
 `synapse/models/bert/generic-bert-token-classification.axon` implements an
@@ -80,6 +81,19 @@ provider-specific optimized FP32 graphs, a CUDA FP16 graph, and a per-channel
 dynamic QInt8 CPU graph. Symbolic shape inference precedes quantization.
 `export.json` records file hashes, operator counts, and actual fusion counts.
 Running this export does not execute MLX.
+
+Optimized exports pack independent projections sharing the same input into one
+linear operation, with weights concatenated during loading. The optimization
+uses primitive graph structure and protects parameters read elsewhere. Torch
+LayerNorm evaluates its input once, and unrestricted bidirectional padding masks
+use a broadcast view. The public Torch inference entry point supports compilation.
+These are execution changes: the trained checkpoint and labels remain unchanged.
+MLX packing currently requires unquantized FP32/FP16 weights.
+
+After updating Axon, regenerate the exports into a fresh directory and create a
+new bundle. Updating the checkout alone does not update the Python models inside
+an earlier archive. Validate the new exports before comparing performance; CUDA
+results do not establish which implementation is fastest on Apple Silicon.
 
 ## Measurements
 

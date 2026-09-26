@@ -1,5 +1,9 @@
 # MiniLM / Few-NERD runtime measurements
 
+This is the original implementation and timing protocol. See the
+[optimized implementation measurements](bert-token-classification-optimized-results.md)
+for regenerated Axon exports and fresh HF comparisons with process-level repetitions.
+
 This run fine-tuned public [MiniLM-L6-H384-uncased](https://huggingface.co/nreimers/MiniLM-L6-H384-uncased)
 on [Few-NERD](https://huggingface.co/datasets/DFKI-SLT/few-nerd), using six layers,
 384 hidden units, 12 attention heads, and 67 IO labels. Epoch 3 was selected on
