@@ -1273,6 +1273,10 @@ def _linear_pack_candidate(
     if first.op.name != "_linear" or len(first.outputs) != 1 or len(first.inputs) < 8:
         return None
     first_path, first_x, _first_dim, first_bias, first_transpose, first_expert, first_weight_leaf, first_bias_leaf = first.inputs[:8]
+    # Packing must know whether to include bias tensors; a runtime flag cannot
+    # be treated as a disabled bias without changing the projection result.
+    if not isinstance(first_bias, GraphLiteral):
+        return None
     if not (
         isinstance(first_transpose, GraphLiteral)
         and first_transpose.value is False
@@ -1354,55 +1358,56 @@ def _linear_pack_candidate(
     )
 
 
-def _collect_direct_graph_path_keys(operand: GraphOperand, counts: Counter[str]) -> None:
+def _collect_direct_parameter_path_keys(
+    operand: GraphOperand | GraphNode,
+    counts: Counter[str],
+) -> None:
     if isinstance(operand, GraphPath):
         counts[_graph_path_key(operand)] += 1
         return
-    if isinstance(operand, GraphExpr):
-        for item in operand.inputs:
-            _collect_direct_graph_path_keys(item, counts)
-        for item in operand.attrs.values():
-            _collect_direct_graph_path_keys(item, counts)
+    if not isinstance(operand, (GraphNode, GraphExpr)):
+        return
+
+    parameter_operands: set[int] = set()
+    paths: list[GraphOperand | None] = []
+    if operand.op.name == "_embedding" and operand.inputs:
+        parameter_operands = {0}
+        paths.append(_compose_graph_path_operand(operand.inputs[0], GraphPath(False, ("weight",))))
+    elif operand.op.name in {"_linear", "_layernorm"}:
+        if operand.op.name == "_linear" and len(operand.inputs) >= 8:
+            base, _x, _dim, bias, _transpose, _expert, weight_leaf, bias_leaf = operand.inputs[:8]
+            parameter_operands = {0, 6, 7}
+        elif operand.op.name == "_layernorm" and len(operand.inputs) >= 7:
+            base, _x, _eps, _dim, weight_leaf, bias, bias_leaf = operand.inputs[:7]
+            parameter_operands = {0, 4, 6}
+        if parameter_operands:
+            paths.append(_compose_graph_path_operand(base, weight_leaf))
+            # A runtime flag may enable the bias. Only a literal false proves
+            # that another projection can safely take ownership of its tensor.
+            if not isinstance(bias, GraphLiteral) or bool(bias.value):
+                paths.append(_compose_graph_path_operand(base, bias_leaf))
+
+    # Count composed reads once, including reads nested in expressions. If a
+    # path cannot be resolved, retain the conservative raw operand traversal.
+    if any(path is None for path in paths):
+        parameter_operands = set()
+    for path in paths:
+        if isinstance(path, GraphPath):
+            counts[_graph_path_key(path)] += 1
+    for index, item in enumerate(operand.inputs):
+        if index not in parameter_operands:
+            _collect_direct_parameter_path_keys(item, counts)
+    for item in operand.attrs.values():
+        _collect_direct_parameter_path_keys(item, counts)
 
 
 def _direct_parameter_path_counts(graph: GraphProgram) -> Counter[str]:
     counts: Counter[str] = Counter()
     for module in graph.modules:
         for node in module.nodes:
-            # Parameter leaves are counted by their composed semantic read below.
-            # Absolute leaves otherwise count twice and incorrectly block packing.
-            parameter_operands = (
-                {0, 6, 7} if node.op.name == "_linear" and len(node.inputs) >= 8
-                else {0, 4, 6} if node.op.name == "_layernorm" and len(node.inputs) >= 7
-                else set()
-            )
-            for operand in (
-                *(value for index, value in enumerate(node.inputs) if index not in parameter_operands),
-                *node.attrs.values(),
-            ):
-                _collect_direct_graph_path_keys(operand, counts)
-            if node.op.name == "_embedding" and node.inputs:
-                weight_path = _compose_graph_path_operand(node.inputs[0], GraphPath(False, ("weight",)))
-                if isinstance(weight_path, GraphPath):
-                    counts[_graph_path_key(weight_path)] += 1
-            elif node.op.name == "_linear" and len(node.inputs) >= 8:
-                base, _x, _dim, bias, _transpose, _expert, weight_leaf, bias_leaf = node.inputs[:8]
-                weight_path = _compose_graph_path_operand(base, weight_leaf)
-                if isinstance(weight_path, GraphPath):
-                    counts[_graph_path_key(weight_path)] += 1
-                if isinstance(bias, GraphLiteral) and bool(bias.value):
-                    bias_path = _compose_graph_path_operand(base, bias_leaf)
-                    if isinstance(bias_path, GraphPath):
-                        counts[_graph_path_key(bias_path)] += 1
-            elif node.op.name == "_layernorm" and len(node.inputs) >= 7:
-                base, _x, _eps, _dim, weight_leaf, bias, bias_leaf = node.inputs[:7]
-                weight_path = _compose_graph_path_operand(base, weight_leaf)
-                if isinstance(weight_path, GraphPath):
-                    counts[_graph_path_key(weight_path)] += 1
-                if isinstance(bias, GraphLiteral) and bool(bias.value):
-                    bias_path = _compose_graph_path_operand(base, bias_leaf)
-                    if isinstance(bias_path, GraphPath):
-                        counts[_graph_path_key(bias_path)] += 1
+            _collect_direct_parameter_path_keys(node, counts)
+        for output in module.outputs:
+            _collect_direct_parameter_path_keys(output, counts)
     return counts
 
 
