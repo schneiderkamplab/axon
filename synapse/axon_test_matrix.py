@@ -45,7 +45,7 @@ from .axon_runner_common import (
 from .axon_runner_common import (
     worker_log_path as _common_worker_log_path,
 )
-from .axon_test import run_axon_test
+from .axon_test import _task_pragma_from_axon, run_axon_test
 from .matrix_models import (
     MATRIX_AXON_MODEL_DIRS,
     MODEL_SPECS,
@@ -307,7 +307,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-task",
         default="auto",
-        choices=["auto", "causal_lm", "masked_lm", "seq2seq_lm"],
+        choices=["auto", "causal_lm", "masked_lm", "token_classification", "seq2seq_lm"],
         help=(
             "Execution task for run_axon_test. "
             "'auto' picks per model (encoder-only masked LM models -> masked_lm, "
@@ -513,6 +513,9 @@ def _skip_reason_for_pair(pair: _Pair) -> str | None:
 
 
 def _resolve_model_task_for_pair(pair: _Pair) -> str:
+    pragma_task = _task_pragma_from_axon(axon_file=pair.axon_path)
+    if pragma_task is not None:
+        return pragma_task
     masked_lm_stems = {
         "albert",
         "bert",
@@ -1399,9 +1402,10 @@ def run_axon_test_matrix(
     if model_task_override is not None and model_task_override not in {
         "causal_lm",
         "masked_lm",
+        "token_classification",
         "seq2seq_lm",
     }:
-        raise ValueError("model_task_override must be one of: causal_lm, masked_lm, seq2seq_lm")
+        raise ValueError("model_task_override must be one of: causal_lm, masked_lm, token_classification, seq2seq_lm")
     if include_selectors and exclude_selectors:
         raise ValueError("axon-test-matrix accepts either include or exclude selectors, not both")
     pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())

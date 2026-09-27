@@ -1,17 +1,18 @@
 from .core import (
-    config_value,
     compose_path,
+    config_value,
     execute_common_primitive,
     has_config_value,
     is_null,
     lookup_config,
     normalize_primitive_op,
     optional_state_value,
+    parameter_pack_bindings,
     path_parts,
     read_config_value,
     render_path,
-    required_state_value,
     require_value,
+    required_state_value,
 )
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "lookup_config",
     "normalize_primitive_op",
     "optional_state_value",
+    "parameter_pack_bindings",
     "path_parts",
     "read_config_value",
     "render_path",

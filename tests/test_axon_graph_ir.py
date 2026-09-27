@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -6243,12 +6244,12 @@ def test_graph_optimizer_rewrites_dense_gate_up_linear_pair_for_torch() -> None:
     assert len(fused_keys) == 1
 
 
-def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_safety() -> None:
+def _qkv_projection_graph(*, absolute_leaves=False) -> GraphProgram:
     x_type = _tensor("B", "S", 3)
     q_type = _tensor("B", "S", 5)
     k_type = _tensor("B", "S", 2)
     v_type = _tensor("B", "S", 2)
-    graph = GraphProgram(
+    return GraphProgram(
         modules=(
             GraphModule(
                 name="main",
@@ -6270,8 +6271,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
                             GraphLiteral(True, TypeBool()),
                             GraphLiteral(False, TypeBool()),
                             GraphLiteral(None, TypeNull()),
-                            GraphLiteral("weight", TypeString()),
-                            GraphLiteral("bias", TypeString()),
+                            GraphPath(True, ("q_proj", "weight")) if absolute_leaves else GraphLiteral("weight", TypeString()),
+                            GraphPath(True, ("q_proj", "bias")) if absolute_leaves else GraphLiteral("bias", TypeString()),
                         ),
                         attrs={},
                         outputs=(GraphValue("q", q_type, dims=q_type.dims),),
@@ -6299,8 +6300,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
                             GraphLiteral(True, TypeBool()),
                             GraphLiteral(False, TypeBool()),
                             GraphLiteral(None, TypeNull()),
-                            GraphLiteral("weight", TypeString()),
-                            GraphLiteral("bias", TypeString()),
+                            GraphPath(True, ("k_proj", "weight")) if absolute_leaves else GraphLiteral("weight", TypeString()),
+                            GraphPath(True, ("k_proj", "bias")) if absolute_leaves else GraphLiteral("bias", TypeString()),
                         ),
                         attrs={},
                         outputs=(GraphValue("k", k_type, dims=k_type.dims),),
@@ -6318,8 +6319,8 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
                             GraphLiteral(True, TypeBool()),
                             GraphLiteral(False, TypeBool()),
                             GraphLiteral(None, TypeNull()),
-                            GraphLiteral("weight", TypeString()),
-                            GraphLiteral("bias", TypeString()),
+                            GraphPath(True, ("v_proj", "weight")) if absolute_leaves else GraphLiteral("weight", TypeString()),
+                            GraphPath(True, ("v_proj", "bias")) if absolute_leaves else GraphLiteral("bias", TypeString()),
                         ),
                         attrs={},
                         outputs=(GraphValue("v", v_type, dims=v_type.dims),),
@@ -6335,6 +6336,10 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
         pragmas={"main": "main"},
     )
 
+
+@pytest.mark.parametrize("absolute_leaves", [False, True])
+def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_safety(absolute_leaves) -> None:
+    graph = _qkv_projection_graph(absolute_leaves=absolute_leaves)
     optimized = optimize_graph_program(graph, config=GraphOptimizeConfig())
     main = next(module for module in optimized.modules if module.name == "main")
     assert [node.op.name for node in main.nodes[:2]] == ["_linear", "_split"]
@@ -6371,7 +6376,162 @@ def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_s
     assert "v_proj.weight" not in model.state_dict_tensors
 
 
-def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere() -> None:
+@pytest.mark.parametrize("location", ["node", "node_input", "return", "nested_return"])
+@pytest.mark.parametrize(
+    "reader,bias_enabled",
+    [
+        ("embedding", None),
+        ("parameter", None),
+        ("linear", None),
+        ("layernorm", None),
+        ("linear", False),
+        ("layernorm", False),
+    ],
+)
+def test_projection_packing_preserves_shared_parameter_reads(reader, bias_enabled, location):
+    graph = _qkv_projection_graph(absolute_leaves=True)
+    main = graph.modules[0]
+    x = main.inputs[0]
+    q = main.outputs[0]
+    ids_type = TypeTensor("TokenIds", (1, 1))
+    ids = GraphValueRef("ids", ids_type, dims=ids_type.dims)
+    bias = (
+        GraphValueRef("use_bias", TypeBool())
+        if bias_enabled is None
+        else GraphLiteral(bias_enabled, TypeBool())
+    )
+    shared_bias = GraphPath(True, ("q_proj", "bias"))
+    if reader == "embedding":
+        inputs = (GraphPath(True, ("k_proj",)), ids, GraphLiteral(3, TypeDim()))
+        out_type = _tensor(1, 1, 3)
+    elif reader == "parameter":
+        inputs = (GraphPath(True, ("k_proj", "weight")),)
+        out_type = _tensor(2, 3)
+    elif reader == "linear":
+        inputs = (
+            GraphPath(True, ("other",)),
+            GraphValueRef(x.name, x.type_expr, dims=x.dims),
+            GraphLiteral(5, TypeDim()),
+            bias,
+            GraphLiteral(False, TypeBool()),
+            GraphLiteral(None, TypeNull()),
+            GraphPath(False, ("weight",)),
+            shared_bias,
+        )
+        out_type = q.type_expr
+    else:
+        inputs = (
+            GraphPath(True, ("norm",)),
+            q,
+            GraphLiteral(1e-5, TypeFloat()),
+            GraphLiteral(5, TypeDim()),
+            GraphPath(False, ("weight",)),
+            bias,
+            shared_bias,
+        )
+        out_type = q.type_expr
+    read = GraphExpr(
+        GraphOp("_params_param" if reader == "parameter" else f"_{reader}"),
+        inputs,
+        {},
+        out_type,
+        dims=out_type.dims,
+    )
+    if location in {"node_input", "nested_return"}:
+        read = GraphExpr(GraphOp("_activations_relu"), (read,), {}, out_type, dims=out_type.dims)
+    nodes = main.nodes
+    output = read
+    if location in {"node", "node_input"}:
+        nodes += (
+            GraphNode(
+                id="main:shared",
+                op=read.op,
+                inputs=read.inputs,
+                attrs=read.attrs,
+                outputs=(GraphValue("shared", out_type, dims=out_type.dims),),
+                source_module="main",
+                type_expr=out_type,
+                dims=out_type.dims,
+            ),
+        )
+        output = GraphValueRef("shared", out_type, dims=out_type.dims)
+    main = replace(
+        main,
+        nodes=nodes,
+        inputs=(
+            *main.inputs,
+            GraphValue("ids", ids_type, dims=ids_type.dims),
+            GraphValue("use_bias", TypeBool()),
+        ),
+        outputs=(*main.outputs, output),
+        output_names=(*main.output_names, "shared"),
+        return_type_expr=TypeTuple((*main.return_type_expr.items, out_type)),
+    )
+    graph = replace(graph, modules=(main,))
+    validate_graph_program(graph)
+    optimized = optimize_graph_program(graph)
+    state = {}
+    for name, dim in [("q_proj", 5), ("k_proj", 2), ("v_proj", 2), ("other", 5)]:
+        state[f"{name}.weight"] = torch.arange(dim * 3, dtype=torch.float32).reshape(dim, 3) / 7
+        state[f"{name}.bias"] = torch.arange(dim, dtype=torch.float32) / 11 + 2
+    state["norm.weight"] = torch.arange(5, dtype=torch.float32) / 3 + 1
+    models = []
+    for program in (graph, optimized):
+        namespace = {}
+        exec(emit_model_code_from_graph_ir(program), namespace)
+        models.append(namespace["GeneratedAxonModel"].from_state_dict(state))
+    for use_bias in (False, True):
+        kwargs = dict(
+            x=torch.arange(3, dtype=torch.float32).reshape(1, 1, 3),
+            ids=torch.zeros(1, 1, dtype=torch.long),
+            use_bias=use_bias,
+        )
+        torch.testing.assert_close(models[1](**kwargs), models[0](**kwargs))
+    if bias_enabled is False:
+        # A provably disabled bias must not block otherwise safe packing.
+        assert len(optimized.packed_parameters) == 2
+        assert "q_proj.bias" not in models[1].state_dict_tensors
+    else:
+        shared_key = "k_proj.weight" if reader in {"embedding", "parameter"} else "q_proj.bias"
+        assert shared_key in models[1].state_dict_tensors
+
+
+def test_projection_packing_retains_runtime_controlled_biases():
+    graph = _qkv_projection_graph(absolute_leaves=True)
+    main = graph.modules[0]
+    nodes = tuple(
+        replace(
+            node, inputs=(*node.inputs[:3], GraphValueRef("use_bias", TypeBool()), *node.inputs[4:])
+        )
+        if node.op.name == "_linear"
+        else node
+        for node in main.nodes
+    )
+    main = replace(main, nodes=nodes, inputs=(*main.inputs, GraphValue("use_bias", TypeBool())))
+    graph = replace(graph, modules=(main,))
+    validate_graph_program(graph)
+    optimized = optimize_graph_program(graph)
+    state = {}
+    for name, dim in [("q_proj", 5), ("k_proj", 2), ("v_proj", 2)]:
+        state[f"{name}.weight"] = torch.ones(dim, 3)
+        state[f"{name}.bias"] = torch.full((dim,), 2.0)
+    namespace = {}
+    exec(emit_model_code_from_graph_ir(optimized), namespace)
+    model = namespace["GeneratedAxonModel"].from_state_dict(state)
+    x = torch.ones(1, 1, 3)
+    for use_bias in (False, True):
+        actual = model(x=x, use_bias=use_bias)
+        for name in ("q", "k", "v"):
+            expected = torch.nn.functional.linear(
+                x,
+                state[f"{name}_proj.weight"],
+                state[f"{name}_proj.bias"] if use_bias else None,
+            )
+            torch.testing.assert_close(actual[name], expected)
+
+
+@pytest.mark.parametrize("other_read", ["parameter", "embedding"])
+def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere(other_read) -> None:
     x_type = _tensor("B", "S", 3)
     q_type = _tensor("B", "S", 5)
     k_type = _tensor("B", "S", 2)
@@ -6448,8 +6608,12 @@ def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere() -> No
                     ),
                     GraphNode(
                         id="main:4",
-                        op=GraphOp("_params_param"),
-                        inputs=(GraphPath(True, ("k_proj", "weight")),),
+                        op=GraphOp("_embedding" if other_read == "embedding" else "_params_param"),
+                        inputs=(
+                            (GraphPath(True, ("k_proj",)), GraphValueRef("x", x_type, dims=x_type.dims), GraphLiteral(3, TypeDim()))
+                            if other_read == "embedding"
+                            else (GraphPath(True, ("k_proj", "weight")),)
+                        ),
                         attrs={},
                         outputs=(GraphValue("k_weight", TypeAny()),),
                         source_module="main",

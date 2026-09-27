@@ -1,0 +1,45 @@
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Positions (position_ids)
+import Config
+import NN
+
+export encode
+
+MODEL_DIM <- Config.int @@hidden_size default=768
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+NUM_HEADS <- Config.int @@num_attention_heads default=12
+FFN <- Config.int @@intermediate_size default=3072
+EPS <- Config.float @@layer_norm_eps default=1e-12
+
+block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> String -> String -> Tensor[B,S,D]
+block x keep norm_weight norm_bias = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS weight_path=@'attention.output.LayerNorm.{norm_weight}' bias_path=@'attention.output.LayerNorm.{norm_bias}'
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  return NN.layernorm@output.LayerNorm y eps=EPS weight_path=@'output.LayerNorm.{norm_weight}' bias_path=@'output.LayerNorm.{norm_bias}'
+
+encode :: Path -> TokenIds[B,S] -> ?Mask[B,S,S] -> ?TokenIds[B,S] -> ?String -> ?String -> Tensor[B,S,D]
+encode@path input_ids attn_mask ?token_type_ids=null ?norm_weight="weight" ?norm_bias="bias" = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  pos_ids <- position_ids input_ids
+  segment_ids <- (token_type_ids == null) ? (input_ids - input_ids) : token_type_ids
+  tok <- NN.embedding@embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@embeddings.token_type_embeddings segment_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- NN.layernorm@embeddings.LayerNorm x eps=EPS weight_path=@'embeddings.LayerNorm.{norm_weight}' bias_path=@'embeddings.LayerNorm.{norm_bias}'
+  x <- for@encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- block x keep norm_weight norm_bias
+    yield x
+  return x

@@ -318,6 +318,7 @@ def test_axon_test_matrix_auto_task_uses_masked_lm_for_bert(
         }
 
     monkeypatch.setattr(matrix_mod, "_run_pair", _fake_run_pair)
+    monkeypatch.setattr(matrix_mod, "_maybe_ensure_pair_model_ready", lambda pair: None)
 
     exit_code = run_axon_test_matrix(
         examples_dir=tmp_path / "examples",
@@ -383,6 +384,7 @@ def test_axon_test_matrix_auto_task_uses_masked_lm_for_modernbert(
         }
 
     monkeypatch.setattr(matrix_mod, "_run_pair", _fake_run_pair)
+    monkeypatch.setattr(matrix_mod, "_maybe_ensure_pair_model_ready", lambda pair: None)
 
     exit_code = run_axon_test_matrix(
         examples_dir=tmp_path / "examples",
@@ -434,6 +436,7 @@ def test_axon_test_matrix_auto_task_uses_masked_lm_for_encoder_only_models(
         }
 
     monkeypatch.setattr(matrix_mod, "_run_pair", _fake_run_pair)
+    monkeypatch.setattr(matrix_mod, "_maybe_ensure_pair_model_ready", lambda pair: None)
 
     exit_code = run_axon_test_matrix(
         examples_dir=tmp_path / "examples",
@@ -470,6 +473,7 @@ def test_axon_test_matrix_task_override_is_applied(
         }
 
     monkeypatch.setattr(matrix_mod, "_run_pair", _fake_run_pair)
+    monkeypatch.setattr(matrix_mod, "_maybe_ensure_pair_model_ready", lambda pair: None)
 
     exit_code = run_axon_test_matrix(
         examples_dir=tmp_path / "examples",
@@ -613,6 +617,7 @@ def test_worker_log_path_includes_pid_axon_and_model(tmp_path: Path) -> None:
 
 
 def test_run_worker_loop_writes_log_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_fixture_pair(tmp_path, "gpt2")
     pair = matrix_mod._Pair(tmp_path / "examples" / "gpt2.axon", tmp_path / "models" / "gpt2")
     seen: list[tuple] = []
 

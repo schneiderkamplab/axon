@@ -1,0 +1,11 @@
+{-# CHECKPOINTS ["dslim/bert-base-NER"] #-}
+{-# TASK "token_classification" #-}
+
+import BertEncoder
+import Masking (Mask)
+import NN
+
+bert_token_classification :: TokenIds[B,S] -> ?Mask[B,S,S] -> ?TokenIds[B,S] -> Tensor[B,S,C]
+bert_token_classification input_ids attn_mask ?token_type_ids=null = do
+  x <- BertEncoder.encode@bert input_ids attn_mask token_type_ids=token_type_ids
+  return NN.linear@classifier x bias=true
