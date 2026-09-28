@@ -1,6 +1,6 @@
 # Compiler Ablation & Attribution Tool
 
-`confidence: high` `source: implemented feat/compiler-ablation` `last-confirmed: 2026-09-26 (post-codegen-fix T4 baselines re-run)`
+`confidence: high` `source: implemented feat/compiler-ablation` `last-confirmed: 2026-09-27 (post-fix4 T4 baselines + JAX backend parity + vLLM status audit)`
 
 ## Overview
 
@@ -204,6 +204,15 @@ Post-fix findings:
 - gpt2/bert `axon-graph-full-compiled` still fails with torch 2.13
   `Cannot set version_counter for inference tensor` (pre-existing, unrelated)
 
+#### Post-fix4 (2026-09-27)
+
+Fix 4 (causal mask → `None`) confirmed firing: `op_Masking.causal_mask_for_input_keep`
+nodes eliminated from optimized graph. Generated code shows `mask = None` in the
+`if attn_mask is None:` branch, routing to Flash Attention 2. Kernel count
+unchanged (mask construction was a small one-time CPU-side cost), but attention
+now uses the Flash kernel instead of the slow math fallback. See
+[Flash Attention verification](#flash-attention-verification-2026-09-27) below.
+
 ## Codegen Fixes (2026-09-26)
 
 Three codegen/optimizer fixes that improved eager-mode performance and
@@ -231,11 +240,171 @@ Added `_torch_packed_swiglu_ffn_candidate` and
 `_packed_swiglu_ffn` runtime method and codegen template. Wired into
 optimization pipeline after existing swiglu rewrite. Eliminates 4 nodes/layer.
 
-### Not landed
+### Fix 4: Causal mask → `None` IR optimization (graph_ir/optimize.py)
 
-- **Fix 4 (causal mask → `is_causal=True`)**: Runtime `torch.equal` check was
-  both slow for non-causal masks and broke correctness. Needs compile-time
-  IR-level detection. Deferred.
+Added `_rewrite_causal_mask_select_to_none` pass that detects `core.select`
+nodes where the true branch is `Masking.causal_mask_for_input_keep` (or
+`causal_mask_keep`) with `window=null` or `window >= 1024`, and replaces
+the true branch with `GraphLiteral(value=None)`. This causes the SDPA
+intrinsic to pass `is_causal=True` + `attn_mask=None`, which routes to
+**Flash Attention 2** on CUDA (verified via `torch.profiler`:
+`pytorch_flash::flash_fwd_kernel`). Without this, the materialized causal
+mask forces the slow math fallback path.
+
+Wired into optimization pipeline after `_rewrite_dense_gate_up_linear_pairs`.
+Safely skipped for real sliding windows (e.g. DeepSeek-V2 `window=128`,
+Gemma3 local `window=512`). Committed as `bdad0e2`.
+
+### Flash Attention verification (2026-09-27)
+
+Confirmed via `torch.profiler` that the SDPA intrinsic routes to Flash
+Attention 2 on CUDA:
+- `is_causal=True, attn_mask=None` → `pytorch_flash::flash_fwd_kernel`
+  (CUTLASS-based Flash kernel, bf16, head_dim 64)
+- `attn_mask=<bool mask>, is_causal=False` → no Flash kernel (slow math fallback)
+- `attn_mask=<float mask>, is_causal=False` → no Flash kernel (slow math fallback)
+
+This validates that Fix 4's `None` mask is what triggers Flash Attention.
+Before Fix 4, all causal LMs hit the slow path due to materialized masks.
+
+## JAX Backend Parity (2026-09-27)
+
+`confidence: medium` `source: codegen-verified, runtime-untested (JAX not installed on this machine)`
+
+Three fixes to bring JAX backend to parity with torch (committed `ebd873f`):
+
+### JAX SDPA `is_causal` (correctness fix)
+
+JAX `_sdpa` now accepts `is_causal` parameter and passes it to
+`jax.nn.dot_product_attention`. Codegen dispatch generates
+`is_causal=(mask is None)` automatically. Without this, Fix 4's
+`causal_mask→None` optimization would cause JAX to compute non-causal
+(bidirectional) attention for causal LMs — a correctness bug.
+
+### JAX packed SwiGLU FFN
+
+Added `_packed_swiglu_ffn` method to JAX codegen. Wired
+`_rewrite_torch_packed_swiglu_ffn_intrinsics` into JAX pipeline with
+`op_name="__jax_swiglu_ffn"`. Same 5-node pattern as torch
+(`_linear`/`NN.linear` → `chunk` → `silu` → `mul` → `_linear`) fuses to
+a single `__jax_swiglu_ffn` call.
+
+### JAX RMSNorm intrinsics
+
+Added `__jax_rmsnorm_scaled`, `__jax_rmsnorm_noscale`,
+`__jax_add_rmsnorm_noscale` to JAX backend. Wired three rewrite passes
+into JAX optimization pipeline:
+- `_rewrite_torch_rmsnorm_scaled_intrinsics(op_name="__jax_rmsnorm_scaled")`
+- `_rewrite_rmsnorm_noscale_module_calls(op_name="__jax_rmsnorm_noscale")`
+- `_rewrite_add_rmsnorm_noscale_intrinsics(rmsnorm_op="__jax_rmsnorm_noscale", fused_op="__jax_add_rmsnorm_noscale")`
+
+Also made `_rewrite_torch_rmsnorm_scaled_intrinsics` accept `op_name`
+parameter (was hardcoded to `__torch_rmsnorm_scaled`).
+
+### Verification
+
+- Qwen2.5-0.5B: generates correct JAX code with `is_causal`, packed
+  SwiGLU FFN (1 packed instance), RMSNorm intrinsics. Codegen produces
+  102K+ lines.
+- OLMo-2-1B: generates correct JAX code with `is_causal` and RMSNorm
+  (no SwiGLU — OLMo2 doesn't use packed gate_up weights).
+- All 18 unit tests pass.
+- Runtime testing deferred (JAX not installed on this machine).
+
+## vLLM Backend Status (2026-09-27)
+
+`confidence: high` `source: code audit of codegen2_vllm/ + axon_test.py + optimize.py`
+
+### Overview
+
+vLLM is the most specialized backend — 6,219 lines of codegen
+(`core.py` 4,551 + `classify.py` 1,668). It generates full vLLM-compatible
+model classes with parallel layers, paged attention, weight loading, and
+tensor parallelism support. It is a full codegen, not a wrapper.
+
+### What works
+
+- **Full codegen**: generates vLLM model classes with `QKVParallelLinear`,
+  `RowParallelLinear`, `VocabParallelEmbedding`, `Attention`, `RMSNorm`,
+  `SiluAndMul`, `GeluAndMul`, `get_rope`, `MambaMixer`
+- **Dual forward paths**: clean (optimized transformer loop) vs legacy
+  (generic graph traversal fallback)
+- **Structural classification** (`classify.py`): 13-pass classifier —
+  no model names, pure graph IR structure + provenance analysis
+- **Weight loading**: vLLM `load_weights()` protocol with QKV stacking
+  and gate_up merging
+- **Correctness testing**: full — compares logits against HF
+  (`masked_top1_eq`, `masked_max_abs_diff`)
+- **Benchmarking**: both `run_axon_test` and dedicated
+  `benchmark_vllm_throughput.py` / `benchmark_vllm_native.py`
+- **Model coverage**: Llama, Qwen, Mistral, Gemma, OLMo, SmolLM, GPT-2,
+  Mamba, Jamba, Granite, OPT, Pythia, etc.
+- **TP support**: tensor parallelism via vLLM parallel layers
+- **PagedAttention**: KV cache with block tables
+- **SSM/Mamba**: native `MambaMixer` support
+- **`@support_torch_compile`**: generated classes decorated for vLLM
+  compilation pipeline
+
+### What's missing / limited
+
+- **Only 1 optimizer intrinsic** (`__vllm_paged_attention`) — vs torch's
+  20, JAX's 14, Triton's 15. RoPE, FFN, RMSNorm, expert fusion all handled
+  in codegen via vLLM native layers, not at the optimizer level
+- **No `is_causal` in codegen** — causal masking is implicit via
+  `attn_metadata.causal=True` (set in `axon_test.py:641`), not an explicit
+  flag. Fix 4's `None` mask has no effect on vLLM codegen
+- **No `from_state_dict`** — must use `vllm_config` + `load_weights()`
+- **No `generate()`** — raises `NotImplementedError`; vLLM handles
+  generation externally
+- **head_dim >= 256** — hardware limitation, no vLLM attention backend
+  supports it
+- **Legacy forward fallback** for encoder-decoder, hybrid Mamba+attn,
+  >4 norms, ALiBi, sinusoidal positions
+
+### Architecture: unique among backends
+
+- **Only backend with separate `classify.py`** — structural analysis needed
+  to map generic linears to vLLM parallel layer types
+- **Dual forward paths** — clean (optimized transformer loop) vs legacy
+  (generic graph traversal)
+- **Subclasses `_DirectTorchEmitter`** — falls through to torch codegen
+  for unclassified ops
+- **vLLM imported lazily** — codegen module works without vLLM installed,
+  only runtime needs it
+
+### Key files
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `synapse/axon/codegen2_vllm/core.py` | 4,551 | Emitter, forward generation, weight loading |
+| `synapse/axon/codegen2_vllm/classify.py` | 1,668 | 13-pass structural classifier for vLLM layer types |
+| `synapse/axon_test.py:538-749` | ~210 | `_allocate_vllm_kv_cache`, `_build_vllm_attn_metadata`, `_vllm_manual_generate` |
+| `synapse/axon_test.py:5128-5315` | ~190 | VllmConfig construction, model instantiation, weight loading |
+| `scripts/benchmark_vllm_throughput.py` | 395 | Native vLLM throughput benchmark |
+| `scripts/benchmark_vllm_native.py` | 544 | Native vLLM generation benchmark |
+| `synapse/axon/graph_ir/optimize.py:188-192` | 4 | `_VLLM_BACKEND_INTRINSICS` (just `__vllm_paged_attention`) |
+
+## Cross-Backend Intrinsic Parity (2026-09-27)
+
+| Intrinsic | Torch | JAX | MLX | Triton | Tinygrad | vLLM |
+|-----------|:-----:|:---:|:---:|:------:|:--------:|:----:|
+| sdpa (with `is_causal`) | Y | Y | Y | Y | Y | paged* |
+| paged_attention | — | — | — | — | — | Y |
+| rope | Y | Y | Y | Y* | — | codegen** |
+| rmsnorm_scaled | Y | Y | Y | Y | — | codegen |
+| rmsnorm_noscale | Y | Y | — | Y | — | codegen |
+| add_rmsnorm_noscale | Y | Y | — | Y | — | codegen |
+| swiglu_ffn (packed + unpacked) | Y | Y | — | — | — | codegen |
+| gelu_ffn | Y | — | — | Y* | — | — |
+| expert_swiglu_ffn | Y | Y | Y | — | — | — |
+| selected_expert_*_ffn (5 variants) | Y | Y | partial | partial | — | — |
+| weighted_topk_sum | Y | Y | Y | — | — | — |
+
+\* Triton reuses `__torch_` prefix for some intrinsics (shared codegen dispatch).
+\*\* vLLM handles RoPE/FFN/RMSNorm fusion in codegen via native vLLM layers
+(`get_rope`, `SiluAndMul`, `GeluAndMul`, `RMSNorm`), not at the optimizer level.
+
+Totals: Torch 20, JAX 14, MLX 8, Triton 15, Tinygrad 1, vLLM 1.
 
 ## CSV Schema
 
