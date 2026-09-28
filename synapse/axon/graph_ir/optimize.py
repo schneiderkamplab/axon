@@ -1117,20 +1117,42 @@ def _module_provenance_to_operand_map(
     return provenance_to_operand
 
 
+def _extract_dense_linear_info(
+    node: GraphNode,
+) -> tuple[GraphOperand, GraphLiteral, GraphLiteral, GraphOperand, GraphOperand] | None:
+    if node.op.name == "_linear" and len(node.inputs) >= 8:
+        base, x, _dim, bias, transpose, _expert, weight_leaf, bias_leaf = node.inputs[:8]
+        weight_path = _compose_graph_path_operand(base, weight_leaf)
+        if weight_path is None:
+            return None
+        bias_path = _compose_graph_path_operand(base, bias_leaf)
+        if bias_path is None:
+            bias_path = GraphLiteral(value=None, type_expr=TypeNull())
+        return x, bias, transpose, weight_path, bias_path
+    if node.op.name == "NN.linear" and len(node.inputs) >= 6:
+        _base, x, _dim, bias, weight_path, bias_path = node.inputs[:6]
+        transpose = GraphLiteral(value=False, type_expr=TypeBool())
+        return x, bias, transpose, weight_path, bias_path
+    return None
+
+
 def _linear_pair_is_dense_gate_up_candidate(
     first: GraphNode,
     second: GraphNode,
     *,
     parameter_path_counts: Mapping[str, int],
 ) -> tuple[GraphOperand, ...] | None:
-    if first.op.name != "_linear" or second.op.name != "_linear":
+    _LINEAR_OPS = ("_linear", "NN.linear")
+    if first.op.name not in _LINEAR_OPS or second.op.name not in _LINEAR_OPS:
         return None
     if len(first.outputs) != 1 or len(second.outputs) != 1:
         return None
-    if len(first.inputs) < 8 or len(second.inputs) < 8:
+    first_info = _extract_dense_linear_info(first)
+    second_info = _extract_dense_linear_info(second)
+    if first_info is None or second_info is None:
         return None
-    first_path, first_x, first_dim, first_bias, first_transpose, first_expert, first_weight_path, first_bias_path = first.inputs[:8]
-    second_path, second_x, second_dim, second_bias, second_transpose, second_expert, second_weight_path, second_bias_path = second.inputs[:8]
+    first_x, first_bias, first_transpose, first_weight_path, first_bias_path = first_info
+    second_x, second_bias, second_transpose, second_weight_path, second_bias_path = second_info
     if first_x != second_x:
         return None
     if not (
@@ -1142,38 +1164,22 @@ def _linear_pair_is_dense_gate_up_candidate(
         and first_transpose.value is False
         and isinstance(second_transpose, GraphLiteral)
         and second_transpose.value is False
-        and isinstance(first_expert, GraphLiteral)
-        and first_expert.value is None
-        and isinstance(second_expert, GraphLiteral)
-        and second_expert.value is None
     ):
         return None
     if not graph_type_compatible(first.outputs[0].type_expr, second.outputs[0].type_expr):
         return None
-    gate_weight_path = _compose_graph_path_operand(first_path, first_weight_path)
-    up_weight_path = _compose_graph_path_operand(second_path, second_weight_path)
-    gate_bias_path = _compose_graph_path_operand(first_path, first_bias_path)
-    up_bias_path = _compose_graph_path_operand(second_path, second_bias_path)
-    if (
-        gate_weight_path is None
-        or up_weight_path is None
-        or gate_bias_path is None
-        or up_bias_path is None
-    ):
+    if not isinstance(first_weight_path, GraphPath) or not isinstance(second_weight_path, GraphPath):
         return None
-    if not isinstance(gate_weight_path, GraphPath) or not isinstance(up_weight_path, GraphPath):
+    if parameter_path_counts.get(_graph_path_key(first_weight_path), 0) != 1:
         return None
-    if parameter_path_counts.get(_graph_path_key(gate_weight_path), 0) != 1:
+    if parameter_path_counts.get(_graph_path_key(second_weight_path), 0) != 1:
         return None
-    if parameter_path_counts.get(_graph_path_key(up_weight_path), 0) != 1:
-        return None
-    del first_dim, second_dim
     return (
         first_x,
-        gate_weight_path,
-        up_weight_path,
-        gate_bias_path,
-        up_bias_path,
+        first_weight_path,
+        second_weight_path,
+        first_bias_path,
+        second_bias_path,
         first_bias,
         first_transpose,
     )
@@ -1918,6 +1924,136 @@ def _rewrite_torch_swiglu_ffn_intrinsics(
                 )
             )
             index += 4
+        new_modules.append(replace(module, nodes=tuple(new_modules)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _torch_packed_swiglu_ffn_candidate(
+    linear_node: GraphNode,
+    chunk_node: GraphNode,
+    silu_node: GraphNode,
+    mul_node: GraphNode,
+    down_node: GraphNode,
+    *,
+    value_ref_counts: Mapping[str, int],
+    parameter_path_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if linear_node.op.name not in ("_linear", "NN.linear"):
+        return None
+    if chunk_node.op.name != "_chunk":
+        return None
+    if silu_node.op.name not in ("_activations_silu", "Activations.silu"):
+        return None
+    if mul_node.op.name not in {"_mul", "core.binary.*"}:
+        return None
+    if down_node.op.name not in ("_linear", "NN.linear"):
+        return None
+    if len(linear_node.outputs) != 1 or len(chunk_node.outputs) != 2:
+        return None
+    if len(silu_node.outputs) != 1 or len(mul_node.outputs) != 1 or len(down_node.outputs) != 1:
+        return None
+    linear_info = _extract_dense_linear_info(linear_node)
+    if linear_info is None:
+        return None
+    linear_x, _linear_bias, _linear_transpose, gate_up_weight_path, _gate_up_bias_path = linear_info
+    if not isinstance(gate_up_weight_path, GraphPath):
+        return None
+    combined_name = linear_node.outputs[0].name
+    gate_name = chunk_node.outputs[0].name
+    up_name = chunk_node.outputs[1].name
+    silu_name = silu_node.outputs[0].name
+    mul_name = mul_node.outputs[0].name
+    if value_ref_counts.get(combined_name, 0) != 1:
+        return None
+    if value_ref_counts.get(gate_name, 0) != 1:
+        return None
+    if value_ref_counts.get(up_name, 0) != 1:
+        return None
+    if value_ref_counts.get(silu_name, 0) != 1:
+        return None
+    if value_ref_counts.get(mul_name, 0) != 1:
+        return None
+    combined_ref = GraphValueRef(combined_name, linear_node.outputs[0].type_expr, linear_node.outputs[0].dims)
+    gate_ref = GraphValueRef(gate_name, chunk_node.outputs[0].type_expr, chunk_node.outputs[0].dims)
+    up_ref = GraphValueRef(up_name, chunk_node.outputs[1].type_expr, chunk_node.outputs[1].dims)
+    silu_ref = GraphValueRef(silu_name, silu_node.outputs[0].type_expr, silu_node.outputs[0].dims)
+    mul_ref = GraphValueRef(mul_name, mul_node.outputs[0].type_expr, mul_node.outputs[0].dims)
+    if chunk_node.inputs[0] != combined_ref:
+        return None
+    if len(chunk_node.inputs) < 3:
+        return None
+    if not (isinstance(chunk_node.inputs[1], GraphLiteral) and chunk_node.inputs[1].value == -1):
+        return None
+    if not (isinstance(chunk_node.inputs[2], GraphLiteral) and chunk_node.inputs[2].value == 2):
+        return None
+    if silu_node.inputs[0] != gate_ref:
+        return None
+    if not ((mul_node.inputs[0] == silu_ref and mul_node.inputs[1] == up_ref) or
+            (mul_node.inputs[1] == silu_ref and mul_node.inputs[0] == up_ref)):
+        return None
+    down_info = _extract_dense_linear_info(down_node)
+    if down_info is None:
+        return None
+    down_x, down_bias, down_transpose, down_weight_path, down_bias_path = down_info
+    if down_x != mul_ref:
+        return None
+    if not (isinstance(down_bias, GraphLiteral) and down_bias.value is False):
+        return None
+    if not (isinstance(down_transpose, GraphLiteral) and down_transpose.value is False):
+        return None
+    if not isinstance(down_weight_path, GraphPath):
+        return None
+    if parameter_path_counts.get(_graph_path_key(down_weight_path), 0) < 1:
+        return None
+    return (
+        linear_x,
+        gate_up_weight_path,
+        down_weight_path,
+        down_bias_path,
+    )
+
+
+def _rewrite_torch_packed_swiglu_ffn_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_swiglu_ffn",
+) -> GraphProgram:
+    parameter_path_counts = _direct_parameter_path_counts(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 4 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_packed_swiglu_ffn_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                module.nodes[index + 3],
+                module.nodes[index + 4],
+                value_ref_counts=value_ref_counts,
+                parameter_path_counts=parameter_path_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            down_node = module.nodes[index + 4]
+            changed = True
+            new_nodes.append(
+                replace(
+                    down_node,
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 5
         new_modules.append(replace(module, nodes=tuple(new_nodes)))
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
@@ -16077,6 +16213,16 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_packed_swiglu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_packed_swiglu_ffn_intrinsics")
                 current = candidate
             candidate = (
                 _rewrite_torch_gelu_ffn_intrinsics(current)

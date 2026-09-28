@@ -1907,7 +1907,9 @@ class Codegen2GraphModel(nn.Module):
     ) -> torch.Tensor:
         k = cls._move_to(k, q.device)
         v = cls._move_to(v, q.device)
-        attn_mask = cls._move_to(attn_mask, q.device)
+        is_causal = attn_mask is None
+        if not is_causal:
+            attn_mask = cls._move_to(attn_mask, q.device)
         target_dtype = v.dtype
         if q.dtype != target_dtype:
             q = q.to(dtype=target_dtype)
@@ -1932,7 +1934,7 @@ class Codegen2GraphModel(nn.Module):
             v,
             attn_mask=attn_mask,
             dropout_p=0.0,
-            is_causal=False,
+            is_causal=is_causal,
             scale=None if scale is None else float(scale),
             enable_gqa=enable_gqa,
         )
@@ -2007,6 +2009,24 @@ class Codegen2GraphModel(nn.Module):
         )
         hidden = F.silu(gate) * up
         down_weight = self._required_param(str(down_weight_path), field="swiglu_ffn.down.weight")
+        hidden = self._move_to(hidden, down_weight.device)
+        return F.linear(hidden, down_weight, None)
+
+    def _packed_swiglu_ffn(
+        self,
+        x: Any,
+        gate_up_weight_path: Any,
+        down_weight_path: Any,
+        down_bias_path: Any = None,
+    ) -> Any:
+        del down_bias_path
+        gate_up_weight = self._required_param(str(gate_up_weight_path), field="packed_swiglu_ffn.gate_up.weight")
+        x = self._move_to(x, gate_up_weight.device)
+        weight_run = gate_up_weight.to(dtype=x.dtype) if x.is_floating_point() and gate_up_weight.is_floating_point() and x.dtype != gate_up_weight.dtype else gate_up_weight
+        combined = F.linear(x, weight_run)
+        gate, up = torch.chunk(combined, 2, dim=-1)
+        hidden = F.silu(gate) * up
+        down_weight = self._required_param(str(down_weight_path), field="packed_swiglu_ffn.down.weight")
         hidden = self._move_to(hidden, down_weight.device)
         return F.linear(hidden, down_weight, None)
 
@@ -2326,9 +2346,12 @@ class Codegen2GraphModel(nn.Module):
             return True
 
         if primitive == "_torch_swiglu_ffn":
-            if len(args) < 7:
-                raise ValueError("__torch_swiglu_ffn expects input, gate/up/down weight paths, and gate/up/down bias paths")
-            out(self._swiglu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
+            if len(args) >= 7:
+                out(self._swiglu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
+            elif len(args) >= 3:
+                out(self._packed_swiglu_ffn(args[0], args[1], args[2], args[3] if len(args) > 3 else None))
+            else:
+                raise ValueError("__torch_swiglu_ffn expects 3-4 or 7 inputs")
             return True
 
         if primitive == "_torch_swiglu_activation":
@@ -2526,14 +2549,17 @@ class Codegen2GraphModel(nn.Module):
             eps = float(args[2]) if len(args) > 2 and not self._is_null(args[2]) else 1e-6
             cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else True
             weight = self._param(self._compose_path(scale_path)) if isinstance(scale_path, GraphPath) else self._param(scale_path)
-            if cast_float:
+            if cast_float and hasattr(F, "rms_norm"):
+                out(weight * F.rms_norm(x, [x.shape[-1]], eps=eps))
+            elif cast_float:
                 x_f = x.float()
                 y = x_f * torch.rsqrt(torch.mean(x_f * x_f, dim=-1, keepdim=True) + eps)
                 y = weight * y.to(dtype=x.dtype)
+                out(y)
             else:
                 y = x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
                 y = weight * y
-            out(y)
+                out(y)
             return True
 
         if primitive == "_torch_rmsnorm_noscale":
@@ -2543,7 +2569,9 @@ class Codegen2GraphModel(nn.Module):
             cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else False
             if dim is not None and int(dim) != -1:
                 raise ValueError("_torch_rmsnorm_noscale only supports dim=None/-1")
-            if cast_float:
+            if cast_float and hasattr(F, "rms_norm"):
+                out(F.rms_norm(x, [x.shape[-1]], eps=eps))
+            elif cast_float:
                 x_f = x.float()
                 y = x_f * torch.rsqrt(torch.mean(x_f * x_f, dim=-1, keepdim=True) + eps)
                 out(y.to(dtype=x.dtype))
@@ -2557,11 +2585,14 @@ class Codegen2GraphModel(nn.Module):
             eps = float(args[2]) if len(args) > 2 and not self._is_null(args[2]) else 1e-6
             cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else True
             s = x + r
-            x_calc = s.float() if cast_float else s
-            y = x_calc * torch.rsqrt(torch.mean(x_calc * x_calc, dim=-1, keepdim=True) + eps)
-            if cast_float:
-                y = y.to(dtype=x.dtype)
-            out(y)
+            if cast_float and hasattr(F, "rms_norm"):
+                out(F.rms_norm(s, [s.shape[-1]], eps=eps))
+            else:
+                x_calc = s.float() if cast_float else s
+                y = x_calc * torch.rsqrt(torch.mean(x_calc * x_calc, dim=-1, keepdim=True) + eps)
+                if cast_float:
+                    y = y.to(dtype=x.dtype)
+                out(y)
             return True
 
         if primitive == "conv1d":
@@ -3984,6 +4015,18 @@ class _DirectTorchEmitter:
         add(lines, 4, "")
         add(lines, 4, "def _swiglu_ffn(self, x, gate_weight_path, up_weight_path, down_weight_path, gate_bias_path='bias', up_bias_path='bias', down_bias_path='bias'):")
         add(lines, 8, "gate, up = self._gate_up_linear_pair(x, gate_weight_path, up_weight_path, gate_bias_path=gate_bias_path, up_bias_path=up_bias_path, bias=False, transpose=False)")
+        add(lines, 8, "hidden = F.silu(gate) * up")
+        add(lines, 8, "down_weight = self._param(down_weight_path)")
+        add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
+        add(lines, 8, "return F.linear(hidden, down_weight, None)")
+        add(lines, 4, "")
+        add(lines, 4, "def _packed_swiglu_ffn(self, x, gate_up_weight_path, down_weight_path, down_bias_path=None):")
+        add(lines, 8, "del down_bias_path")
+        add(lines, 8, "gate_up_weight = self._param(gate_up_weight_path)")
+        add(lines, 8, "x = self._move_to(x, gate_up_weight.device)")
+        add(lines, 8, "weight_run = gate_up_weight.to(dtype=x.dtype) if x.is_floating_point() and gate_up_weight.is_floating_point() and x.dtype != gate_up_weight.dtype else gate_up_weight")
+        add(lines, 8, "combined = F.linear(x, weight_run)")
+        add(lines, 8, "gate, up = torch.chunk(combined, 2, dim=-1)")
         add(lines, 8, "hidden = F.silu(gate) * up")
         add(lines, 8, "down_weight = self._param(down_weight_path)")
         add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
@@ -6076,12 +6119,16 @@ class _DirectTorchEmitter:
                 f"bias={bool_arg(5)}, transpose={bool_arg(6)})"
             )
         if primitive == "_torch_swiglu_ffn":
-            if len(args) < 7:
-                raise ValueError("__torch_swiglu_ffn expects input, gate/up/down weight paths, and gate/up/down bias paths")
-            return (
-                f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
-                f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
-            )
+            if len(args) >= 7:
+                return (
+                    f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
+                    f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
+                )
+            elif len(args) >= 3:
+                down_bias = args[3] if len(args) > 3 else "None"
+                return f"self._packed_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {down_bias})"
+            else:
+                raise ValueError("__torch_swiglu_ffn expects 3-4 or 7 inputs")
         if primitive == "_torch_swiglu_activation":
             return f"(F.silu({args[0]}) * {args[1]})"
         if primitive == "_torch_split_swiglu":
@@ -6261,25 +6308,27 @@ class _DirectTorchEmitter:
             cast_float = bool_arg(3, "True")
             weight = f"self._param({scale_path})"
             x_float = f"{x}.float()"
+            y_rms = f"({weight} * F.rms_norm({x}, [{x}.shape[-1]], eps={eps}))"
             y_float = f"({weight} * ({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype))"
             y = f"({weight} * ({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps})))"
             if cast_float == "True":
-                return y_float
+                return f"({y_rms} if hasattr(F, 'rms_norm') else {y_float})"
             if cast_float == "False":
                 return y
-            return f"({y_float} if {cast_float} else {y})"
+            return f"(({y_rms} if hasattr(F, 'rms_norm') else {y_float}) if {cast_float} else {y})"
         if primitive == "_torch_rmsnorm_noscale":
             x = args[0]
             eps = float_arg(1, "1e-6")
             cast_float = bool_arg(3, "False")
+            y_rms = f"F.rms_norm({x}, [{x}.shape[-1]], eps={eps})"
             x_float = f"{x}.float()"
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
             if cast_float == "True":
-                return y_float
+                return f"(F.rms_norm({x}, [{x}.shape[-1]], eps={eps}) if hasattr(F, 'rms_norm') else {y_float})"
             if cast_float == "False":
                 return y
-            return f"({y_float} if {cast_float} else {y})"
+            return f"((F.rms_norm({x}, [{x}.shape[-1]], eps={eps}) if hasattr(F, 'rms_norm') else {y_float}) if {cast_float} else {y})"
         if primitive == "_torch_add_rmsnorm_noscale":
             x = args[0]
             r = args[1]
@@ -6287,13 +6336,14 @@ class _DirectTorchEmitter:
             cast_float = bool_arg(3, "True")
             s = f"({x} + {r})"
             s_float = f"{s}.float()"
+            y_rms = f"F.rms_norm({s}, [{s}.shape[-1]], eps={eps})"
             y_float = f"({s_float} * torch.rsqrt(torch.mean({s_float} * {s_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype)"
             y = f"({s} * torch.rsqrt(torch.mean({s} * {s}, dim=-1, keepdim=True) + {eps}))"
             if cast_float == "True":
-                return y_float
+                return f"(F.rms_norm({s}, [{s}.shape[-1]], eps={eps}) if hasattr(F, 'rms_norm') else {y_float})"
             if cast_float == "False":
                 return y
-            return f"({y_float} if {cast_float} else {y})"
+            return f"((F.rms_norm({s}, [{s}.shape[-1]], eps={eps}) if hasattr(F, 'rms_norm') else {y_float}) if {cast_float} else {y})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
         if primitive == "tensor_like":

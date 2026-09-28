@@ -13,20 +13,19 @@ import re
 import shutil
 import sys
 import time
-from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import safetensors
 import torch
 from accelerate import dispatch_model, init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 from mltiming import timing
-from omegaconf import OmegaConf
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -37,11 +36,15 @@ from transformers import (
 )
 from transformers.generation import GenerationConfig, GenerationMixin
 from transformers.utils import import_utils as transformers_import_utils
+
 try:
     from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
 except ImportError:
     FineGrainedFP8Config = None  # type: ignore[assignment,misc]
     Mxfp4Config = None  # type: ignore[assignment,misc]
+
+if TYPE_CHECKING:
+    from .axon import GraphOptimizeConfig
 
 from .axon import (
     candidate_tokenizer_dirs,
@@ -3280,6 +3283,56 @@ def _sync_device_output(value: Any) -> None:
             _sync_device_output(item)
 
 
+def _collect_runtime_metrics(
+    model: Any,
+    forward_fn: Any,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Run one profiled forward pass to collect kernel count and memory metrics."""
+    metrics: dict[str, Any] = {
+        "kernel_count": None,
+        "peak_memory_bytes": None,
+        "memory_delta_bytes": None,
+        "op_call_count": None,
+    }
+    is_cuda = device.type == "cuda"
+    try:
+        with torch.no_grad():
+            if is_cuda:
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats(device)
+                mem_before = torch.cuda.memory_allocated(device)
+            if is_cuda:
+                from torch.profiler import ProfilerActivity, profile
+
+                with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU]) as prof:
+                    forward_fn()
+                torch.cuda.synchronize()
+                events = prof.key_averages()
+                cuda_count = sum(
+                    e.count for e in events if e.self_device_time_total > 0
+                )
+                cpu_count = sum(
+                    e.count for e in events if e.self_cpu_time_total > 0
+                )
+                metrics["kernel_count"] = cuda_count
+                metrics["cpu_op_count"] = cpu_count
+            else:
+                forward_fn()
+            if is_cuda:
+                peak_mem = torch.cuda.max_memory_allocated(device)
+                mem_after = torch.cuda.memory_allocated(device)
+                metrics["peak_memory_bytes"] = peak_mem
+                metrics["memory_delta_bytes"] = mem_after - mem_before
+            profile_summary = getattr(model, "profile_summary", None)
+            if callable(profile_summary):
+                rows = list(profile_summary(top_n=999999))
+                metrics["op_call_count"] = sum(r.get("count", 0) for r in rows)
+    except Exception as exc:
+        metrics["error"] = str(exc)
+    return metrics
+
+
 def _time_generate_repeated(
     label: str,
     fn: Any,
@@ -3801,6 +3854,7 @@ def _run_axon_test_single(
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    graph_optimize_config: GraphOptimizeConfig | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -3812,6 +3866,7 @@ def _run_axon_test_single(
     forward_repeat: int = 1,
     generate_warmup: int = 0,
     generate_repeat: int = 1,
+    track_runtime: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
@@ -4006,17 +4061,23 @@ def _run_axon_test_single(
                             if isinstance(_hs, (int, float)) and _hs > 0:
                                 model_config["embedding_scale"] = _hs ** 0.5
                         break
-        if optimize_graph:
+        if optimize_graph or graph_optimize_config is not None:
             from .axon import GraphOptimizeConfig
 
-            effective_graph_backend_intrinsics = _default_graph_backend_intrinsics(
-                axon_backend=axon_backend,
-                graph_backend_intrinsics=graph_backend_intrinsics,
-            )
-            graph_program = optimize_graph_program(
-                graph_program,
-                config=GraphOptimizeConfig(backend_intrinsics=effective_graph_backend_intrinsics),
-            )
+            if graph_optimize_config is not None:
+                graph_program = optimize_graph_program(
+                    graph_program,
+                    config=graph_optimize_config,
+                )
+            else:
+                effective_graph_backend_intrinsics = _default_graph_backend_intrinsics(
+                    axon_backend=axon_backend,
+                    graph_backend_intrinsics=graph_backend_intrinsics,
+                )
+                graph_program = optimize_graph_program(
+                    graph_program,
+                    config=GraphOptimizeConfig(backend_intrinsics=effective_graph_backend_intrinsics),
+                )
         main_graph_module = next(
             module for module in graph_program.modules if module.name == graph_program.main_module
         )
@@ -4913,6 +4974,11 @@ def _run_axon_test_single(
             for handle in hf_hook_handles:
                 handle.remove()
             del hf_hook_handles
+            hf_runtime_metrics: dict[str, Any] = {}
+            if track_runtime:
+                hf_runtime_metrics = _collect_runtime_metrics(
+                    hf, lambda model=hf: _run_hf_forward(model), target_device,
+                )
             del hf
             if hf_model is not None:
                 del hf_model
@@ -4931,6 +4997,7 @@ def _run_axon_test_single(
                 "layer_outputs": hf_layer_outputs,
                 "state_ref_cpu": local_state_ref_cpu,
                 "device": str(target_device),
+                "runtime_metrics": hf_runtime_metrics,
             }
 
         hf_result: dict[str, Any] = {}
@@ -4974,6 +5041,7 @@ def _run_axon_test_single(
             hf_layer_inputs = cast(dict[int, torch.Tensor], hf_result["layer_inputs"])
             hf_layer_outputs = cast(dict[int, torch.Tensor], hf_result["layer_outputs"])
             hf_exec_device_str = cast(str, hf_result["device"])
+            hf_runtime_metrics = cast(dict[str, Any], hf_result.get("runtime_metrics", {}))
             state_ref_cpu = cast(dict[str, torch.Tensor] | None, hf_result["state_ref_cpu"])
             decoder_attention_mask_for_metrics = cast(
                 torch.Tensor | None, hf_result.get("decoder_attention_mask")
@@ -5443,6 +5511,11 @@ def _run_axon_test_single(
                 and isinstance(original_block_name, str)
             ):
                 setattr(syn, original_block_name, original_block_call)
+            runtime_metrics: dict[str, Any] = {}
+            if track_runtime:
+                runtime_metrics = _collect_runtime_metrics(
+                    syn, _run_syn_forward, target_device,
+                )
             profile_rows: list[dict[str, Any]] = []
             if profile_axon:
                 profile_summary = getattr(syn, "profile_summary", None)
@@ -5473,6 +5546,7 @@ def _run_axon_test_single(
                 "layer_outputs": syn_layer_outputs,
                 "device": str(target_device),
                 "profile": profile_rows,
+                "runtime_metrics": runtime_metrics,
             }
 
         syn_result: dict[str, Any]
@@ -5504,6 +5578,7 @@ def _run_axon_test_single(
         syn_layer_outputs = cast(dict[int, torch.Tensor], syn_result["layer_outputs"])
         syn_exec_device_str = cast(str, syn_result["device"])
         syn_profile = cast(list[dict[str, Any]], syn_result.get("profile", []))
+        syn_runtime_metrics = cast(dict[str, Any], syn_result.get("runtime_metrics", {}))
         requested_device_str = str(resolved_device)
         requested_cuda = requested_device_str.startswith("cuda")
         hf_fallback = bool((not skip_hf) and requested_cuda and hf_exec_device_str == "cpu")
@@ -5925,6 +6000,8 @@ def _run_axon_test_single(
             "axon_device": syn_exec_device_str,
             "skip_hf": bool(skip_hf),
             "axon_profile": syn_profile,
+            "runtime_metrics": syn_runtime_metrics,
+            "hf_runtime_metrics": hf_runtime_metrics if not skip_hf else {},
         }
 
         return result
@@ -5964,6 +6041,7 @@ def run_axon_test(
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    graph_optimize_config: GraphOptimizeConfig | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -5974,6 +6052,7 @@ def run_axon_test(
     forward_repeat: int = 1,
     generate_warmup: int = 0,
     generate_repeat: int = 1,
+    track_runtime: bool = False,
 ) -> dict[str, Any]:
     return _run_axon_test_single(
         axon_file=axon_file,
@@ -6008,6 +6087,7 @@ def run_axon_test(
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=graph_backend_intrinsics,
+        graph_optimize_config=graph_optimize_config,
         builtins_overlays=builtins_overlays,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
@@ -6018,6 +6098,7 @@ def run_axon_test(
         forward_repeat=forward_repeat,
         generate_warmup=generate_warmup,
         generate_repeat=generate_repeat,
+        track_runtime=track_runtime,
     )
 
 

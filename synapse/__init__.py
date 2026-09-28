@@ -72,6 +72,12 @@ def render_axon_test_log(*args, **kwargs):
     return _render_axon_test_log(*args, **kwargs)
 
 
+def run_axon_ablation(*args, **kwargs):
+    from .axon_ablation import CompilerAblation
+
+    return CompilerAblation(*args, **kwargs)
+
+
 __all__ = [
     "AxonBind",
     "AxonDefinition",
@@ -89,6 +95,7 @@ __all__ = [
     "run_axon_benchmark",
     "render_axon_benchmark_csv",
     "run_axon_test",
+    "run_axon_ablation",
     "render_axon_benchmark_log",
     "render_axon_test_log",
     "run_axon_test_matrix",

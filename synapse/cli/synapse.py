@@ -1659,8 +1659,125 @@ def axon_materialize(
         typer.echo(path)
 
 
+@app.command("axon-ablation")
+def axon_ablation(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file (.axon).",
+    ),
+    weights: Path = typer.Argument(
+        ...,
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Path to model checkpoint directory (e.g. models/gpt2).",
+    ),
+    backend: str = typer.Option(
+        "codegen2-torch",
+        "--backend",
+        help="Codegen backend (codegen2-torch/codegen2-triton).",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Device (cpu/cuda/cuda:0/auto).",
+    ),
+    dtype: str = typer.Option(
+        "float32",
+        "--dtype",
+        help="Data type (float32/float16/bfloat16).",
+    ),
+    output_dir: Path = typer.Option(
+        Path("log/ablation"),
+        "--output-dir",
+        "-o",
+        help="Directory to write ablation CSV and SVG files.",
+    ),
+    forward_warmup: int = typer.Option(
+        2,
+        "--forward-warmup",
+        help="Number of untimed warmup forward passes.",
+    ),
+    forward_repeat: int = typer.Option(
+        10,
+        "--forward-repeat",
+        help="Number of timed forward passes (mean is reported).",
+    ),
+    max_len: int = typer.Option(
+        32,
+        "--max-len",
+        help="Maximum sequence length for benchmarking.",
+    ),
+    skip_hf: bool = typer.Option(
+        False,
+        "--skip-hf",
+        help="Skip loading the HF reference model (saves memory for large models).",
+    ),
+    compile_mode: str = typer.Option(
+        None,
+        "--compile-mode",
+        help="torch.compile mode (default/reduce-overhead/max-autotune).",
+    ),
+    tier: str = typer.Option(
+        "all",
+        "--tier",
+        help=(
+            "Which ablation tier to run: t1-stages, t2-per-pass, t3-per-intrinsic, t4-baselines, or all."
+        ),
+    ),
+    list_configs: bool = typer.Option(
+        False,
+        "--list-configs",
+        help="List the ablation configs that would be run and exit.",
+    ),
+) -> None:
+    """Run compiler ablation: measure IR metrics + runtime per optimization config."""
+    from synapse.axon_ablation import CompilerAblation
+
+    if not list_configs and not weights.exists():
+        raise typer.BadParameter(f"Directory '{weights}' does not exist.")
+    abl = CompilerAblation(
+        axon_file=axon_path,
+        weights=weights,
+        backend=backend,
+        device=device,
+        dtype=dtype,
+        forward_warmup=forward_warmup,
+        forward_repeat=forward_repeat,
+        max_len=max_len,
+        skip_hf=skip_hf,
+        compile_mode=compile_mode,
+    )
+    configs = abl.build_ablation_matrix()
+    if tier == "t4-baselines":
+        configs = abl.build_baseline_configs()
+    elif tier != "all":
+        configs = [c for c in configs if c.tier == tier]
+    if list_configs:
+        for c in configs:
+            typer.echo(f"  {c.name:40s}  [{c.tier}]  {c.description}")
+        typer.echo(f"Total: {len(configs)} configs")
+        return
+    typer.echo(f"Running {len(configs)} ablation configs on {axon_path.name}...")
+    results = abl.run(configs)
+    paths = abl.export(results, output_dir)
+    typer.echo(f"\nResults exported to {output_dir}/")
+    typer.echo(f"  CSV:       {paths['csv']}")
+    typer.echo(f"  Waterfall:  {paths['waterfall']}")
+    typer.echo(f"  Runtime:    {paths['runtime']}")
+    typer.echo(f"  Ops heatmap:{paths['ops_heatmap']}")
+    typer.echo(f"  Kernels:   {paths['kernels']}")
+    typer.echo(f"  Memory:    {paths['memory']}")
+
+
 __all__ = [
     "app",
     "axon_test",
     "axon_test_matrix",
+    "axon_ablation",
 ]
