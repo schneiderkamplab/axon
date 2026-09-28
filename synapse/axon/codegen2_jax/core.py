@@ -106,8 +106,11 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "activations_gegelu",
     "activations_xielu",
     "cumsum",
+    "_jax_add_rmsnorm_noscale",
     "_jax_expert_packed_swiglu_ffn",
     "_jax_expert_swiglu_ffn",
+    "_jax_rmsnorm_noscale",
+    "_jax_rmsnorm_scaled",
     "_jax_sdpa",
     "_jax_selected_expert_clamped_packed_swiglu_ffn",
     "_jax_selected_expert_packed_gegelu_ffn",
@@ -1015,6 +1018,15 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "hidden = (nn.sigmoid(gate) * gate) * up")
         add(lines, 8, "return hidden @ down_weight.swapaxes(-1, -2)")
         add(lines, 4, "")
+        add(lines, 4, "def _packed_swiglu_ffn(self, x, gate_up_weight_path, down_weight_path, down_bias_path=None):")
+        add(lines, 8, "del down_bias_path")
+        add(lines, 8, "gate_up_weight = self._param(gate_up_weight_path)")
+        add(lines, 8, "down_weight = self._param(down_weight_path)")
+        add(lines, 8, "gate_up = x @ gate_up_weight.swapaxes(-1, -2)")
+        add(lines, 8, "gate, up = jnp.split(gate_up, 2, axis=-1)")
+        add(lines, 8, "hidden = (nn.sigmoid(gate) * gate) * up")
+        add(lines, 8, "return hidden @ down_weight.swapaxes(-1, -2)")
+        add(lines, 4, "")
         add(lines, 4, "def _expert_swiglu_ffn(self, x, expert_idx, gate_weight_path, up_weight_path, down_weight_path):")
         add(lines, 8, "gate = self._expert_linear_weight(x, expert_idx, gate_weight_path)")
         add(lines, 8, "up = self._expert_linear_weight(x, expert_idx, up_weight_path)")
@@ -1122,8 +1134,21 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "if weight is not None: y = y * weight.astype(jnp.float32)")
         add(lines, 8, "return y.astype(out_dtype)")
         add(lines, 4, "")
+        add(lines, 4, "def _rmsnorm_scaled(self, x, scale_path, eps=1e-6, cast_float=True):")
+        add(lines, 8, "weight = self._param(scale_path)")
+        add(lines, 8, "return self._rms_norm(x.astype(jnp.float32) if cast_float else x, weight, float(eps))")
+        add(lines, 4, "")
+        add(lines, 4, "def _rmsnorm_noscale(self, x, eps=1e-6, dim=None, cast_float=False):")
+        add(lines, 8, "del dim")
+        add(lines, 8, "return self._rms_norm(x.astype(jnp.float32) if cast_float else x, None, float(eps))")
+        add(lines, 4, "")
+        add(lines, 4, "def _add_rmsnorm_noscale(self, x, r, eps=1e-6, dim=None, cast_float=True):")
+        add(lines, 8, "del dim")
+        add(lines, 8, "s = x + r")
+        add(lines, 8, "return self._rms_norm(s.astype(jnp.float32) if cast_float else s, None, float(eps))")
+        add(lines, 4, "")
         add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _sdpa(q, k, v, mask=None, scale=None, extra_bias=None):")
+        add(lines, 4, "def _sdpa(q, k, v, mask=None, scale=None, extra_bias=None, is_causal=False):")
         add(lines, 8, "target_dtype = v.dtype")
         add(lines, 8, "if q.dtype != target_dtype:")
         add(lines, 12, "q = q.astype(target_dtype)")
@@ -1150,7 +1175,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "q_t = jnp.transpose(q, (0, 2, 1, 3))")
         add(lines, 8, "k_t = jnp.transpose(k, (0, 2, 1, 3))")
         add(lines, 8, "v_t = jnp.transpose(v, (0, 2, 1, 3))")
-        add(lines, 8, "out = jax.nn.dot_product_attention(q_t, k_t, v_t, bias=bias, mask=mask_bool, scale=scale_value)")
+        add(lines, 8, "out = jax.nn.dot_product_attention(q_t, k_t, v_t, bias=bias, mask=mask_bool, is_causal=is_causal, scale=scale_value)")
         add(lines, 8, "return jnp.transpose(out, (0, 2, 1, 3))")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
@@ -1689,12 +1714,16 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias=bool({bias}), transpose=bool({transpose}), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
         if primitive == "_jax_swiglu_ffn":
-            if len(args) < 7:
-                raise ValueError("__jax_swiglu_ffn expects input, gate/up/down weight paths, and gate/up/down bias paths")
-            return (
-                f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
-                f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
-            )
+            if len(args) >= 7:
+                return (
+                    f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
+                    f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
+                )
+            elif len(args) >= 3:
+                down_bias = args[3] if len(args) > 3 else "None"
+                return f"self._packed_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {down_bias})"
+            else:
+                raise ValueError("__jax_swiglu_ffn expects 3-4 or 7 inputs")
         if primitive == "_jax_expert_swiglu_ffn":
             if len(args) < 5:
                 raise ValueError("__jax_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
@@ -1750,28 +1779,29 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             if len(args) < 6:
                 raise ValueError("__jax_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
             scale = f"float({args[4]})" if args[4] != "None" else "None"
+            is_causal = f"({args[3]} is None)"
             if len(args) >= 7:
                 if scale == "None":
                     return (
                         f"self._sdpa("
                         f"{args[0]}, {args[1]}, {args[2]}, "
-                        f"mask={args[3]}, scale=None, extra_bias={args[6]})"
+                        f"mask={args[3]}, scale=None, extra_bias={args[6]}, is_causal={is_causal})"
                     )
                 return (
                     f"self._sdpa("
                     f"{args[0]}, {args[1]}, {args[2]}, "
-                    f"mask={args[3]}, scale={scale}, extra_bias={args[6]})"
+                    f"mask={args[3]}, scale={scale}, extra_bias={args[6]}, is_causal={is_causal})"
                 )
             if scale == "None":
                 return (
                     f"self._sdpa("
                     f"{args[0]}, {args[1]}, {args[2]}, "
-                    f"mask={args[3]}, scale=None)"
+                    f"mask={args[3]}, scale=None, is_causal={is_causal})"
                 )
             return (
                 f"self._sdpa("
                 f"{args[0]}, {args[1]}, {args[2]}, "
-                f"mask={args[3]}, scale={scale})"
+                f"mask={args[3]}, scale={scale}, is_causal={is_causal})"
             )
         if primitive == "layernorm":
             path_operand = node.inputs[0]
@@ -1807,6 +1837,25 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                 f"self._rms_norm({x}.astype(jnp.float32), None, float({eps}))"
                 f"if {cast_float} else self._rms_norm({x}, None, float({eps}))"
             )
+        if primitive == "_jax_rmsnorm_scaled":
+            x = args[0]
+            scale_path = args[1]
+            eps = args[2] if len(args) > 2 else "1e-6"
+            cast_float = args[3] if len(args) > 3 else "True"
+            return f"self._rmsnorm_scaled({x}, {scale_path}, eps=float({eps}), cast_float=bool({cast_float}))"
+        if primitive == "_jax_rmsnorm_noscale":
+            x = args[0]
+            eps = args[1] if len(args) > 1 else "1e-6"
+            dim = args[2] if len(args) > 2 else "None"
+            cast_float = args[3] if len(args) > 3 else "False"
+            return f"self._rmsnorm_noscale({x}, eps=float({eps}), dim={dim}, cast_float=bool({cast_float}))"
+        if primitive == "_jax_add_rmsnorm_noscale":
+            x = args[0]
+            r = args[1]
+            eps = args[2] if len(args) > 2 else "1e-6"
+            dim = args[3] if len(args) > 3 else "None"
+            cast_float = args[4] if len(args) > 4 else "True"
+            return f"self._add_rmsnorm_noscale({x}, {r}, eps=float({eps}), dim={dim}, cast_float=bool({cast_float}))"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             return f"({args[0]}.astype(self._dtype_from_name({dtype}) or {args[1]}.dtype) if isinstance({args[0]}, jax.Array) else jnp.array({args[0]}, dtype=(self._dtype_from_name({dtype}) or {args[1]}.dtype)))"

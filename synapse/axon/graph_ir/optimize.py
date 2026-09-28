@@ -152,8 +152,11 @@ _JAX_BACKEND_INTRINSICS = frozenset(
     {
         "__jax_sdpa",
         "__jax_rope",
+        "__jax_add_rmsnorm_noscale",
         "__jax_expert_packed_swiglu_ffn",
         "__jax_expert_swiglu_ffn",
+        "__jax_rmsnorm_noscale",
+        "__jax_rmsnorm_scaled",
         "__jax_selected_expert_clamped_packed_swiglu_ffn",
         "__jax_selected_expert_packed_gegelu_ffn",
         "__jax_selected_expert_packed_swiglu_ffn",
@@ -6274,7 +6277,7 @@ def _rewrite_mlx_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgram:
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
-def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram, *, op_name: str = "__torch_rmsnorm_scaled") -> GraphProgram:
     modules_by_name = {m.name: m for m in graph.modules}
     changed = False
     new_modules: list[GraphModule] = []
@@ -6305,7 +6308,7 @@ def _rewrite_torch_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgra
                 cast_float = GraphLiteral(value=False, type_expr=TypeBool())
             new_node = replace(
                 param_scale_node,
-                op=GraphOp("__torch_rmsnorm_scaled"),
+                op=GraphOp(op_name),
                 inputs=(
                     x,
                     scale_path,
@@ -16589,10 +16592,80 @@ def optimize_graph_program(
                 current = candidate
             jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
-                _rewrite_torch_expert_swiglu_ffn_intrinsics(current, op_name="__jax_expert_swiglu_ffn")
-                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_expert_swiglu_ffn")
+                _rewrite_torch_packed_swiglu_ffn_intrinsics(current, op_name="__jax_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_swiglu_ffn")
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_packed_swiglu_ffn_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_packed_swiglu_ffn_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_torch_rmsnorm_scaled_intrinsics(current, op_name="__jax_rmsnorm_scaled")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_rmsnorm_scaled")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_rmsnorm_scaled_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_rmsnorm_scaled_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_rmsnorm_noscale_module_calls(current, op_name="__jax_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_rmsnorm_noscale")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_rmsnorm_noscale_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_rmsnorm_noscale_module_calls")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_add_rmsnorm_noscale_intrinsics(current, rmsnorm_op="__jax_rmsnorm_noscale", fused_op="__jax_add_rmsnorm_noscale")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_add_rmsnorm_noscale")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_add_rmsnorm_noscale_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_add_rmsnorm_noscale_intrinsics")
+                current = candidate
             if debug_timings:
                 print(
                     "[graph-opt] "
