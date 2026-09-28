@@ -6964,6 +6964,57 @@ def _eliminate_gqa_repeat_for_sdpa(graph: GraphProgram) -> GraphProgram:
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
+def _is_safe_causal_window(operand: GraphOperand) -> bool:
+    """Return True when the window argument is null or large enough to be a no-op."""
+    if isinstance(operand, GraphLiteral) and operand.value is None:
+        return True
+    if isinstance(operand, GraphLiteral) and isinstance(operand.value, int | float) and operand.value >= 1024:
+        return True
+    return False
+
+
+def _rewrite_causal_mask_select_to_none(graph: GraphProgram) -> GraphProgram:
+    """Replace the true branch of ``core.select`` with ``None`` when it is a pure causal mask.
+
+    After inlining ``Masking.causal_mask_for_input``, the parent module contains a
+    ``core.select`` that chooses between ``causal_mask_for_input_keep`` (no padding)
+    and ``causal_mask_for_input_masked`` (with padding).  When the keep branch has
+    ``window=null`` or ``window >= 1024``, the mask is equivalent to a standard
+    lower-triangular causal mask, so ``is_causal=True`` in SDPA is correct.  Replacing
+    the keep branch with ``None`` lets the codegen emit ``is_causal=True`` instead of
+    materialising the mask.
+    """
+    _CAUSAL_KEEP_NAMES = {
+        "Masking.causal_mask_for_input_keep",
+        "Masking.causal_mask_keep",
+    }
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = False
+            if (
+                node.op.name == "core.select"
+                and len(node.inputs) == 3
+                and isinstance(node.inputs[1], GraphExpr)
+                and node.inputs[1].op.name in _CAUSAL_KEEP_NAMES
+            ):
+                keep_call = node.inputs[1]
+                window: GraphOperand | None = None
+                if len(keep_call.inputs) >= 3:
+                    window = keep_call.inputs[2]
+                if window is None or _is_safe_causal_window(window):
+                    new_inputs = list(node.inputs)
+                    new_inputs[1] = GraphLiteral(value=None, type_expr=TypeNull())
+                    node = replace(node, inputs=tuple(new_inputs))
+                    changed = True
+                    rewritten = True
+            new_nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
 def _canonical_specialization_operand(
     operand: GraphOperand,
     *,
@@ -16173,6 +16224,13 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="dense_gate_up_linear_pair")
+                current = candidate
+            candidate = _rewrite_causal_mask_select_to_none(current)
+            if candidate != current:
+                candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="causal_mask_select_to_none")
                 current = candidate
         backend_start = time.perf_counter() if debug_timings else 0.0
         if backend_intrinsic_target == "codegen2-torch":
