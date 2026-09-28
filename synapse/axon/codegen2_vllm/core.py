@@ -187,6 +187,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         self._inline_loop_prefix: dict[str, str] = self._build_inline_loop_prefix()
         self._unit_offset_norm_attrs: list[tuple[str, bool]] = []
         self._pos_emb_info: tuple[str, str] | None = None
+        self._type_emb_info: tuple[str, str] | None = None
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -1053,7 +1054,8 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
 
     def _detect_pos_embedding(self, classification: Any) -> tuple[str, str] | None:
         """Detect a learned position embedding (NN.embedding not classified as
-        VOCAB_PARALLEL_EMBEDDING, with path containing 'position' or 'embed_pos').
+        VOCAB_PARALLEL_EMBEDDING, with weight path containing 'position',
+        'embed_pos', 'wpe', or 'pos_emb').
 
         Returns (prefix_expr, dim_expr) or None.
         """
@@ -1065,17 +1067,76 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     continue
                 if node.id == getattr(classification, 'pli_embed_node_id', None):
                     continue
-                path_inp = node.inputs[0] if node.inputs else None
-                if not isinstance(path_inp, GraphPath) or not path_inp.parts:
+                if self._is_position_embedding(node):
+                    prefix = self._layer_prefix(node)
+                    dim = self._node_output_dim_expr(node)
+                    if dim is None:
+                        dim = self._config_expr("hidden_size")
+                    return (prefix, dim)
+        return None
+
+    def _is_position_embedding(self, node: Any) -> bool:
+        """Check if an embedding call node is a position embedding by looking
+        at its weight path.  The weight path may be in node.inputs[0] (direct)
+        or inside the called module's _embedding node (indirect, e.g. GPT-2).
+        """
+        path_str = self._embedding_weight_path_str(node)
+        if path_str is None:
+            return False
+        return any(
+            kw in path_str
+            for kw in ("position", "embed_pos", "wpe", "pos_emb")
+        )
+
+    def _embedding_weight_path_str(self, node: Any) -> str | None:
+        """Extract the weight path string from an embedding call node.
+        Checks node.inputs[0] first, then looks inside the called module.
+        """
+        path_inp = node.inputs[0] if node.inputs else None
+        if isinstance(path_inp, GraphPath) and path_inp.parts:
+            return ".".join(path_inp.parts).lower()
+        called = self.modules_by_name.get(node.op.name)
+        if called is not None:
+            for cn in called.nodes:
+                if cn.op.name == "_embedding":
+                    for inp in cn.inputs:
+                        if isinstance(inp, GraphPath) and inp.parts:
+                            return ".".join(inp.parts).lower()
+        return None
+
+    def _is_token_type_embedding(self, node: Any) -> bool:
+        """Check if an embedding call node is a token type / segment embedding."""
+        path_str = self._embedding_weight_path_str(node)
+        if path_str is None:
+            return False
+        return any(
+            kw in path_str
+            for kw in ("token_type", "type_embeddings", "type_emb")
+        )
+
+    def _detect_type_embedding(self, classification: Any) -> tuple[str, str] | None:
+        """Detect a token type / segment embedding (NN.embedding not classified as
+        VOCAB_PARALLEL_EMBEDDING, with weight path containing 'token_type' or
+        'type_embeddings').
+
+        Returns (prefix_expr, dim_expr) or None.
+        """
+        for module in self.program.modules:
+            for node in module.nodes:
+                if not _is_embedding_call(node, self.modules_by_name):
                     continue
-                path_str = ".".join(path_inp.parts).lower()
-                if "position" not in path_str and "embed_pos" not in path_str:
+                if node.id in classification.embedding_node_ids:
                     continue
-                prefix = self._layer_prefix(node)
-                dim = self._node_output_dim_expr(node)
-                if dim is None:
-                    dim = self._config_expr("hidden_size")
-                return (prefix, dim)
+                if node.id == getattr(classification, 'pli_embed_node_id', None):
+                    continue
+                if self._is_position_embedding(node):
+                    continue
+                if self._is_token_type_embedding(node):
+                    prefix = self._layer_prefix(node)
+                    dim = self._node_output_dim_expr(node)
+                    if dim is None:
+                        dim = self._config_expr("hidden_size")
+                    return (prefix, dim)
         return None
 
     def _detect_pos_offset(self) -> int:
@@ -1591,6 +1652,18 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             else:
                 add(lines, indent * 2, "self._pos_offset = 0")
 
+        # Detect and create token type / segment embeddings (e.g. BERT)
+        type_emb_info = self._detect_type_embedding(classification)
+        self._type_emb_info = type_emb_info
+        if type_emb_info is not None:
+            type_prefix, type_dim = type_emb_info
+            add(lines, indent * 2, f"self.type_emb = VocabParallelEmbedding(")
+            add(lines, indent * 3, f"getattr(config, 'type_vocab_size', 2), {type_dim},")
+            add(lines, indent * 3, f"prefix={type_prefix},")
+            add(lines, indent * 3, "params_dtype=params_dtype,")
+            add(lines, indent * 2, ")")
+            add(lines, indent * 2, f"self.type_emb.prefix = {type_prefix}")
+
         add(lines, indent * 2, "self._build_state_dict_tensors()")
         add(lines, indent * 2, "self._eval_symbols()")
         add(lines, indent, "")
@@ -1927,14 +2000,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             for node in module.nodes:
                 if (
                     node.id not in cls.embedding_node_ids
+                    and node.id != getattr(cls, 'pli_embed_node_id', None)
                     and _is_embedding_call(node, self.modules_by_name)
                 ):
-                    # Check if this is a position embedding
-                    path_inp = node.inputs[0] if node.inputs else None
-                    if isinstance(path_inp, GraphPath) and path_inp.parts:
-                        path_str = ".".join(path_inp.parts).lower()
-                        if "position" in path_str or "embed_pos" in path_str:
-                            continue  # Will be handled as position embedding
+                    if self._is_position_embedding(node):
+                        continue
+                    if self._is_token_type_embedding(node):
+                        continue
                     self._emit_forward_legacy(lines)
                     return
             # Fall back if the main module has position operations that the
@@ -2012,6 +2084,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         if self._pos_emb_info is not None:
             add(lines, 12, "if hasattr(self, 'pos_emb') and positions is not None:")
             add(lines, 16, "hidden_states = hidden_states + self.pos_emb(positions + self._pos_offset)")
+        # Add token type / segment embeddings (e.g. BERT)
+        if self._type_emb_info is not None:
+            add(lines, 12, "_token_type_ids = kwargs.get('token_type_ids', None)")
+            add(lines, 12, "if hasattr(self, 'type_emb') and _token_type_ids is not None:")
+            add(lines, 16, "hidden_states = hidden_states + self.type_emb(_token_type_ids)")
+            add(lines, 12, "elif hasattr(self, 'type_emb'):")
+            add(lines, 16, "hidden_states = hidden_states + self.type_emb.weight[0]")
         add(lines, 8, "self._attn_metadata = attn_metadata")
         add(lines, 8, "self._positions = positions")
         add(lines, 8, "if getattr(self, '_vllm_native_mode', False) and positions is not None:")
