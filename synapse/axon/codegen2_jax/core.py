@@ -109,6 +109,7 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "_jax_add_rmsnorm_noscale",
     "_jax_expert_packed_swiglu_ffn",
     "_jax_expert_swiglu_ffn",
+    "_jax_gelu_ffn",
     "_jax_rmsnorm_noscale",
     "_jax_rmsnorm_scaled",
     "_jax_sdpa",
@@ -117,7 +118,12 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "_jax_selected_expert_packed_swiglu_ffn",
     "_jax_selected_expert_relu2_ffn",
     "_jax_selected_expert_swiglu_ffn",
+    "_jax_sigmoid_gated_merge",
+    "_jax_sigmoid_gated_mul",
+    "_jax_split_swiglu",
+    "_jax_swiglu_activation",
     "_jax_swiglu_ffn",
+    "_jax_topk_normalize",
     "_jax_weighted_topk_sum",
     "_jax_rope",
 })
@@ -1027,6 +1033,13 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "hidden = (nn.sigmoid(gate) * gate) * up")
         add(lines, 8, "return hidden @ down_weight.swapaxes(-1, -2)")
         add(lines, 4, "")
+        add(lines, 4, "def _gelu_ffn(self, x, up_weight_path, down_weight_path, up_bias_flag=True, up_bias_path=None, down_bias_flag=True, down_bias_path=None, gelu_tanh=False):")
+        add(lines, 8, "up_weight = self._param(up_weight_path)")
+        add(lines, 8, "hidden = x @ up_weight.swapaxes(-1, -2)")
+        add(lines, 8, "hidden = nn.gelu(hidden, approximate='tanh') if gelu_tanh else nn.gelu(hidden)")
+        add(lines, 8, "down_weight = self._param(down_weight_path)")
+        add(lines, 8, "return hidden @ down_weight.swapaxes(-1, -2)")
+        add(lines, 4, "")
         add(lines, 4, "def _expert_swiglu_ffn(self, x, expert_idx, gate_weight_path, up_weight_path, down_weight_path):")
         add(lines, 8, "gate = self._expert_linear_weight(x, expert_idx, gate_weight_path)")
         add(lines, 8, "up = self._expert_linear_weight(x, expert_idx, up_weight_path)")
@@ -1775,6 +1788,33 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             if len(args) < 2:
                 raise ValueError("__jax_weighted_topk_sum expects expert values and top-k scores")
             return f"self._weighted_topk_sum({args[0]}, {args[1]})"
+        if primitive == "_jax_topk_normalize":
+            if len(args) < 2:
+                raise ValueError("__jax_topk_normalize expects top-k weights and a dtype reference")
+            normalized = f"({args[0]} / jnp.sum({args[0]}, axis=-1, keepdims=True))"
+            return f"{normalized}.astype({args[1]}.dtype)"
+        if primitive == "_jax_swiglu_activation":
+            return f"(nn.silu({args[0]}) * {args[1]})"
+        if primitive == "_jax_split_swiglu":
+            x = args[0]
+            dim = args[1]
+            size0 = args[2]
+            size1 = args[3]
+            return f"(nn.silu({x}[..., :int({size0})]) * {x}[..., int({size0}):int({size0})+int({size1})])"
+        if primitive == "_jax_sigmoid_gated_mul":
+            return f"(jax.nn.sigmoid({args[0]}) * {args[1]})"
+        if primitive == "_jax_sigmoid_gated_merge":
+            g = args[0]
+            a = args[1]
+            return f"((jax.nn.sigmoid({g}) * {a}).reshape({g}.shape[0], {g}.shape[2], -1))"
+        if primitive == "_jax_gelu_ffn":
+            if len(args) < 8:
+                raise ValueError("__jax_gelu_ffn expects input, up/down weight paths, up/down bias flags/paths, and gelu_tanh flag")
+            return (
+                f"self._gelu_ffn({args[0]}, {args[1]}, {args[2]}, "
+                f"up_bias_flag={args[3]}, up_bias_path={args[4]}, "
+                f"down_bias_flag={args[5]}, down_bias_path={args[6]}, gelu_tanh={args[7]})"
+            )
         if primitive == "_jax_sdpa":
             if len(args) < 6:
                 raise ValueError("__jax_sdpa expects q, k, v, additive_mask, scale, enable_gqa")

@@ -150,19 +150,25 @@ _MLX_BACKEND_INTRINSICS = frozenset(
 )
 _JAX_BACKEND_INTRINSICS = frozenset(
     {
-        "__jax_sdpa",
-        "__jax_rope",
         "__jax_add_rmsnorm_noscale",
         "__jax_expert_packed_swiglu_ffn",
         "__jax_expert_swiglu_ffn",
+        "__jax_gelu_ffn",
         "__jax_rmsnorm_noscale",
         "__jax_rmsnorm_scaled",
+        "__jax_rope",
+        "__jax_sdpa",
         "__jax_selected_expert_clamped_packed_swiglu_ffn",
         "__jax_selected_expert_packed_gegelu_ffn",
         "__jax_selected_expert_packed_swiglu_ffn",
         "__jax_selected_expert_relu2_ffn",
         "__jax_selected_expert_swiglu_ffn",
+        "__jax_sigmoid_gated_merge",
+        "__jax_sigmoid_gated_mul",
+        "__jax_split_swiglu",
+        "__jax_swiglu_activation",
         "__jax_swiglu_ffn",
+        "__jax_topk_normalize",
         "__jax_weighted_topk_sum",
     }
 )
@@ -5530,7 +5536,7 @@ def _torch_topk_normalize_nested_candidate(
     )
 
 
-def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram, *, op_name: str = "__torch_topk_normalize") -> GraphProgram:
     has_candidate_shape = False
     for module in graph.modules:
         names = [node.op.name for node in module.nodes]
@@ -5618,7 +5624,7 @@ def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram) -> GraphProgra
                 new_nodes.append(
                     replace(
                         cast_node,
-                        op=GraphOp("__torch_topk_normalize"),
+                        op=GraphOp(op_name),
                         inputs=nested_inputs,
                         attrs={},
                     )
@@ -5630,7 +5636,7 @@ def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram) -> GraphProgra
             new_nodes.append(
                 replace(
                     cast_node,
-                    op=GraphOp("__torch_topk_normalize"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -16666,6 +16672,12 @@ def optimize_graph_program(
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_add_rmsnorm_noscale_intrinsics")
                 current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_torch_expert_swiglu_ffn_intrinsics(current, op_name="__jax_expert_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_expert_swiglu_ffn")
+                else current
+            )
             if debug_timings:
                 print(
                     "[graph-opt] "
@@ -16746,6 +16758,120 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_weighted_topk_sum_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_torch_topk_normalize_intrinsics(current, op_name="__jax_topk_normalize")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_topk_normalize")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_topk_normalize_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_topk_normalize_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_torch_gelu_ffn_intrinsics(current, op_name="__jax_gelu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_gelu_ffn")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_gelu_ffn_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_gelu_ffn_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_swiglu_activation_intrinsics(current, op_name="__jax_swiglu_activation")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_swiglu_activation")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_swiglu_activation_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_swiglu_activation_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_split_swiglu_intrinsics(current, swiglu_op="__jax_swiglu_activation", fused_op="__jax_split_swiglu")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_split_swiglu")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_split_swiglu_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_split_swiglu_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_sigmoid_gated_mul_intrinsics(current, op_name="__jax_sigmoid_gated_mul")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_sigmoid_gated_mul")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_sigmoid_gated_mul_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_sigmoid_gated_mul_intrinsics")
+                current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
+            candidate = (
+                _rewrite_sigmoid_gated_merge_intrinsics(current, sigmoid_op="__jax_sigmoid_gated_mul", fused_op="__jax_sigmoid_gated_merge")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_sigmoid_gated_merge")
+                else current
+            )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_sigmoid_gated_merge_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_sigmoid_gated_merge_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-triton":
             candidate = (
