@@ -1,0 +1,101 @@
+{-# MAIN "timestral_core" #-}
+
+-- Prepared patch features and masks -> raw quantile logits.
+-- Architecture follows mistralai/timestral at a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff.
+-- Scaling, mask construction, monotone quantiles and forecast refinement are host-side.
+-- Apache-2.0; see scripts/timestral_axon/{NOTICE,LICENSE}.
+import Activations (silu, sigmoid)
+import Attention (attention, merge_heads)
+import Config
+import List
+import NN
+import Params
+import Tensor
+
+MODEL_DIM <- Config.dim @@d_model default=32
+NUM_HEADS <- Config.dim @@num_heads default=4
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+FFN <- Config.dim @@mlp_hidden_dim default=64
+PATCH_SIZE <- Config.dim @@patch_size default=8
+KNOTS <- Config.list @@quantile_knots default=[0.1, 0.5, 0.9]
+NQ <- List.length KNOTS
+SCHEDULE <- Config.list @@block_schedule default=["time", "time_variate"]
+NUM_LAYERS <- List.length SCHEDULE
+EPS <- Config.float @@norm_eps default=1e-6
+ATTN_BIAS <- Config.bool @@attn_bias default=false
+MLP_BIAS <- Config.bool @@mlp_bias default=false
+TIME_GATE <- Config.str @@time_attn_gate default="sdpa_sigmoid"
+VARIATE_GATE <- Config.str @@variate_attn_gate default="sdpa_sigmoid"
+
+rotate :: Tensor[B,H,S,D] -> Tensor[B,1,S,D] -> Tensor[B,1,S,D] -> Tensor[B,H,S,D]
+rotate x cos sin = do
+  first, second <- Tensor.chunk x parts=2
+  turned <- Tensor.concat (0.0 - second) first dim=-1
+  return x * cos + turned * sin
+
+attend :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[..C] -> Tensor[..C] -> Bool -> String -> Tensor[B,S,D]
+attend x keep cos sin is_time gate = do
+  -- Released wQKV uses (qkv, head_dim, num_heads), unlike most text decoders.
+  qkv <- NN.linear@wQKV x dim=(3 * MODEL_DIM) bias=ATTN_BIAS
+  q0, k0, v0 <- Tensor.chunk qkv parts=3
+  q <- Tensor.reshape q0 shape=[B, S, HEAD_DIM, NUM_HEADS] |> Tensor.permute dims=[0, 3, 1, 2]
+  k <- Tensor.reshape k0 shape=[B, S, HEAD_DIM, NUM_HEADS] |> Tensor.permute dims=[0, 3, 1, 2]
+  v <- Tensor.reshape v0 shape=[B, S, HEAD_DIM, NUM_HEADS] |> Tensor.permute dims=[0, 3, 1, 2]
+  q <- is_time ? (rotate q cos sin) : q
+  k <- is_time ? (rotate k cos sin) : k
+  y <- attention q k v keep |> merge_heads
+  y <- (gate == "sdpa_sigmoid") ? (y * (NN.linear@_gate x dim=MODEL_DIM bias=ATTN_BIAS |> sigmoid)) : y
+  return NN.linear@wO y dim=MODEL_DIM bias=ATTN_BIAS
+
+axis_attention :: Tensor[R,S,D] -> Tensor[R,1,S,S] -> Tensor[S,1,R,R] -> Tensor[R,1,S,HEAD_DIM] -> Tensor[R,1,S,HEAD_DIM] -> Bool -> Tensor[R,S,D]
+axis_attention x time_keep variate_keep cos sin is_time = do
+  return is_time
+    ? (attend x time_keep cos sin true TIME_GATE)
+    : do
+      xt <- Tensor.transpose x dim1=0 dim2=1
+      -- RoPE is disabled on this branch, so only the time branch consumes the tables.
+      y <- attend xt variate_keep cos sin false VARIATE_GATE
+      return Tensor.transpose y dim1=0 dim2=1
+
+block :: Tensor[R,S,D] -> Tensor[R,1,S,S] -> Tensor[S,1,R,R] -> Tensor[R,1,S,HEAD_DIM] -> Tensor[R,1,S,HEAD_DIM] -> String -> Tensor[R,S,D]
+block x time_keep variate_keep cos sin kind = do
+  first_time <- (kind == "time") or (kind == "time_variate")
+  n <- NN.rmsnorm@attn_norms.0 x eps=EPS scale_path=@attn_norms.0.scale
+  a <- scope@attns.0 do
+    return axis_attention n time_keep variate_keep cos sin first_time
+  x <- x + a
+  x <- ((kind == "time_variate") or (kind == "variate_time"))
+    ? do
+      n <- NN.rmsnorm@attn_norms.1 x eps=EPS scale_path=@attn_norms.1.scale
+      a <- scope@attns.1 do
+        return axis_attention n time_keep variate_keep cos sin (kind == "variate_time")
+      return x + a
+    : x
+  n <- NN.rmsnorm@mlp_norm x eps=EPS scale_path=@mlp_norm.scale
+  gate, up <- NN.linear@mlp.w12 n dim=(2 * FFN) bias=MLP_BIAS |> Tensor.chunk parts=2
+  -- Upstream activates the second half of w12.
+  m <- gate * (silu up) |> NN.linear@mlp.w3 dim=MODEL_DIM bias=MLP_BIAS
+  return x + m
+
+timestral_core :: Tensor[R,L,PATCH_FEATURES] -> Tensor[R,NPRED,1] -> Tensor[R,1,S,S] -> Tensor[S,1,R,R] -> Tensor[R,1,S,HEAD_DIM] -> Tensor[R,1,S,HEAD_DIM] -> Tensor[R,NPRED * PATCH_SIZE,NQ]
+timestral_core patches forecast_shape time_keep variate_keep cos sin = do
+  embedded <- scope@representation.patch_proj do
+    hidden <- NN.linear@hidden_layer patches dim=(4 * MODEL_DIM) bias=true |> silu
+    main <- NN.linear@output_layer hidden dim=MODEL_DIM bias=true
+    skip <- NN.linear@residual_layer patches dim=MODEL_DIM bias=true
+    return main + skip
+  query <- Params.param @@representation.forecast_query
+  decoded <- Tensor.reshape query shape=[1, 1, MODEL_DIM] |> Tensor.expand shape=[R, NPRED, MODEL_DIM]
+  x <- Tensor.concat embedded decoded dim=1
+  x <- for@transformer.layers i <- [0..NUM_LAYERS) carry (x) do
+    kind <- List.index SCHEDULE i
+    x <- block x time_keep variate_keep cos sin kind
+    yield x
+  x <- NN.rmsnorm@transformer.out_norm x eps=EPS scale_path=@@transformer.out_norm.scale
+  x <- Tensor.slice x dim=1 start=L end=(L + NPRED)
+  raw <- scope@head.projection do
+    hidden <- NN.linear@hidden_layer x dim=(4 * MODEL_DIM) bias=false |> silu
+    main <- NN.linear@output_layer hidden dim=(PATCH_SIZE * NQ) bias=false
+    skip <- NN.linear@residual_layer x dim=(PATCH_SIZE * NQ) bias=false
+    return main + skip
+  return Tensor.reshape raw shape=[R, NPRED * PATCH_SIZE, NQ]
