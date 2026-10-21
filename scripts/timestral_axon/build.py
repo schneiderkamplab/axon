@@ -35,8 +35,11 @@ def generate_core(backend="mlx", source=SOURCE, optimize=False):
     else:
         raise ValueError(f"unsupported backend {backend!r}")
     if optimize:
-        # Only the existing primitive-validated attention fusion is requested.
+        # Backend intrinsics require an explicit opt-in. Both selected MLX
+        # fusions validate primitive provenance, independent of model names.
         intrinsics = f"codegen2-{backend}:__{backend}_sdpa"
+        if backend == "mlx":
+            intrinsics += ",__mlx_rmsnorm_scaled"
         graph = optimize_graph_program(
             graph, config=GraphOptimizeConfig(backend_intrinsics=intrinsics)
         )

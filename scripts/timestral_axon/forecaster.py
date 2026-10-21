@@ -10,7 +10,7 @@ import numpy as np
 
 from .covariate_encoding import target_encode
 from .model import ROLE_KNOWN_COV, ROLE_PAST_COV, ROLE_TARGET
-from .scaler import advancing_block_frames, causal_patch_loc_scale, clamp_nonfinite
+from .scaler import advancing_block_frames, clamp_nonfinite
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,8 @@ class TimestralForecaster:
         per_shot_horizon_patches=32,
         quantile_real_cap_k=1e4,
         extreme_value_threshold=1e30,
+        max_batch_rows=128,
+        max_batch_tokens=4096,
     ):
         self.model = model
         self.config = model.config
@@ -67,6 +69,11 @@ class TimestralForecaster:
         self.per_shot_horizon_patches = min(per_shot_horizon_patches, self.config.block_size)
         self.quantile_real_cap_k = quantile_real_cap_k
         self.extreme_value_threshold = extreme_value_threshold
+        for name, limit in (("max_batch_rows", max_batch_rows), ("max_batch_tokens", max_batch_tokens)):
+            if limit is not None and (not isinstance(limit, (int, np.integer)) or limit < 1):
+                raise ValueError(f"{name} must be a positive integer or None")
+        self.max_batch_rows = max_batch_rows
+        self.max_batch_tokens = max_batch_tokens
         self.quantile_levels = tuple(self.config.quantile_knots)
         self.median_index = self.config.median_index
 
@@ -79,6 +86,7 @@ class TimestralForecaster:
         cache_dir=None,
         token=None,
         local_files_only=False,
+        prune_final_block=False,
         **forecast_options,
     ):
         from .loading import load_model
@@ -89,6 +97,7 @@ class TimestralForecaster:
             cache_dir=cache_dir,
             token=token,
             local_files_only=local_files_only,
+            prune_final_block=prune_final_block,
         )
         return cls(model, **forecast_options)
 
@@ -139,23 +148,75 @@ class TimestralForecaster:
             known = cat_rows(known, self._encode_categorical(cat_known, target))
         if known is not None and not self.supports_known_covariates:
             raise ValueError("this checkpoint cannot condition on known-future covariates")
-        quantiles = self._forecast_raw(inputs, mask, prediction_length, past, known)
         if symmetric_averaging:
             levels = self.quantile_levels
             if not all(abs(lo + hi - 1) < 1e-9 for lo, hi in zip(levels, reversed(levels))):
                 raise ValueError("symmetric averaging requires quantile levels symmetric about 0.5")
-            mirrored = self._forecast_raw(
-                -inputs,
-                mask,
-                prediction_length,
-                None if past is None else -past,
-                None if known is None else -known,
+        variables = inputs.shape[1] + (0 if past is None else past.shape[1]) + (0 if known is None else known.shape[1])
+        groups = self._series_per_call(
+            batch * (2 if symmetric_averaging else 1), variables, length,
+            prediction_length, past is not None or known is not None,
+        )
+        paired = symmetric_averaging and groups >= 2
+        size = max(1, groups // (2 if paired else 1))
+        quantiles = np.empty(
+            (*inputs.shape[:2], prediction_length, self.config.num_quantiles), dtype=np.float32
+        )
+        for start in range(0, batch, size):
+            stop = min(start + size, batch)
+            quantiles[start:stop] = self._forecast_chunk(
+                inputs[start:stop], mask[start:stop], prediction_length,
+                None if past is None else past[start:stop],
+                None if known is None else known[start:stop],
+                symmetric_averaging, paired,
             )
-            quantiles = 0.5 * (quantiles - mirrored[..., ::-1])
         if clip_nonnegative:
             eligible = mask.any(-1) & ((inputs >= 0) | ~mask).all(-1)
-            quantiles = np.where(eligible[..., None, None], np.maximum(quantiles, 0), quantiles)
+            np.maximum(quantiles, 0, out=quantiles, where=eligible[..., None, None])
         return Forecast(quantiles, self.quantile_levels)
+
+    def _series_per_call(self, groups, variables, length, prediction_length, windowed):
+        """Bound rows and transformer tokens while keeping each series intact."""
+        ps = self.patch_size
+        context = math.ceil(min(length, self.max_context) / ps)
+        remaining = math.ceil(prediction_length / ps)
+        peak_tokens = 0
+        while remaining:
+            block = min(remaining, self.per_shot_horizon_patches)
+            peak_tokens = max(peak_tokens, context + block)
+            remaining -= block
+            context += block
+            if context * ps > self.max_context:
+                context = max(1, self.max_context // ps)
+        if windowed:
+            peak_tokens *= 2  # Encoder and decoder each contain the full window.
+        if self.max_batch_rows is not None:
+            groups = min(groups, self.max_batch_rows // variables)
+        if self.max_batch_tokens is not None:
+            groups = min(groups, self.max_batch_tokens // (variables * peak_tokens))
+        # One multivariate series is indivisible; these are scheduling limits,
+        # not a hard allocator cap.
+        return max(1, groups)
+
+    def _forecast_chunk(self, inputs, mask, prediction_length, past, known, symmetric, paired):
+        if paired:
+            both = self._forecast_raw(
+                np.concatenate([inputs, -inputs], axis=0),
+                np.concatenate([mask, mask], axis=0),
+                prediction_length,
+                None if past is None else np.concatenate([past, -past], axis=0),
+                None if known is None else np.concatenate([known, -known], axis=0),
+            )
+            batch = len(inputs)
+            return 0.5 * (both[:batch] - both[batch:, ..., ::-1])
+        quantiles = self._forecast_raw(inputs, mask, prediction_length, past, known)
+        if symmetric:
+            mirrored = self._forecast_raw(
+                -inputs, mask, prediction_length,
+                None if past is None else -past, None if known is None else -known,
+            )
+            quantiles = 0.5 * (quantiles - mirrored[..., ::-1])
+        return quantiles
 
     def _as_context(self, context, observation_mask):
         values = np.asarray(context, dtype=np.float32)
@@ -219,23 +280,26 @@ class TimestralForecaster:
         rows, mask, roles, future, future_mask, targets = self._assemble_rows(
             inputs, mask, prediction_length, past, known
         )
-        quantiles = self._block_ar_decode(rows, mask, prediction_length, roles, future, future_mask)
+        quantiles, context_scale = self._block_ar_decode(
+            rows, mask, prediction_length, roles, future, future_mask
+        )
         quantiles = quantiles[:, :targets]
         if self.quantile_real_cap_k > 0:
-            quantiles = self._cap_quantiles(quantiles, rows[:, :targets], mask[:, :targets])
+            quantiles = self._cap_quantiles(
+                quantiles, rows[:, :targets], mask[:, :targets], context_scale[:, :targets]
+            )
         if np.isnan(quantiles).any():
             raise ValueError(
                 f"forecast produced {np.isnan(quantiles).sum()} NaNs; input is degenerate"
             )
         return quantiles
 
-    def _cap_quantiles(self, quantiles, inputs, mask):
+    def _cap_quantiles(self, quantiles, inputs, mask, context_scale):
         hi = np.max(np.where(mask, inputs, -np.inf), axis=-1, keepdims=True)
         lo = np.min(np.where(mask, inputs, np.inf), axis=-1, keepdims=True)
         hi = np.nan_to_num(hi, neginf=0.0)
         lo = np.nan_to_num(lo, posinf=0.0)
-        _, scale = causal_patch_loc_scale(inputs, mask, self.patch_size, self.config.minimum_scale)
-        radius = scale[..., -1:] * self.quantile_real_cap_k
+        radius = context_scale[..., None] * self.quantile_real_cap_k
         return np.clip(quantiles, (lo - radius)[..., None], (hi + radius)[..., None])
 
     def _assemble_rows(self, inputs, mask, prediction_length, past, known):
@@ -286,8 +350,12 @@ class TimestralForecaster:
             block_length = block * self.patch_size
             kf = None if future is None else future[:, offset : offset + block_length]
             kfm = None if future_mask is None else future_mask[:, offset : offset + block_length]
-            quantiles = self.model.predict_block(context, mask, groups, block, roles, kf, kfm)
-            quantiles = self._refine_block(quantiles, context, mask, targets)
+            quantiles, loc0, scale0 = self.model.predict_block(
+                context, mask, groups, block, roles, kf, kfm
+            )
+            if not blocks:
+                context_scale = scale0.reshape(batch, variates)
+            quantiles = self._refine_block(quantiles, context, mask, targets, loc0, scale0)
             blocks.append(quantiles)
             remaining -= block
             offset += block_length
@@ -311,15 +379,13 @@ class TimestralForecaster:
                 keep = max(self.patch_size, (self.max_context // self.patch_size) * self.patch_size)
                 context, mask = context[..., -keep:], mask[..., -keep:]
         packed = np.concatenate(blocks, axis=1)[:, :prediction_length]
-        return packed.reshape(batch, variates, prediction_length, -1)
+        return packed.reshape(batch, variates, prediction_length, -1), context_scale
 
-    def _refine_block(self, quantiles, context, mask, targets):
+    def _refine_block(self, quantiles, context, mask, targets, loc0, scale0):
         ps = self.patch_size
         n_pred = quantiles.shape[1] // ps
         if n_pred <= 1:
             return quantiles
-        _, loc, scale = self.model.scale(context, mask)
-        loc0, scale0 = loc[:, -1], scale[:, -1]
         median = (
             quantiles[..., self.median_index]
             .reshape(context.shape[0], n_pred, ps)

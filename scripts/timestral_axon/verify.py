@@ -177,7 +177,7 @@ def write_reference(output, upstream, checkpoint=None):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def check(fixtures, backend, output, device=None, optimize=False):
+def check(fixtures, backend, output, device=None, optimize=False, prune_final_block=False):
     from .config import TimestralConfig
     from .forecaster import TimestralForecaster
     from .model import TimestralModel
@@ -211,11 +211,14 @@ def check(fixtures, backend, output, device=None, optimize=False):
             if backend == "mlx":
                 from .loading import load_model
 
-                model_cache[name] = load_model(path)
+                model_cache[name] = load_model(path, prune_final_block=prune_final_block)
             else:
                 config = TimestralConfig.load(path / "config.json")
+                from .loading import core_config
+
                 generated = namespace["TimestralCore"].from_state_dict(
-                    load_file(path / "model.safetensors"), model_config=config.to_dict()
+                    load_file(path / "model.safetensors"),
+                    model_config=core_config(config, prune_final_block=prune_final_block),
                 )
 
                 def core(_generated=generated, **inputs):
@@ -254,6 +257,7 @@ def check(fixtures, backend, output, device=None, optimize=False):
         backend=backend,
         device=device,
         optimize=optimize,
+        prune_final_block=prune_final_block,
         upstream_revision=manifest["upstream_revision"],
         numpy=np.__version__,
         runtime=importlib.metadata.version(backend),
@@ -278,6 +282,7 @@ def main():
     verify.add_argument("--fixtures", type=Path, required=True)
     verify.add_argument("--backend", choices=("torch", "mlx"), default="mlx")
     verify.add_argument("--device", choices=("cpu", "gpu"))
+    verify.add_argument("--prune-final-block", action="store_true")
     verify.add_argument(
         "--optimize", action="store_true", help="Torch check: use existing SDPA graph fusion"
     )
@@ -288,7 +293,10 @@ def main():
     else:
         if args.optimize and args.backend != "torch":
             parser.error("for MLX, select optimization when exporting the package")
-        check(args.fixtures, args.backend, args.output, args.device, args.optimize)
+        check(
+            args.fixtures, args.backend, args.output, args.device, args.optimize,
+            args.prune_final_block,
+        )
 
 
 if __name__ == "__main__":

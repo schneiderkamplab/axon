@@ -47,17 +47,33 @@ def build_two_stream_time_mask(min_context, n, block_size, key_valid, known_rows
 
 
 def build_two_stream_variate_mask(group_ids, key_valid, n_dec, target_rows=None, known_rows=None):
+    """Return (groups, positions, 1, variates, variates) attention keep masks.
+
+    Forecast rows are flattened from (batch, variates, time), so each group
+    must have the same size and occupy a contiguous, sorted run.
+    """
     rows = len(group_ids)
-    row_eq = group_ids[:, None] == group_ids[None]
-    valid = np.concatenate([key_valid, np.ones((rows, n_dec), dtype=bool)], axis=1).T
-    mask = row_eq[None, None] & valid[:, None, None]
+    groups, counts = np.unique(group_ids, return_counts=True)
+    if not rows or np.any(counts != counts[0]):
+        raise ValueError("variate groups must be nonempty and equally sized")
+    size = int(counts[0])
+    if not np.array_equal(group_ids, np.repeat(groups, size)):
+        raise ValueError("variate groups must be contiguous and sorted")
+    batch = len(groups)
+    valid = np.concatenate([key_valid, np.ones((rows, n_dec), dtype=bool)], axis=1)
+    valid = valid.reshape(batch, size, -1).transpose(0, 2, 1)
+    mask = np.broadcast_to(
+        valid[:, :, None, None, :], (batch, valid.shape[1], 1, size, size)
+    ).copy()
     if target_rows is not None:
-        forbid = ~target_rows[:, None] & target_rows[None]
-        mask &= ~forbid[None, None]
+        targets = target_rows.reshape(batch, size)
+        forbid = ~targets[:, :, None] & targets[:, None, :]
+        mask &= ~forbid[:, None, None]
     if known_rows is not None:
-        forbid = known_rows[:, None] & ~known_rows[None]
-        mask &= ~forbid[None, None]
-    return mask | np.eye(rows, dtype=bool)[None, None]
+        known = known_rows.reshape(batch, size)
+        forbid = known[:, :, None] & ~known[:, None, :]
+        mask &= ~forbid[:, None, None]
+    return mask | np.eye(size, dtype=bool)[None, None, None]
 
 
 def first_observed_positions(observed, groups, n_dec, window):

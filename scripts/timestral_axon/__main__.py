@@ -14,7 +14,7 @@ def main():
     )
     export.add_argument("--output", type=Path, required=True)
     export.add_argument(
-        "--optimize", action="store_true", help="opt in to existing Axon SDPA graph fusion"
+        "--optimize", action="store_true", help="opt in to Axon SDPA and RMSNorm-scale graph fusion"
     )
     forecast = commands.add_parser("forecast", help="run on an MLX-capable machine")
     forecast.add_argument("checkpoint")
@@ -26,6 +26,12 @@ def main():
     forecast.add_argument("--revision")
     forecast.add_argument("--local-files-only", action="store_true")
     forecast.add_argument("--max-context", type=int)
+    forecast.add_argument("--max-batch-rows", type=int, default=128)
+    forecast.add_argument("--max-batch-tokens", type=int, default=4096)
+    forecast.add_argument(
+        "--prune-final-block", action="store_true",
+        help="opt in to final-block pruning, which may change numerical results",
+    )
     for name in (
         "observation-mask",
         "past-covariates",
@@ -51,6 +57,9 @@ def main():
         revision=args.revision,
         local_files_only=args.local_files_only,
         max_context=args.max_context,
+        max_batch_rows=args.max_batch_rows,
+        max_batch_tokens=args.max_batch_tokens,
+        prune_final_block=args.prune_final_block,
     )
     kwargs = {}
     for name in (

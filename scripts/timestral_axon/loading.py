@@ -54,6 +54,14 @@ def validate_weights(state, config):
         )
 
 
+def core_config(config, *, prune_final_block=False):
+    """Adapt checkpoint configuration to the dimensions used by the Axon graph."""
+    return config.to_dict() | {
+        "median_index": config.median_index,
+        "prune_final_block": prune_final_block,
+    }
+
+
 def resolve_checkpoint(path_or_repo_id, **hub_options):
     path = Path(path_or_repo_id).expanduser()
     if path.is_dir():
@@ -83,11 +91,11 @@ def _model_class():
     from .build import generate_core
 
     namespace = {}
-    exec(compile(generate_core(), "<axon-timestral-mlx>", "exec"), namespace)
+    exec(compile(generate_core(optimize=True), "<axon-timestral-mlx>", "exec"), namespace)
     return namespace["TimestralCore"]
 
 
-def load_model(path_or_repo_id, **hub_options):
+def load_model(path_or_repo_id, *, prune_final_block=False, **hub_options):
     import mlx.core as mx
 
     path = resolve_checkpoint(path_or_repo_id, **hub_options)
@@ -97,14 +105,22 @@ def load_model(path_or_repo_id, **hub_options):
     # Upstream validates fp32 inference. Keep this port in fp32 until reduced
     # precision has its own parity evidence.
     state = {key: value.astype(mx.float32) for key, value in state.items()}
-    generated = _model_class().from_state_dict(state, model_config=config.to_dict())
-    mx.eval(generated.parameters())
+    # Generated weights live in a flat dictionary, outside nn.Module's parameter
+    # traversal. Materialize them before tracing, so compiled shapes share the
+    # same evaluated buffers instead of repeating lazy checkpoint loads.
+    mx.eval(state)
+    generated = _model_class().from_state_dict(
+        state, model_config=core_config(config, prune_final_block=prune_final_block)
+    )
+    # Compile the tensor forward directly; the generic token-decoding wrapper
+    # has integer input conventions that do not apply to patch features.
+    forward = mx.compile(generated.forward)
 
     def core(**inputs):
         arrays = {key: mx.array(value) for key, value in inputs.items()}
         # Named tensor arguments preserve floating patch values; the generic
         # codegen's positional input_ids convention is integer-valued.
-        result = generated.forward(**arrays)
+        result = forward(**arrays)
         mx.eval(result)
         return np.array(result)
 

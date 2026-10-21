@@ -22,23 +22,6 @@ from .scaler import (
 ROLE_TARGET, ROLE_PAST_COV, ROLE_KNOWN_COV = 0, 1, 2
 
 
-def monotone_quantiles(raw, levels, factor):
-    median_index = levels.index(0.5)
-    widths = np.zeros(len(levels), dtype=np.float32)
-    widths[:median_index] = np.diff(levels[: median_index + 1])
-    widths[median_index + 1 :] = np.diff(levels[median_index:])
-    # Stable softplus, including the same linear branch as torch's beta=1 default.
-    softplus = np.log1p(np.exp(-np.abs(raw))) + np.maximum(raw, 0)
-    softplus = np.where(raw > 20.0, raw, softplus)
-    increments = factor * widths * softplus
-    median = raw[..., median_index : median_index + 1]
-    down = np.cumsum(increments[..., :median_index][..., ::-1], axis=-1)[..., ::-1]
-    up = np.cumsum(increments[..., median_index + 1 :], axis=-1)
-    result = np.concatenate([median - down, median, median + up], axis=-1)
-    big = np.finfo(np.float32).max
-    return np.clip(result, -big, big)
-
-
 class TimestralModel:
     def __init__(self, config, core):
         self.config = config
@@ -64,6 +47,11 @@ class TimestralModel:
         known_future=None,
         known_future_mask=None,
     ):
+        """Return real-space quantiles and the causal context location/scale.
+
+        Context statistics precede known-covariate instance normalization and
+        are reused by forecast refinement and clipping within this call.
+        """
         c = self.config
         rows, length = inputs.shape
         ps = c.patch_size
@@ -84,6 +72,8 @@ class TimestralModel:
             inputs = np.concatenate([inputs, known_future], axis=-1)
             observed = np.concatenate([observed, known_future_mask], axis=-1)
         scaled, loc, scale = self.scale(inputs, observed)
+        context_loc = loc[:, context_patches * ps - 1].copy()
+        context_scale = scale[:, context_patches * ps - 1].copy()
         if window and known_rows.any():
             loc_c, scale_c, binary = instance_norm_stats(inputs, observed, c.minimum_scale)
             cov_scaled = apply_affine_asinh_masked(inputs, loc_c, scale_c, observed, False)
@@ -115,19 +105,17 @@ class TimestralModel:
         positions = first_observed_positions(obs_per_patch, group_ids, n_dec, window)
         angles = positions.astype(np.float32)[..., None] * self.inv_freq
         angles = np.concatenate([angles, angles], axis=-1)[:, None]
-        raw = self.core(
+        preds = self.core(
             patches=patches,
             forecast_shape=np.zeros((rows, n_dec, 1), dtype=np.float32),
             time_keep=time_keep,
             variate_keep=variate_keep,
             cos=np.cos(angles),
             sin=np.sin(angles),
+            output_shape=np.zeros((rows, horizon_patches, 1), dtype=np.float32),
         )
-        preds = monotone_quantiles(
-            np.asarray(raw, dtype=np.float32), c.quantile_knots, c.quantile_width_factor
-        )
-        if window:
-            preds = preds[:, context_patches * ps :]
+        preds = np.asarray(preds, dtype=np.float32)
         anchor_loc = loc[:, context_patches * ps - 1, None, None]
         anchor_scale = scale[:, context_patches * ps - 1, None, None]
-        return denormalize_quantiles(preds, anchor_loc, anchor_scale, c.use_asinh)
+        quantiles = denormalize_quantiles(preds, anchor_loc, anchor_scale, c.use_asinh)
+        return quantiles, context_loc, context_scale
