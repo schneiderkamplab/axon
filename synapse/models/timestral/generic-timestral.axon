@@ -3,7 +3,7 @@
 -- Prepared patch features and grouped masks -> normalized monotone quantiles.
 -- Architecture follows mistralai/timestral at a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff.
 -- Float64 scaling, mask construction and forecast refinement remain host-side.
--- Apache-2.0; see scripts/timestral_axon/{NOTICE,LICENSE}.
+-- Apache-2.0; see the adjacent NOTICE and LICENSE files.
 import Activations (silu, sigmoid)
 import Attention (attention, merge_heads)
 import Config
