@@ -162,6 +162,8 @@ class GraphDerivedProvenanceFact:
 @dataclass(frozen=True)
 class GraphProvenanceAnalysis:
     module_summary_provenance: dict[str, tuple[GraphProvenance, ...]]
+    # Formal-input expressions remain precise when callers pass different values.
+    module_symbolic_local_provenance: dict[str, dict[str, GraphProvenance]]
     module_input_provenance: dict[str, dict[str, GraphProvenance]]
     module_local_provenance: dict[str, dict[str, GraphProvenance]]
     module_output_provenance: dict[str, tuple[GraphProvenance, ...]]
@@ -181,6 +183,7 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
         if module.is_global_binding and not module.inputs
     }
     summaries: dict[str, tuple[GraphProvenance, ...]] = {}
+    symbolic_locals: dict[str, dict[str, GraphProvenance]] = {}
     visiting: set[str] = set()
 
     def module_summary(module_name: str) -> tuple[GraphProvenance, ...]:
@@ -201,6 +204,7 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
             module_summary=module_summary,
             global_names=global_names,
         )
+        symbolic_locals[module_name] = local
         outputs = tuple(
             _operand_provenance(
                 output,
@@ -311,6 +315,7 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
 
     return GraphProvenanceAnalysis(
         module_summary_provenance=dict(summaries),
+        module_symbolic_local_provenance=symbolic_locals,
         module_input_provenance=input_prov,
         module_local_provenance=local_prov,
         module_output_provenance=output_prov,
