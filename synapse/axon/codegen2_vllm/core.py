@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -182,6 +183,8 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         }
         self._use_clean_forward: bool = False
         self._has_lm_head: bool = False
+        self._standalone_act_raw: str | None = None
+        self._standalone_act_fn_name: str | None = None
         self._model_config_data: dict[str, Any] = model_config or {}
         self._node_id_aliases: dict[str, str] = self._build_node_id_aliases()
         self._inline_loop_prefix: dict[str, str] = self._build_inline_loop_prefix()
@@ -275,6 +278,19 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                         if isinstance(bias_inp, GraphLiteral):
                             return bool(bias_inp.value)
         return False
+
+    def _skip_bias_arg(self, bias: bool | str) -> str:
+        """fix7a-native: fuse bias into the GEMM epilogue (``skip_bias_add=False``).
+
+        With a real bias and the clean forward loop (whose call sites unpack
+        the ``(output, None)`` tuple and guard on ``None``), this matches
+        native vLLM's ``F.linear(x, w, b)`` — one fused epilogue add instead
+        of a separate eager bias kernel. Non-literal bias expressions and
+        legacy-forward models keep ``skip_bias_add=True``.
+        """
+        if self._use_clean_forward and (bias is True or bias == "True"):
+            return "False"
+        return "True"
 
     def _trace_module_output(
         self,
@@ -1200,6 +1216,29 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             return "F.relu({x})"
         return "F.gelu({x})"
 
+    @staticmethod
+    def _act_fn_registry_name(act_name: str) -> str | None:
+        """Map a graph activation op name to vLLM's ``get_act_fn`` registry name.
+
+        Returns None for activations not known to be in vLLM's activation
+        registry — the emission then keeps the eager ``F.*`` call instead of
+        constructing a CustomOp that would fail to resolve at import time.
+        Longer suffixes are matched first so ``gelu_new``/``gelu_pytorch_tanh``
+        win over the bare ``gelu`` prefix. (fix12-native)
+        """
+        for suffix, registry_name in (
+            ("gelu_pytorch_tanh", "gelu_pytorch_tanh"),
+            ("gelu_new", "gelu_new"),
+            ("quick_gelu", "quick_gelu"),
+            ("swish", "silu"),
+            ("gelu", "gelu"),
+            ("silu", "silu"),
+            ("relu", "relu"),
+        ):
+            if act_name.endswith(suffix):
+                return registry_name
+        return None
+
     def _analyze_layer_norms(
         self,
         repeated_mod: Any,
@@ -1434,7 +1473,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 3, "VocabParallelEmbedding,")
         add(lines, indent * 3, "ParallelLMHead,")
         add(lines, indent * 2, ")")
-        add(lines, indent * 2, "from vllm.attention.layer import Attention")
+        add(lines, indent * 2, "from vllm.model_executor.layers.attention import Attention")
         add(lines, indent * 2, "from vllm.model_executor.layers.layernorm import RMSNorm, LayerNorm")
         add(lines, indent * 2, "")
 
@@ -1459,66 +1498,33 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 add(lines, indent * 2, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 3, "get_rope(")
                 add(lines, indent * 4, f"({full_hd} if ((i + 1) % _rope_period == 0) else {local_hd}),")
-                add(lines, indent * 4, f"({full_hd} if ((i + 1) % _rope_period == 0) else {local_hd}),")
                 add(lines, indent * 4, "max_position=getattr(config, 'max_position_embeddings', 4096),")
-                add(lines, indent * 4, f"base=({full_theta} if ((i + 1) % _rope_period == 0) else {local_theta}),")
                 add(lines, indent * 4, f"is_neox_style={_is_neox},")
-                add(lines, indent * 4, "rope_scaling=(")
-                add(lines, indent * 5, "dict(config.rope_parameters[config.layer_types[i]])")
-                add(lines, indent * 5, "if hasattr(config, 'rope_parameters') and hasattr(config, 'layer_types')")
-                add(lines, indent * 5, "and isinstance(config.rope_parameters, dict) and i < len(config.layer_types)")
-                add(lines, indent * 5, "and config.layer_types[i] in config.rope_parameters")
-                add(lines, indent * 5, f"else {{'rope_type': 'default'}}")
-                add(lines, indent * 4, "),")
+                add(lines, indent * 4, "rope_parameters=_resolve_rope_parameters(")
+                add(lines, indent * 5, "config, i,")
+                add(lines, indent * 5, f"({full_theta} if ((i + 1) % _rope_period == 0) else {local_theta})),")
                 add(lines, indent * 3, f") for i in range({num_layers_expr})")
                 add(lines, indent * 2, "])")
             else:
                 add(lines, indent * 2, "_rope_theta = getattr(config, 'rope_theta', None)")
                 add(lines, indent * 2, "if _rope_theta is None:")
                 add(lines, indent * 3, "_rope_theta = self._model_config.get('rope_theta', 10000.0)")
-                add(lines, indent * 2, "_rope_scaling = getattr(config, 'rope_scaling', None)")
-                add(lines, indent * 2, "if (hasattr(config, 'rope_parameters') and hasattr(config, 'layer_types')")
-                add(lines, indent * 3, "and isinstance(getattr(config, 'rope_parameters', None), dict)")
-                add(lines, indent * 3, "and isinstance(getattr(config, 'layer_types', None), (list, tuple))")
-                add(lines, indent * 3, "and len(config.layer_types) > 0")
-                add(lines, indent * 3, "and config.layer_types[0] in config.rope_parameters):")
+                add(lines, indent * 2, "if getattr(config, 'rope_parameters', None) is not None or getattr(config, 'rope_scaling', None) is not None or getattr(config, 'partial_rotary_factor', getattr(config, 'rotary_pct', 1.0)) < 1.0:")
                 add(lines, indent * 3, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 4, "get_rope(")
                 add(lines, indent * 5, f"{head_dim_expr},")
-                add(lines, indent * 5, f"{head_dim_expr},")
                 add(lines, indent * 5, "max_position=getattr(config, 'max_position_embeddings', 4096),")
-                add(lines, indent * 5, "base=_rope_theta,")
                 add(lines, indent * 5, f"is_neox_style={_is_neox},")
-                add(lines, indent * 5, "rope_scaling=(")
-                add(lines, indent * 6, "dict(config.rope_parameters[config.layer_types[i]])")
-                add(lines, indent * 6, "if i < len(config.layer_types) and config.layer_types[i] in config.rope_parameters")
-                if _has_partial_rotary:
-                    add(lines, indent * 6, "else {**{'rope_type': 'default'}, **({'rope_dim': getattr(config, 'rotary_dim', None)} if hasattr(config, 'rotary_dim') and config.rotary_dim is not None else {'partial_rotary_factor': getattr(config, 'partial_rotary_factor', getattr(config, 'rotary_pct', 1.0))})}")
-                else:
-                    add(lines, indent * 6, "else {'rope_type': 'default'}")
-                add(lines, indent * 5, "),")
+                add(lines, indent * 5, "rope_parameters=_resolve_rope_parameters(config, i, _rope_theta),")
                 add(lines, indent * 4, f") for i in range({num_layers_expr})")
                 add(lines, indent * 3, "])")
                 add(lines, indent * 2, "else:")
-                add(lines, indent * 3, "if _rope_scaling is not None:")
-                add(lines, indent * 4, "_rope_params = dict(_rope_scaling)")
-                add(lines, indent * 4, "_rope_params.pop('rope_theta', None)")
-                add(lines, indent * 3, "else:")
-                add(lines, indent * 4, "_rope_params = {'rope_type': 'default'}")
-                if _has_partial_rotary:
-                    add(lines, indent * 4, "_rd = getattr(config, 'rotary_dim', None)")
-                    add(lines, indent * 4, "if _rd is not None:")
-                    add(lines, indent * 5, "_rope_params['rope_dim'] = _rd")
-                    add(lines, indent * 4, "else:")
-                    add(lines, indent * 5, "_prf = getattr(config, 'partial_rotary_factor', getattr(config, 'rotary_pct', 1.0))")
-                    add(lines, indent * 5, "_rope_params['partial_rotary_factor'] = _prf")
                 add(lines, indent * 3, "self.rotary_emb = nn.ModuleList([")
-                add(lines, indent * 4, f"get_rope({head_dim_expr},")
-                add(lines, indent * 4, f"{head_dim_expr},")
-                add(lines, indent * 4, "max_position=getattr(config, 'max_position_embeddings', 4096),")
-                add(lines, indent * 4, "base=_rope_theta,")
-                add(lines, indent * 4, f"is_neox_style={_is_neox},")
-                add(lines, indent * 4, "rope_scaling=_rope_params,")
+                add(lines, indent * 4, "get_rope(")
+                add(lines, indent * 5, f"{head_dim_expr},")
+                add(lines, indent * 5, "max_position=getattr(config, 'max_position_embeddings', 4096),")
+                add(lines, indent * 5, f"is_neox_style={_is_neox},")
+                add(lines, indent * 5, "rope_parameters={'rope_theta': _rope_theta, 'rope_type': 'default'},")
                 add(lines, indent * 4, f") for i in range({num_layers_expr})")
                 add(lines, indent * 3, "])")
             add(lines, indent * 2, "")
@@ -1613,6 +1619,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             add(lines, indent * 3, "self._ffn_act = GeluAndMul()")
             add(lines, indent * 2, "else:")
             add(lines, indent * 3, "self._ffn_act = SiluAndMul()")
+
+        # Standalone (unmerged) FFN activation: construct vLLM's CustomOp
+        # activation (fix12-native) so forward dispatches the same kernel
+        # native vLLM uses instead of an eager F.* call.
+        if self._standalone_act_fn_name:
+            add(lines, indent * 2, "from vllm.model_executor.layers.activation import get_act_fn")
+            add(lines, indent * 2, f"self._vllm_act_fn = get_act_fn({self._standalone_act_fn_name!r})")
 
         # Mamba/SSM state cache placeholder layers
         if self._needs_mamba_cache_placeholders(classification):
@@ -1818,6 +1831,15 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 4, "_parent = _ck.rsplit('.', 1)[0] + '.'")
         add(lines, indent * 4, "if _parent.count('.') >= 2:")
         add(lines, indent * 5, "_ckpt_prefixes.add(_parent)")
+        add(lines, indent * 2, "# HF checkpoints are typically rooted at 'model.' while module")
+        add(lines, indent * 2, "# prefixes may omit that root; alias both directions so the")
+        add(lines, indent * 2, "# weight filter and prefix mapping accept rooted names.")
+        add(lines, indent * 2, "for _ck in list(_ckpt_to_model):")
+        add(lines, indent * 3, "if not _ck.startswith('model.'):")
+        add(lines, indent * 4, "_alt = 'model.' + _ck")
+        add(lines, indent * 4, "if _alt not in _ckpt_to_model:")
+        add(lines, indent * 5, "_ckpt_to_model[_alt] = _ckpt_to_model[_ck]")
+        add(lines, indent * 2, "_ckpt_prefixes |= {'model.' + _p for _p in _ckpt_prefixes}")
         scope_prefixes = self._collect_scope_prefixes()
         for sp in scope_prefixes:
             add(lines, indent * 2, f"_ckpt_prefixes.add('{sp}.')")
@@ -1862,13 +1884,25 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 2, "except StopIteration:")
         add(lines, indent * 3, "pass")
         if self._unit_offset_norm_attrs:
-            add(lines, indent * 2, "# Add 1.0 to unit_offset RMSNorm weights (Gemma-family)")
+            add(lines, indent * 2, "# Add 1.0 to unit_offset RMSNorm weights (Gemma-family).")
+            add(lines, indent * 2, "# state_dict_tensors aliases these params for the interpreter's")
+            add(lines, indent * 2, "# torch-style reads; keep those entries RAW (the program's norm")
+            add(lines, indent * 2, "# op applies the +1 itself, so the state must hold the raw weight).")
+            add(lines, indent * 2, "def _add_unit_offset(_mod):")
+            add(lines, indent * 3, "_raw = _mod.weight.data.clone()")
+            add(lines, indent * 3, "_pfx = getattr(_mod, 'prefix', None)")
+            add(lines, indent * 3, "if _pfx:")
+            add(lines, indent * 4, "_pfx = _pfx.lstrip('.')")
+            add(lines, indent * 4, "for _k in (_pfx + '.weight', 'model.' + _pfx + '.weight'):")
+            add(lines, indent * 5, "if self.state_dict_tensors.get(_k) is _mod.weight:")
+            add(lines, indent * 6, "self.state_dict_tensors[_k] = _raw")
+            add(lines, indent * 3, "_mod.weight.data.add_(1.0)")
             for attr_name, is_repeated in self._unit_offset_norm_attrs:
                 if is_repeated:
                     add(lines, indent * 2, f"for _mod in self.{attr_name}:")
-                    add(lines, indent * 3, "_mod.weight.data.add_(1.0)")
+                    add(lines, indent * 3, "_add_unit_offset(_mod)")
                 else:
-                    add(lines, indent * 2, f"self.{attr_name}.weight.data.add_(1.0)")
+                    add(lines, indent * 2, f"_add_unit_offset(self.{attr_name})")
         add(lines, indent, "")
 
         add(lines, indent, "def compute_logits(self, hidden_states):")
@@ -1903,8 +1937,12 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 5, "continue")
         add(lines, indent * 3, "for _pname, _param in _module.named_parameters(recurse=False):")
         add(lines, indent * 4, "self.state_dict_tensors[f'{_resolved}.{_pname}'] = _param")
+        add(lines, indent * 4, "if not _resolved.startswith('model.'):")
+        add(lines, indent * 5, "self.state_dict_tensors.setdefault(f'model.{_resolved}.{_pname}', _param)")
         add(lines, indent * 3, "for _bname, _buf in _module.named_buffers(recurse=False):")
         add(lines, indent * 4, "self.state_dict_tensors[f'{_resolved}.{_bname}'] = _buf")
+        add(lines, indent * 4, "if not _resolved.startswith('model.'):")
+        add(lines, indent * 5, "self.state_dict_tensors.setdefault(f'model.{_resolved}.{_bname}', _buf)")
         add(lines, indent, "")
         add(lines, indent, "def _apply(self, fn, recurse=True):")
         add(lines, indent * 2, "result = super()._apply(fn, recurse=recurse)")
@@ -1975,12 +2013,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             return
 
         # Fall back to legacy forward if there are too many norms — more than
-        # 4 indicates core.select branches with alternative norm paths (e.g.
-        # Gemma3 sliding vs full attention) that the clean forward can't handle.
-        # Count ALL norms (including QK/V norms) for this check, since models
-        # with QK norms (e.g. Gemma3) also have the sliding/full attention
-        # select branches that the clean forward can't handle yet.
-        _total_norm_count = len(layer_norms) + len(cls.qk_norm_node_ids) + len(cls.v_norm_node_ids)
+        # Legacy-forward gate: >4 layer norms indicates per-layer norm variety
+        # the clean forward hasn't proven. QK/V norms are excluded from the
+        # count (2026-10-27, stream I): the clean path classifies and handles
+        # q/k norms explicitly, and counting them routed gemma3 (4 sandwich
+        # norms + 2 QK norms) to the legacy path, suppressing its structural
+        # attention delegation (dead _def_gemma3_block evidence, stream-I audit).
+        _total_norm_count = len(layer_norms)
         if _total_norm_count > 4:
             self._emit_forward_legacy(lines)
             return
@@ -2368,7 +2407,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     if ffn_norm_idx == 0:
                         add(lines, indent, f"hidden_states = _xn")
                 elif has_standalone_attn_add:
-                    add(lines, indent, f"hidden_states = residual + hidden_states * _residual_mult")
+                    add(lines, indent, f"hidden_states = residual + (hidden_states if _residual_mult == 1.0 else hidden_states * _residual_mult)")
                     add(lines, indent, f"residual = hidden_states")
             if norm_i == ffn_norm_idx and ffn_group:
                 if has_parallel_residual and ffn_norm_idx != 0:
@@ -2378,7 +2417,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 if has_parallel_residual:
                     add(lines, indent, f"hidden_states = residual + _attn_out + hidden_states")
                 elif has_standalone_ffn_add:
-                    add(lines, indent, f"hidden_states = residual + hidden_states * _residual_mult")
+                    add(lines, indent, f"hidden_states = residual + (hidden_states if _residual_mult == 1.0 else hidden_states * _residual_mult)")
 
         if has_pli:
             self._emit_pli_block(lines, indent, cls)
@@ -2605,8 +2644,15 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     else:
                         add(lines, indent, f"hidden_states = F.gelu(hidden_states)")
                 else:
-                    act_code = self._activation_to_code(act_name)
-                    add(lines, indent, f"hidden_states = {act_code.format(x='hidden_states')}")
+                    _native_standalone_act = (
+                        getattr(self, '_standalone_act_fn_name', None)
+                        and act_name == getattr(self, '_standalone_act_raw', None)
+                    )
+                    if _native_standalone_act:
+                        add(lines, indent, "hidden_states = self._vllm_act_fn(hidden_states)")
+                    else:
+                        act_code = self._activation_to_code(act_name)
+                        add(lines, indent, f"hidden_states = {act_code.format(x='hidden_states')}")
 
         if ffn_group.down_node_id:
             down_node = self._find_node_by_id(ffn_group.down_node_id)
@@ -2805,11 +2851,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             if _repeated_mod is not None:
                 _layer_norms = self._analyze_layer_norms(_repeated_mod, classification)
                 if _layer_norms:
-                    _total_norm_count = (
-                        len(_layer_norms)
-                        + len(classification.qk_norm_node_ids)
-                        + len(classification.v_norm_node_ids)
-                    )
+                    _total_norm_count = len(_layer_norms)
                     if _total_norm_count <= 4:
                         use_clean_forward = True
         _is_hybrid_mamba = bool(
@@ -2826,6 +2868,23 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     for node in mamba_mod.nodes:
                         skip_node_ids.add(node.id)
         self._use_clean_forward = use_clean_forward
+        # fix12-native: standalone (unmerged) FFN activation sites dispatch
+        # vLLM's CustomOp activation (get_act_fn) instead of eager F.* kernels,
+        # matching native vLLM model files (e.g. gpt2.py's NewGELU). Resolved
+        # once here so __init__ and the forward loop agree on the same op;
+        # unmapped activations keep the eager F.* fallback.
+        self._standalone_act_raw = None
+        self._standalone_act_fn_name = None
+        if use_clean_forward:
+            _standalone_ffn_groups = [
+                g for g in classification.ffn_groups
+                if g.up_node_id and not (g.gate_node_id and g.up_node_id)
+            ]
+            if _standalone_ffn_groups:
+                _act = self._detect_activation(self._get_repeated_module())
+                if _act:
+                    self._standalone_act_raw = _act
+                    self._standalone_act_fn_name = self._act_fn_registry_name(_act)
         if use_clean_forward:
             if classification.lm_head_node_id:
                 lm_head_node = self._find_node_by_id(classification.lm_head_node_id)
@@ -3149,7 +3208,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             elif node.id in pli_linear_ids:
                 add(lines, indent, "ReplicatedLinear(")
                 add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")  # PLI gate: keep returned-bias form (call site adds it)
                 add(lines, indent + 1, f"prefix={prefix},")
                 add(lines, indent + 1, "params_dtype=params_dtype,")
                 add(lines, indent, ")")
@@ -3168,10 +3227,33 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     add(lines, indent + 1, "quant_config=quant_config,")
                     add(lines, indent + 1, "params_dtype=params_dtype,")
                     add(lines, indent, ")")
+                elif up_node_id == node.id:
+                    # Self-fused gate_up: the optimizer merged gate_proj+up_proj
+                    # into a single packed _linear node whose weight path is
+                    # __packed.linear_pair.<base>.<node>.gate.<g>.up.<u>.
+                    # Emit one MergedColumnParallelLinear covering both halves.
+                    packed_prefix = self._packed_gate_up_layer_prefix(_linear_base_key(node))
+                    if packed_prefix:
+                        half_dim = f"(({out_dim}) // 2)"
+                        add(lines, indent, "MergedColumnParallelLinear(")
+                        add(lines, indent + 1, f"{in_dim}, [{half_dim}, {half_dim}],")
+                        add(lines, indent + 1, f"bias={bias}, skip_bias_add={self._skip_bias_arg(bias)},")
+                        add(lines, indent + 1, f"prefix={packed_prefix},")
+                        add(lines, indent + 1, "quant_config=quant_config,")
+                        add(lines, indent + 1, "params_dtype=params_dtype,")
+                        add(lines, indent, ")")
+                    else:
+                        add(lines, indent, "ColumnParallelLinear(")
+                        add(lines, indent + 1, f"{in_dim}, {out_dim},")
+                        add(lines, indent + 1, f"bias={bias}, skip_bias_add={self._skip_bias_arg(bias)},")
+                        add(lines, indent + 1, f"prefix={prefix},")
+                        add(lines, indent + 1, "quant_config=quant_config,")
+                        add(lines, indent + 1, "params_dtype=params_dtype,")
+                        add(lines, indent, ")")
                 else:
                     add(lines, indent, "ColumnParallelLinear(")
                     add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                    add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                    add(lines, indent + 1, f"bias={bias}, skip_bias_add={self._skip_bias_arg(bias)},")
                     add(lines, indent + 1, f"prefix={prefix},")
                     add(lines, indent + 1, "quant_config=quant_config,")
                     add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -3179,7 +3261,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             elif layer_type == VLLMLayerType.COLUMN_PARALLEL_LINEAR:
                 add(lines, indent, "ColumnParallelLinear(")
                 add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                add(lines, indent + 1, f"bias={bias}, skip_bias_add={self._skip_bias_arg(bias)},")
                 add(lines, indent + 1, f"prefix={prefix},")
                 add(lines, indent + 1, "quant_config=quant_config,")
                 add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -3187,7 +3269,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             else:
                 add(lines, indent, "RowParallelLinear(")
                 add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                add(lines, indent + 1, f"bias={bias}, skip_bias_add={self._skip_bias_arg(bias)},")
                 add(lines, indent + 1, f"prefix={prefix},")
                 add(lines, indent + 1, "quant_config=quant_config,")
                 add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -3330,7 +3412,10 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         elif layer_type == VLLMLayerType.LAYERNORM:
             dim = self._node_input_dim_expr(node)
             eps = self._node_layernorm_eps(node)
-            add(lines, indent, "LayerNorm(")
+            # fix7c-native: plain nn.LayerNorm, matching native vLLM model
+            # files (e.g. gpt2.py) — vllm's LayerNorm CustomOp hard-codes an
+            # fp32 round-trip per call that native doesn't do.
+            add(lines, indent, "nn.LayerNorm(")
             add(lines, indent + 1, f"int({dim}), eps={eps},")
             add(lines, indent, ")")
 
@@ -3377,7 +3462,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             prefix = self._layer_prefix(node)
             add(lines, indent, "ColumnParallelLinear(")
             add(lines, indent + 1, f"{in_dim}, {out_dim},")
-            add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+            add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")  # legacy-forward QKV fallback: call sites expect the returned bias
             add(lines, indent + 1, f"prefix={prefix},")
             add(lines, indent + 1, "quant_config=quant_config,")
             add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -3418,7 +3503,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent, "QKVParallelLinear(")
         add(lines, indent + 1, f"{hidden_size}, {head_size},")
         add(lines, indent + 1, f"{total_num_heads}, {total_num_kv_heads},")
-        add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+        add(lines, indent + 1, f"bias={bias}, skip_bias_add={self._skip_bias_arg(bias)},")
         add(lines, indent + 1, f"prefix={qkv_prefix},")
         add(lines, indent + 1, "quant_config=quant_config,")
         add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -3759,6 +3844,38 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         ):
             return False
         return super()._branch_benefits_from_control_inline(operand, module_name=module_name)
+
+    def _packed_gate_up_layer_prefix(self, base: str) -> str | None:
+        """Derive the merged-layer prefix from a packed linear-pair key.
+
+        Packed keys are built as
+          __packed.linear_pair.<base>.<node_id>.gate.<gate_parts>.up.<up_parts>
+        The merged layer prefix is the gate weight path with .gate_proj
+        replaced by .gate_up_proj and any trailing .weight/.bias stripped.
+        """
+        if not base or not base.startswith("__packed.linear_pair."):
+            return None
+        parts = base.split(".")
+        try:
+            gate_idx = parts.index("gate", 4)
+            up_idx = parts.index("up", gate_idx + 1)
+        except ValueError:
+            return None
+        gate_parts = parts[gate_idx + 1 : up_idx]
+        if not gate_parts:
+            return None
+        gate_path = ".".join(gate_parts)
+        for suffix in (".weight", ".bias"):
+            if gate_path.endswith(suffix):
+                gate_path = gate_path[: -len(suffix)]
+                break
+        prefix = gate_path.replace(".gate_proj", ".gate_up_proj")
+        prefix = (
+            prefix.replace("{root}", "{prefix}")
+            .replace("{path}", "{prefix}")
+            .replace("{__scope}", "{prefix}")
+        )
+        return f'f"{prefix}"'
 
     def _layer_prefix(self, node: GraphNode) -> str:
         def _fix_prefix(s: str) -> str:
@@ -4471,6 +4588,51 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         return 'f"backbone.layers.{i}.mixer"'
 
 
+def _emission_completeness_orphans(body: str) -> list[str]:
+    """P0a completeness ledger: find constructed-but-never-called layers.
+
+    Every ``self._vllm_*`` attribute constructed in ``__init__`` must be
+    referenced by ``forward``/``embed_input_ids``/``compute_logits``. This
+    catches the silent classification-fallthrough class of defects (the
+    fix4/fix5/fix8d/fix10/fix12 families): a layer built but never called
+    raises nothing at build time and silently diverges at runtime.
+    References inside ``_eval_symbols`` deliberately don't count — that
+    helper re-evaluates graph expressions, not the live forward path.
+
+    Returns sorted orphan attribute names (empty list = clean).
+    """
+    method_chunks: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in body.splitlines():
+        m = re.match(r"    def (\w+)\(", line)
+        if m:
+            current = m.group(1)
+            method_chunks.setdefault(current, [])
+        elif current is not None:
+            method_chunks[current].append(line)
+
+    init_body = "\n".join(method_chunks.get("__init__", []))
+    constructed = set(re.findall(r"self\.(_vllm_\w+)\s*=(?!=)", init_body))
+
+    # __init__ aliases (e.g. ``self.lm_head = self._vllm_gpt2_16``) export the
+    # constructed layer under a non-_vllm_ carrier name; liveness transfers.
+    alias_carrier: dict[str, str] = {}
+    for m in re.finditer(r"self\.(\w+)\s*=\s*self\.(_vllm_\w+)(?![\w.])", init_body):
+        alias_carrier.setdefault(m.group(2), m.group(1))
+    carriers = set(alias_carrier.values())
+
+    read_body = "\n".join(
+        "\n".join(method_chunks[name])
+        for name in ("forward", "embed_input_ids", "compute_logits")
+        if name in method_chunks
+    )
+    targets = set(re.findall(r"self\.(_vllm_\w+)\s*=(?!=)", read_body))
+    reads = set(re.findall(r"self\.(_vllm_\w+)", read_body)) - targets
+    live_carriers = {c for c in carriers if re.search(rf"self\.{c}\b", read_body)}
+    aliased_live = {v for v, c in alias_carrier.items() if c in live_carriers}
+    return sorted(constructed - reads - aliased_live)
+
+
 def emit_model_code_from_graph_ir(
     program: GraphProgram,
     *,
@@ -4490,6 +4652,20 @@ def emit_model_code_from_graph_ir(
         model_config=model_config,
     )
     body = emitter.emit()
+    # P0a emission-completeness ledger: warn (or fail under
+    # AXON_VLLM_EMIT_STRICT=1) when a constructed _vllm_* layer is never
+    # called on the live forward path.
+    _orphans = _emission_completeness_orphans(body)
+    if _orphans:
+        _msg = (
+            "emission completeness: "
+            f"{len(_orphans)} constructed _vllm_* attribute(s) never "
+            f"referenced in forward/embed_input_ids/compute_logits: "
+            f"{', '.join(_orphans)}"
+        )
+        if os.environ.get("AXON_VLLM_EMIT_STRICT") == "1":
+            raise RuntimeError(_msg)
+        print(f"WARNING: {_msg}")
     header = [
         "",
     ]
@@ -4502,6 +4678,34 @@ def emit_model_code_from_graph_ir(
             "from torch.nn import functional as F",
             "",
             f"_MODEL_CONFIG = {model_config!r}",
+            "",
+            "def _resolve_rope_parameters(config, layer_index, default_theta):",
+            "    params = getattr(config, 'rope_parameters', None)",
+            "    if isinstance(params, dict):",
+            "        layer_types = getattr(config, 'layer_types', None)",
+            "        if (layer_index is not None and isinstance(layer_types, (list, tuple))",
+            "                and layer_index < len(layer_types)",
+            "                and layer_types[layer_index] in params",
+            "                and isinstance(params[layer_types[layer_index]], dict)):",
+            "            entry = dict(params[layer_types[layer_index]])",
+            "            entry.setdefault('rope_theta', default_theta)",
+            "            return entry",
+            "        if 'rope_theta' in params or 'rope_type' in params:",
+            "            entry = dict(params)",
+            "            entry.setdefault('rope_theta', default_theta)",
+            "            return entry",
+            "    scaling = getattr(config, 'rope_scaling', None)",
+            "    entry = dict(scaling) if isinstance(scaling, dict) else {}",
+            "    entry.setdefault('rope_theta', default_theta)",
+            "    entry.setdefault('rope_type', 'default')",
+            "    if 'rope_dim' not in entry and 'partial_rotary_factor' not in entry:",
+            "        rotary_dim = getattr(config, 'rotary_dim', None)",
+            "        partial = getattr(config, 'partial_rotary_factor', getattr(config, 'rotary_pct', None))",
+            "        if rotary_dim is not None:",
+            "            entry['rope_dim'] = rotary_dim",
+            "        elif partial is not None and partial < 1.0:",
+            "            entry['partial_rotary_factor'] = partial",
+            "    return entry",
             "",
         ]
     )

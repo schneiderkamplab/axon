@@ -145,6 +145,46 @@ intrinsics produce better-shaped computation graphs for `torch.compile`.
 On backends without `torch.compile` (MLX, Triton, JAX), Axon's intrinsics are
 the sole fusion mechanism — the full speedup is attributable to the IR.
 
+### T5: Implementation tier (4 configs)
+
+Isolates *implementation-level* speedup components (grad-mode asymmetry, codegen
+structure) from optimizer contributions. Added 2026-10-26 for the attribution
+study (`wiki/attribution-plan.md`).
+
+| Config | What it measures |
+|--------|-----------------|
+| `hf-no-grad` | HF under `torch.no_grad()` — the historical baseline |
+| `hf-inference-mode` | HF under `torch.inference_mode()` — grad-mode parity control |
+| `axon-no-opt-plain` | Axon no-opt without the generated eval-mode `inference_mode` wrapper (`axon_bypass_inference_mode=True`) |
+| `axon-graph-full-plain` | Same bypass on the fully optimized graph (control) |
+
+Harness flags (opt-in, defaults preserve behavior):
+`run_axon_test(..., hf_grad_mode="no_grad"|"inference_mode", axon_bypass_inference_mode=False)`.
+Note: `generate`-mode HF timing intentionally stays on `no_grad`.
+
+Measurement notes:
+- Full-minus-X intrinsic ablation needs **no optimizer changes**:
+  `backend_intrinsics` accepts comma-separated subsets via
+  `_parse_backend_intrinsics` (`graph_ir/optimize.py`), e.g.
+  `codegen2-torch:sdpa` for only-sdpa and `codegen2-torch:gelu_ffn` for
+  full-minus-sdpa.
+- Multiplicative decomposition (ratios, <1 = Axon faster):
+  `f1 = hf(im)/hf(ng)`, `f2 = axon(plain)/hf(im)`, `f3 = axon(no-opt)/axon(plain)`;
+  `f1*f2*f3 = no-opt/hf-no-grad` exactly (telescoping check in the analysis
+  script). `f4a = graph-no-intrinsics/no-opt`, `f4b = graph-full/graph-no-intrinsics`.
+- Generic (non-materialized) axon files can fail at weight load for decoders
+  with packed gate/up params (`missing parameter '__packed.linear_pair...'`);
+  use the materialized axon for those models. Conversely, stale materialized
+  files can fail optimizer phases that a fresh generic file passes (gemma3).
+- Driver `scripts/attribute_impl_attribution.py` supports `--resume-from
+  <raw_results.json>` to merge reruns into an existing run dir.
+
+Measured T5 results (2026-10-26, fp32/CUDA, albert+electra):
+`log/impl-attribution-20261026-195830/staircase.csv`. Summary: grad-mode
+asymmetry ~5-9% on both sides; intrinsics factor 0.67-0.70; sdpa is the
+dominant intrinsic (T3 both-directions consistent); totals albert 0.574,
+electra 0.756.
+
 ## Measured Results (2026-09-26)
 
 ### T1: Node reduction (14 models, codegen2-torch)
@@ -445,3 +485,13 @@ All SVGs are raw XML (no matplotlib dependency), following the pattern of
 | "Backend-aligned PyTorch comparison shows modest gains" | T4 baselines show Axon+compiled is 1-3% faster than HF+compiled; on non-PyTorch backends the full speedup is from Axon's IR |
 | "Which gains and IR parts are optimized" | Op distribution heatmap + kernel count data shows exactly which ops are transformed and how many kernel launches are eliminated |
 | "How does this compare to torch.compile?" | T4-baselines: `torch.compile` does 78-80% kernel fusion; Axon provides IR-level node reduction (44-50%) + better-shaped graphs for compile to optimize; the two are complementary and stackable |
+
+## Model registry extension (2026-10-27)
+
+`deepseekv2lite` and `olmoe` keys now exist in `scripts/attribute_impl_attribution.py`
+MODELS (axon file + weights dir pairs). MoE programs fire the `__torch_*expert*`
+intrinsics from the backend set, and T3 `only-`/`full-minus-` configs are
+generated automatically for every fired intrinsic (build_configs runs graph-full
+first as firing detection). Note: fp32 is the protocol-matched dtype for the
+torch tier; bf16 exposed a softmax-downcast defect in the emitter (fixed
+2026-10-27, see wiki/log.md).

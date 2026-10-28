@@ -249,6 +249,8 @@ def _normalize_backend_intrinsic_name(name: str, *, target: str) -> str:
     if token in {"*", "all"}:
         return token
     allowed_intrinsics = _BACKEND_INTRINSICS_BY_TARGET[target]
+    if token in allowed_intrinsics:
+        return token
     prefix = _BACKEND_INTRINSIC_PREFIX_BY_TARGET[target]
     single_prefix = prefix.removeprefix("_")
     if token.startswith(single_prefix):

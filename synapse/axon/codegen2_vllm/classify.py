@@ -236,6 +236,16 @@ def _is_linear_call(
     node: GraphNode,
     modules_by_name: dict[str, GraphModule],
 ) -> bool:
+    if node.op.name == "_linear":
+        # Direct primitive linear (not a module call). Only the optimizer's
+        # packed gate_up node (__packed.linear_pair weight path) should be
+        # treated as a vLLM linear layer; other direct _linear nodes keep
+        # their torch-style emission below.
+        for inp in node.inputs:
+            if isinstance(inp, GraphPath) and inp.parts:
+                if inp.parts[0] == "__packed" and "linear_pair" in inp.parts[:3]:
+                    return True
+        return False
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
@@ -1229,6 +1239,13 @@ def _classify_repeated_modules(
                 for inp in node.inputs:
                     if isinstance(inp, GraphPath) and inp.parts:
                         parts = tuple(inp.parts)
+                        if parts and parts[0] == "__packed":
+                            # Synthetic packed linear-pair path
+                            # (__packed.linear_pair.<base>.<node>.gate.<g>.up.<u>)
+                            # is a fused weight-bank key, not a scope path —
+                            # it would pollute module_scope_parts for the
+                            # whole inlined module.
+                            break
                         if any(loop_token in p for p in parts):
                             # Skip GraphPaths that end with parameter names
                             # (e.g. 'weight', 'bias') — these are parameter

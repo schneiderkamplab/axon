@@ -67,14 +67,41 @@ _TRITON_INTRINSICS = frozenset({
     "__torch_rope_pair_apply_factors",
 })
 
+_JAX_INTRINSICS = frozenset(
+    {
+        "__jax_add_rmsnorm_noscale",
+        "__jax_expert_packed_swiglu_ffn",
+        "__jax_expert_swiglu_ffn",
+        "__jax_gelu_ffn",
+        "__jax_rmsnorm_noscale",
+        "__jax_rmsnorm_scaled",
+        "__jax_rope",
+        "__jax_sdpa",
+        "__jax_selected_expert_clamped_packed_swiglu_ffn",
+        "__jax_selected_expert_packed_gegelu_ffn",
+        "__jax_selected_expert_packed_swiglu_ffn",
+        "__jax_selected_expert_relu2_ffn",
+        "__jax_selected_expert_swiglu_ffn",
+        "__jax_sigmoid_gated_merge",
+        "__jax_sigmoid_gated_mul",
+        "__jax_split_swiglu",
+        "__jax_swiglu_activation",
+        "__jax_swiglu_ffn",
+        "__jax_topk_normalize",
+        "__jax_weighted_topk_sum",
+    }
+)
+
 _BACKEND_INTRINSICS: dict[str, frozenset[str]] = {
     "codegen2-torch": _TORCH_INTRINSICS,
     "codegen2-triton": _TRITON_INTRINSICS,
+    "codegen2-jax": _JAX_INTRINSICS,
 }
 
 _BACKEND_PREFIX = {
     "codegen2-torch": "__torch_",
     "codegen2-triton": "__triton_",
+    "codegen2-jax": "__jax_",
 }
 
 # Pass flags that can be individually toggled for T2 ablation
@@ -96,10 +123,12 @@ _PASS_FLAGS = (
 @dataclass(frozen=True)
 class AblationConfig:
     name: str
-    tier: str  # "t1-stages" | "t2-per-pass" | "t3-per-intrinsic"
+    tier: str  # "t1-stages" | "t2-per-pass" | "t3-per-intrinsic" | "t4-baselines" | "t5-impl"
     description: str
     optimize_ast: bool = False
     graph_config: GraphOptimizeConfig | None = None
+    hf_grad_mode: str = "no_grad"
+    axon_bypass_inference_mode: bool = False
 
 
 @dataclass
@@ -641,6 +670,7 @@ class CompilerAblation:
         compile_axon: bool = False,
         compile_hf: bool = False,
         compile_mode: str | None = None,
+        track_runtime: bool = True,
     ) -> None:
         self.axon_file = Path(axon_file)
         self.weights = Path(weights)
@@ -656,6 +686,7 @@ class CompilerAblation:
         self.compile_axon = compile_axon
         self.compile_hf = compile_hf
         self.compile_mode = compile_mode
+        self.track_runtime = track_runtime
         self._base_graph: GraphProgram | None = None
         self._base_timings: StageTimings | None = None
 
@@ -738,7 +769,7 @@ class CompilerAblation:
                     description=f"Full optimization with only {display_name} intrinsic",
                     optimize_ast=False,
                     graph_config=GraphOptimizeConfig(
-                        backend_intrinsics=f"{self.backend}:{short}",
+                        backend_intrinsics=f"{self.backend}:{intrinsic}",
                     ),
                 ))
 
@@ -782,6 +813,52 @@ class CompilerAblation:
             optimize_ast=False,
             graph_config=GraphOptimizeConfig(backend_intrinsics=self.backend),
         ))
+        return configs
+
+    def build_implementation_configs(self, *, with_full_plain: bool = False) -> list[AblationConfig]:
+        """Build t5-impl configs isolating implementation-level (non-optimizer) effects.
+
+        Decomposition targets:
+        - ``hf-no-grad``: reference, matches the historical HF baseline (no_grad).
+        - ``hf-inference-mode``: HF timed under inference_mode -> grad-mode share on the HF side.
+        - ``axon-no-opt-plain``: Axon no-opt bypassing the generated inference_mode wrapper
+          -> grad-mode share on the Axon side (harness no_grad still prevents tracking).
+        - ``axon-graph-full-plain`` (optional control): same bypass with full optimization.
+        ``no-opt`` and ``graph-full`` rows come from the standard T1 matrix in the same run.
+        """
+        configs: list[AblationConfig] = []
+        configs.append(AblationConfig(
+            name="hf-no-grad",
+            tier="t5-impl",
+            description="HF reference timed under no_grad (attribution reference)",
+            optimize_ast=False,
+            graph_config=None,
+        ))
+        configs.append(AblationConfig(
+            name="hf-inference-mode",
+            tier="t5-impl",
+            description="HF reference timed under inference_mode",
+            optimize_ast=False,
+            graph_config=None,
+            hf_grad_mode="inference_mode",
+        ))
+        configs.append(AblationConfig(
+            name="axon-no-opt-plain",
+            tier="t5-impl",
+            description="Axon no-opt with generated inference_mode wrapper bypassed",
+            optimize_ast=False,
+            graph_config=None,
+            axon_bypass_inference_mode=True,
+        ))
+        if with_full_plain:
+            configs.append(AblationConfig(
+                name="axon-graph-full-plain",
+                tier="t5-impl",
+                description="Axon full optimization with generated inference_mode wrapper bypassed",
+                optimize_ast=False,
+                graph_config=GraphOptimizeConfig(backend_intrinsics=self.backend),
+                axon_bypass_inference_mode=True,
+            ))
         return configs
 
     def run_single(self, config: AblationConfig) -> AblationResult:
@@ -837,11 +914,13 @@ class CompilerAblation:
                 forward_warmup=self.forward_warmup,
                 forward_repeat=self.forward_repeat,
                 benchmark_mode="forward",
-                track_runtime=True,
+                track_runtime=self.track_runtime,
                 skip_hf=use_skip_hf or self.skip_hf,
                 compile_axon=use_compile_axon,
                 compile_hf=use_compile_hf or (self.compile_hf and not is_t4),
                 compile_mode=self.compile_mode,
+                hf_grad_mode=config.hf_grad_mode,
+                axon_bypass_inference_mode=config.axon_bypass_inference_mode,
             )
             runtime = {
                 "axon_time": result.get("axon_time"),

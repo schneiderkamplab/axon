@@ -18,6 +18,8 @@ from synapse.axon_ablation import (
     CompilerAblation,
     IRMetrics,
     StageTimings,
+    _BACKEND_INTRINSICS,
+    _short_intrinsic_name,
     export_ablation_csv,
     plot_ablation_ops_heatmap,
     plot_ablation_runtime,
@@ -87,11 +89,22 @@ class TestAblationMatrix:
         assert "only-rope-apply-factors" in names
         assert "only-rmsnorm-scaled" in names
 
-    def test_t3_empty_for_unknown_backend(self) -> None:
+    def test_t3_for_jax_backend_uses_jax_registry(self) -> None:
+        # The ablation tool mirrors the optimizer's JAX intrinsic registry
+        # (added when JAX reached intrinsic parity with torch).
         abl = CompilerAblation(_GPT2_AXON, Path("models/gpt2"), backend="codegen2-jax")
         configs = abl.build_ablation_matrix()
         t3 = [c for c in configs if c.tier == "t3-per-intrinsic"]
-        assert len(t3) == 0  # jax intrinsics not in the ablation tool's hardcoded set
+        assert len(t3) == len(_BACKEND_INTRINSICS["codegen2-jax"])
+        names = {c.name for c in t3}
+        assert "only-sdpa" in names
+        assert "only-rmsnorm-noscale" in names
+
+    def test_t3_empty_for_unknown_backend(self) -> None:
+        abl = CompilerAblation(_GPT2_AXON, Path("models/gpt2"), backend="codegen2-nonexistent")
+        configs = abl.build_ablation_matrix()
+        t3 = [c for c in configs if c.tier == "t3-per-intrinsic"]
+        assert len(t3) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -413,3 +426,96 @@ class TestIntegration:
         assert paths["waterfall"].exists()
         assert paths["runtime"].exists()
         assert paths["ops_heatmap"].exists()
+
+
+class TestImplementationTier:
+    def test_implementation_configs_defaults(self) -> None:
+        abl = CompilerAblation(_GPT2_AXON, Path("models/gpt2"))
+        configs = abl.build_implementation_configs()
+        names = [c.name for c in configs]
+        assert names == ["hf-no-grad", "hf-inference-mode", "axon-no-opt-plain"]
+        assert all(c.tier == "t5-impl" for c in configs)
+        assert all(c.graph_config is None for c in configs)
+        assert configs[0].hf_grad_mode == "no_grad"
+        assert configs[1].hf_grad_mode == "inference_mode"
+        assert configs[2].axon_bypass_inference_mode is True
+
+    def test_implementation_configs_full_plain_control(self) -> None:
+        abl = CompilerAblation(_GPT2_AXON, Path("models/gpt2"))
+        configs = abl.build_implementation_configs(with_full_plain=True)
+        assert [c.name for c in configs][-1] == "axon-graph-full-plain"
+        assert configs[-1].graph_config == GraphOptimizeConfig(backend_intrinsics="codegen2-torch")
+        assert configs[-1].axon_bypass_inference_mode is True
+
+    def test_ablation_config_grad_mode_defaults(self) -> None:
+        config = AblationConfig(name="x", tier="t1-stages", description="d")
+        assert config.hf_grad_mode == "no_grad"
+        assert config.axon_bypass_inference_mode is False
+
+    def test_run_axon_test_accepts_t5_flags(self) -> None:
+        import inspect
+
+        from synapse.axon_test import run_axon_test
+
+        params = inspect.signature(run_axon_test).parameters
+        assert params["hf_grad_mode"].default == "no_grad"
+        assert params["axon_bypass_inference_mode"].default is False
+
+    def test_full_minus_intrinsic_selector_excludes_target(self) -> None:
+        # The comma-separated backend_intrinsics selector must parse and exclude
+        # exactly the ablated intrinsic. Verified via the optimizer's parser.
+        from synapse.axon.graph_ir.optimize import _parse_backend_intrinsics
+
+        intrinsics = _BACKEND_INTRINSICS["codegen2-torch"]
+        target = "__torch_sdpa"
+        remaining = sorted(_short_intrinsic_name(i, "codegen2-torch") for i in intrinsics if i != target)
+        parsed_target, enabled = _parse_backend_intrinsics(
+            "codegen2-torch:" + ",".join(remaining)
+        )
+        assert parsed_target == "codegen2-torch"
+        assert "__torch_sdpa" not in enabled
+        assert "__torch_gelu_ffn" in enabled
+
+
+class TestCrossPrefixIntrinsicSelectors:
+    """The triton registry reuses torch-named intrinsics (__torch_gelu_ffn,
+    __torch_rope_*). Selectors must accept exact registered names regardless of
+    prefix, and only-X/full-minus construction must not mangle them."""
+
+    def test_normalize_accepts_exact_registered_cross_prefix_name(self) -> None:
+        from synapse.axon.graph_ir.optimize import _normalize_backend_intrinsic_name
+
+        assert (
+            _normalize_backend_intrinsic_name("__torch_gelu_ffn", target="codegen2-triton")
+            == "__torch_gelu_ffn"
+        )
+
+    def test_parse_triton_selector_with_torch_named_intrinsic(self) -> None:
+        from synapse.axon.graph_ir.optimize import _parse_backend_intrinsics
+
+        target, enabled = _parse_backend_intrinsics("codegen2-triton:__torch_gelu_ffn,__triton_sdpa")
+        assert target == "codegen2-triton"
+        assert enabled == frozenset({"__torch_gelu_ffn", "__triton_sdpa"})
+
+    def test_parse_short_names_unchanged_for_matching_prefix(self) -> None:
+        from synapse.axon.graph_ir.optimize import _parse_backend_intrinsics
+
+        _, torch_enabled = _parse_backend_intrinsics("codegen2-torch:gelu_ffn")
+        assert torch_enabled == frozenset({"__torch_gelu_ffn"})
+        _, triton_enabled = _parse_backend_intrinsics("codegen2-triton:sdpa")
+        assert triton_enabled == frozenset({"__triton_sdpa"})
+
+    def test_only_x_and_full_minus_selectors_for_cross_prefix_intrinsics(self) -> None:
+        from synapse.axon.graph_ir.optimize import _parse_backend_intrinsics
+
+        intrinsics = _BACKEND_INTRINSICS["codegen2-triton"]
+        for intrinsic in ("__torch_gelu_ffn", "__torch_rope_apply_factors"):
+            only_selector = f"codegen2-triton:{intrinsic}"
+            _, only_enabled = _parse_backend_intrinsics(only_selector)
+            assert only_enabled == frozenset({intrinsic})
+            remaining = sorted(i for i in intrinsics if i != intrinsic)
+            _, full_minus_enabled = _parse_backend_intrinsics(
+                "codegen2-triton:" + ",".join(remaining)
+            )
+            assert intrinsic not in full_minus_enabled
+            assert len(full_minus_enabled) == len(intrinsics) - 1

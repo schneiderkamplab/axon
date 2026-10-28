@@ -2699,7 +2699,7 @@ class Codegen2GraphModel(nn.Module):
             x = args[0]
             dim = int(args[1]) if len(args) > 1 and not self._is_null(args[1]) else -1
             dtype = torch.float32 if len(args) > 2 and args[2] == "float32" else None
-            out(F.softmax(x, dim=dim, dtype=dtype))
+            out(F.softmax(x, dim=dim, dtype=dtype).to(x.dtype) if dtype is not None else F.softmax(x, dim=dim, dtype=dtype))
             return True
         if primitive == "sum":
             x = args[0]
@@ -6386,7 +6386,7 @@ class _DirectTorchEmitter:
                 else f"self._matmul({args[0]}, {args[1]})"
             ),
             "softmax": lambda: (
-                f"F.softmax({args[0]}, dim={int_arg(1, '-1')}, dtype=torch.float32)"
+                f"(F.softmax({args[0]}, dim={int_arg(1, '-1')}, dtype=torch.float32).to({args[0]}.dtype))"
                 if len(node.inputs) > 2 and isinstance(node.inputs[2], GraphLiteral) and node.inputs[2].value == "float32"
                 else f"F.softmax({args[0]}, dim={int_arg(1, '-1')})"
             ),

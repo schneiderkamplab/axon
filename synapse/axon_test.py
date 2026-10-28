@@ -3867,11 +3867,16 @@ def _run_axon_test_single(
     generate_warmup: int = 0,
     generate_repeat: int = 1,
     track_runtime: bool = False,
+    hf_grad_mode: str = "no_grad",
+    axon_bypass_inference_mode: bool = False,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
     resolved_model_task = _resolve_model_task(model_task)
     resolved_benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
+    resolved_hf_grad_mode = (
+        "inference_mode" if str(hf_grad_mode).strip().lower() in {"inference_mode", "inference"} else "no_grad"
+    )
     forward_warmup = max(0, int(forward_warmup))
     forward_repeat = max(1, int(forward_repeat))
     generate_warmup = max(0, int(generate_warmup))
@@ -4840,7 +4845,11 @@ def _run_axon_test_single(
             hf_generate_warmup_samples: list[float] = []
             with _patch_transformers_mask_device_map_inputs(enabled=hf_device_map is not None):
                 if not run_generate_benchmark:
-                    with torch.no_grad():
+                    with (
+                        torch.inference_mode()
+                        if resolved_hf_grad_mode == "inference_mode"
+                        else torch.no_grad()
+                    ):
                         hf_logits, hf_time, hf_forward_samples, hf_forward_warmup_samples = _time_forward_repeated(
                             "HF",
                             lambda model=hf: _run_hf_forward(model),
@@ -5463,6 +5472,12 @@ def _run_axon_test_single(
                 except Exception:
                     pass
 
+            if axon_bypass_inference_mode and axon_backend == "codegen2-torch" and hasattr(syn, "_forward"):
+                # Attribution study: route through the raw generated computation so the
+                # generated eval-mode `torch.inference_mode()` wrapper is bypassed; the
+                # harness `no_grad` context still prevents gradient tracking.
+                syn.training = True
+
             syn_gen: torch.Tensor | None = None
             syn_time = 0.0
             syn_forward_samples: list[float] = []
@@ -6053,6 +6068,8 @@ def run_axon_test(
     generate_warmup: int = 0,
     generate_repeat: int = 1,
     track_runtime: bool = False,
+    hf_grad_mode: str = "no_grad",
+    axon_bypass_inference_mode: bool = False,
 ) -> dict[str, Any]:
     return _run_axon_test_single(
         axon_file=axon_file,
@@ -6099,6 +6116,8 @@ def run_axon_test(
         generate_warmup=generate_warmup,
         generate_repeat=generate_repeat,
         track_runtime=track_runtime,
+        hf_grad_mode=hf_grad_mode,
+        axon_bypass_inference_mode=axon_bypass_inference_mode,
     )
 
 
