@@ -8694,7 +8694,8 @@ def test_codegen2_mlx_materializes_final_logits_bias_flat_alias() -> None:
             GraphLiteral(True, TypeBool()),
             GraphLiteral(False, TypeBool()),
             GraphLiteral(None, TypeNull()),
-            GraphLiteral("@weight", TypePath()),
+            # Graph IR receives the weight path resolved by frontend elaboration.
+            GraphPath(absolute=True, parts=("shared", "weight")),
             GraphLiteral("@@final_logits_bias_flat", TypePath()),
         ),
         y_type,
