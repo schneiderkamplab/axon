@@ -1,4 +1,4 @@
-import Math (PI, clamp, cos, exp, floor, log, sin, sqrt)
+import Math (PI, clamp, cos, exp, floor, log, pow, sin, sqrt)
 import NN (embedding, layernorm, linear)
 import Params param
 import Tensor (
@@ -11,6 +11,7 @@ import Tensor (
   cumsum,
   eq,
   expand,
+  fill,
   full,
   gather,
   le,
@@ -109,7 +110,7 @@ sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null
   inv_freq <- (mode == "rope")
     ? do
       inv_shape <- freq_idx / half
-      return exp (0 - ((log theta) * inv_shape))
+      return 1.0 / (pow (fill inv_shape theta) inv_shape)
     : do
       den <- (((half - 1) > 0) ? (half - 1) : 1)
       inv_shape <- freq_idx / den
@@ -488,7 +489,7 @@ rope_inv_freq_base :: Tensor[B,H,S,HD] -> Float -> Tensor[HD / 2]
 rope_inv_freq_base q theta = do
   idx <- arange q start=0 end=(HD / 2) |> cast dtype="float32"
   inv_shape <- (2.0 * idx) / HD
-  return exp (0 - ((log theta) * inv_shape))
+  return 1.0 / (pow (fill inv_shape theta) inv_shape)
 
 
 rope_inv_freq_freq_scale :: Tensor[B,H,S,HD] -> Float -> Float -> Float -> Float -> Dim -> Tensor[HD / 2]

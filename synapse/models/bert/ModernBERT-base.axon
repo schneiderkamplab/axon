@@ -4,11 +4,11 @@
 
 {-# MAIN "modernbert" #-}
 
-import Activations (gelu)
+import Activations (gelu, gelu_pytorch_tanh)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Masking (Mask, bidirectional_mask, mask_for_input)
 
 import Math (mul)
 
@@ -16,71 +16,97 @@ import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
 
 import Config
 
+import List
+
 import NN
 
 import Tensor
 
-MODEL_DIM = 768
+MODEL_DIM <- 768
 
-VOCAB_SIZE = 50368
+VOCAB_SIZE <- 50368
 
-NUM_LAYERS = 22
+NUM_LAYERS <- 22
 
-NUM_HEADS = 12
+NUM_HEADS <- 12
 
-FFN = 1152
+FFN <- 1152
 
-EPS = 1e-05
+EPS <- 1e-05
 
-FULL_EVERY = 3
+ATTN_BIAS <- false
 
-LOCAL_ATTN = 128
+MLP_BIAS <- false
 
-LOCAL_WIN = 64
+NORM_BIAS <- false
 
-THETA_FULL = 160000.0
+HEAD_BIAS <- false
 
-THETA_LOCAL = 10000.0
+DECODER_BIAS <- true
 
-modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
-modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local mask_full mask_local = do
-  xn <- (i == 0) ? x : NN.layernorm@attn_norm x eps=EPS bias=false
+HIDDEN_ACT <- "gelu"
+
+HEAD_ACT <- "gelu"
+
+LAYER_TYPES <- []
+
+HAS_LAYER_TYPES <- false
+
+FULL_EVERY <- 3
+
+LOCAL_ATTN <- 128
+
+THETA_FULL <- 160000.0
+
+THETA_LOCAL <- 10000.0
+
+LOCAL_WIN = LOCAL_ATTN / 2
+
+modernbert_act :: Tensor[..S] -> String -> Tensor[..S]
+modernbert_act x name = ((name == "gelu_pytorch_tanh") or (name == "gelu_new")) ? (gelu_pytorch_tanh x) : (gelu x)
+
+modernbert_is_full :: Int -> Bool
+modernbert_is_full i = HAS_LAYER_TYPES ? ((List.index LAYER_TYPES i) != "sliding_attention") : ((FULL_EVERY <= 0) ? true : ((i % FULL_EVERY) == 0))
+
+modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> ?Mask[B,S,S] -> Tensor[B,S,D]
+modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local attn_mask = do
+  xn <- (i == 0) ? x : NN.layernorm@attn_norm x eps=EPS bias=NORM_BIAS
   a <- scope@attn do
-    qkv <- NN.linear@Wqkv xn dim=(3 * MODEL_DIM) bias=false
+    qkv <- NN.linear@Wqkv xn dim=(3 * MODEL_DIM) bias=ATTN_BIAS
     q, k, v <- Tensor.chunk qkv parts=3
     q <- reshape_heads q heads=NUM_HEADS
     k <- reshape_heads k heads=NUM_HEADS
     v <- reshape_heads v heads=NUM_HEADS
-    full <- (FULL_EVERY <= 0) or ((i % FULL_EVERY) == 0)
-    q_full, k_full <- rope_pair_base_factors q k rope_sin_full rope_cos_full
-    q_local, k_local <- rope_pair_base_factors q k rope_sin_local rope_cos_local
-    q <- full ? q_full : q_local
-    k <- full ? k_full : k_local
-    mask <- full ? mask_full : mask_local
-    return attention q k v mask |> merge_heads |> NN.linear@Wo dim=MODEL_DIM bias=false
+    full <- modernbert_is_full i
+    rope_sin <- full ? rope_sin_full : rope_sin_local
+    rope_cos <- full ? rope_cos_full : rope_cos_local
+    q_rot, k_rot <- rope_pair_base_factors q k rope_sin rope_cos
+    q <- Tensor.cast_like q_rot v
+    k <- Tensor.cast_like k_rot v
+    att <- full ? (attention q k v (bidirectional_mask q k padding_mask=attn_mask)) : (attention q k v (bidirectional_mask q k padding_mask=attn_mask window=LOCAL_WIN))
+    return merge_heads att |> NN.linear@Wo dim=MODEL_DIM bias=ATTN_BIAS
   x <- x + a
-  xn <- NN.layernorm@mlp_norm x eps=EPS bias=false
+  xn <- NN.layernorm@mlp_norm x eps=EPS bias=NORM_BIAS
   m <- scope@mlp do
-    wi <- NN.linear@Wi xn dim=(2 * FFN) bias=false
+    wi <- NN.linear@Wi xn dim=(2 * FFN) bias=MLP_BIAS
     u, g <- Tensor.chunk wi parts=2
-    return gelu u |> mul g |> NN.linear@Wo dim=MODEL_DIM bias=false
+    return modernbert_act u HIDDEN_ACT |> mul g |> NN.linear@Wo dim=MODEL_DIM bias=MLP_BIAS
   return x + m
 
-modernbert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+modernbert :: TokenIds[B,S] -> ?Mask[B,S,S] -> (Tensor[B,S,V], Tensor[B,S,D])
 modernbert input_ids attn_mask = do
   attn_mask <- mask_for_input input_ids attn_mask S
-  pos_ids <- position_ids input_ids attn_mask
+  pos_ids <- position_ids input_ids
   rope_sin_full, rope_cos_full <- rope_base_factors pos_ids (MODEL_DIM / NUM_HEADS) THETA_FULL
   rope_sin_local, rope_cos_local <- rope_base_factors pos_ids (MODEL_DIM / NUM_HEADS) THETA_LOCAL
-  mask_full <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
-  mask_local <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask window=LOCAL_WIN
   x <- NN.embedding@model.embeddings.tok_embeddings input_ids dim=MODEL_DIM
-  x <- NN.layernorm@model.embeddings.norm x eps=EPS bias=false
+  x <- NN.layernorm@model.embeddings.norm x eps=EPS bias=NORM_BIAS
   x <- for@model.layers i <- [0..NUM_LAYERS) carry (x) do
-    x <- modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local mask_full mask_local
+    x <- modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local attn_mask
     yield x
-  x <- NN.layernorm@model.final_norm x eps=EPS bias=false
-  x <- NN.linear@head.dense x dim=MODEL_DIM bias=false |> gelu
-  x <- NN.layernorm@head.norm x eps=EPS bias=false
-  logits <- NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@model.embeddings.tok_embeddings.weight
-  return logits
+  hidden <- NN.layernorm@model.final_norm x eps=EPS bias=NORM_BIAS
+  x <- NN.linear@head.dense hidden dim=MODEL_DIM bias=HEAD_BIAS
+  x <- modernbert_act x HEAD_ACT
+  x <- NN.layernorm@head.norm x eps=EPS bias=NORM_BIAS
+  logits <- NN.linear@decoder x dim=VOCAB_SIZE bias=DECODER_BIAS weight_path=@@model.embeddings.tok_embeddings.weight
+  return logits, hidden
