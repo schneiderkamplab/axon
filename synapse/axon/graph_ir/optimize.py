@@ -2086,11 +2086,12 @@ def _triton_layernorm_candidate(
     return x, eps, dim, weight_path, bias_flag, bias_path if bias_enabled else GraphLiteral(value=None, type_expr=TypeNull())
 
 
-def _triton_rmsnorm_scaled_candidate(
+def _rmsnorm_scaled_candidate(
     node: GraphNode,
     *,
     output_provenance: GraphProvenance | None,
     provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    norm_ops: frozenset[str],
 ) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
     if len(node.outputs) != 1:
         return None
@@ -2105,7 +2106,7 @@ def _triton_rmsnorm_scaled_candidate(
     ) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
         if (
             rmsnorm.kind != "op"
-            or rmsnorm.op not in {"_rmsnorm", "__triton_rmsnorm_noscale"}
+            or rmsnorm.op not in norm_ops
             or len(rmsnorm.args) < 4
         ):
             return None
@@ -2148,10 +2149,11 @@ def _rewrite_triton_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgr
         new_nodes: list[GraphNode] = []
         for node in module.nodes:
             output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
-            inputs = _triton_rmsnorm_scaled_candidate(
+            inputs = _rmsnorm_scaled_candidate(
                 node,
                 output_provenance=output_provenance,
                 provenance_to_operand=provenance_to_operand,
+                norm_ops=frozenset({"_rmsnorm", "__triton_rmsnorm_noscale"}),
             )
             if inputs is None:
                 new_nodes.append(node)
@@ -6094,47 +6096,140 @@ def _rewrite_jax_rope_intrinsics(
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
-def _rewrite_mlx_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgram:
-    modules_by_name = {m.name: m for m in graph.modules}
+_RMSNORM_SCALE_PRIMITIVE_ARITIES = {"_rmsnorm": 4, "_params_param": 1, "_mul": 2, "core.binary.*": 2}
+
+
+def _rmsnorm_scale_expression_is_safe(
+    node: GraphNode | GraphExpr,
+    *,
+    modules_by_name: Mapping[str, GraphModule],
+    active_modules: frozenset[str] = frozenset(),
+) -> bool:
+    """Prove a wrapper contains only the matched operations, with no lost checks."""
+    if node.attrs:
+        return False
+    callee = modules_by_name.get(node.op.name)
+    if callee is None:
+        if _RMSNORM_SCALE_PRIMITIVE_ARITIES.get(node.op.name) != len(node.inputs):
+            return False
+    else:
+        if callee.name in active_modules or len(callee.outputs) != 1 or len(callee.inputs) != len(node.inputs):
+            return False
+        active_modules = active_modules | {callee.name}
+        needed: set[str] = set()
+        _operand_refs(callee.outputs[0], needed)
+        for inner in reversed(callee.nodes):
+            # An unused parameter read can still fail. Never drop it merely
+            # because it does not contribute to the returned expression.
+            if not any(output.name in needed for output in inner.outputs):
+                return False
+            if not _rmsnorm_scale_expression_is_safe(
+                inner, modules_by_name=modules_by_name, active_modules=active_modules,
+            ):
+                return False
+            for operand in inner.inputs:
+                _operand_refs(operand, needed)
+        # Dead-formal pruning already removes arguments that are safe to drop.
+        # Remaining unused inputs can carry required caller-side evaluations,
+        # including parameter reads forwarded through another wrapper.
+        if any(formal.name not in needed for formal in callee.inputs):
+            return False
+        if isinstance(callee.outputs[0], GraphExpr) and not _rmsnorm_scale_expression_is_safe(
+            callee.outputs[0], modules_by_name=modules_by_name, active_modules=active_modules,
+        ):
+            return False
+    return all(
+        not isinstance(operand, GraphExpr) or _rmsnorm_scale_expression_is_safe(
+            operand, modules_by_name=modules_by_name, active_modules=active_modules,
+        )
+        for operand in node.inputs
+    )
+
+
+def _rewrite_mlx_rmsnorm_scaled_intrinsics(
+    graph: GraphProgram, *, dead_temp_elimination: bool,
+) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    module_effects = infer_graph_module_effects(graph.modules)
+    globals_by_provenance = {
+        GraphProvenance("global", name=module.name): GraphValueRef(
+            module.name, graph_operand_type(module.outputs[0]),
+        )
+        for module in graph.modules if module.is_global_binding and not module.inputs and len(module.outputs) == 1
+    }
     changed = False
     new_modules: list[GraphModule] = []
     for module in graph.modules:
-        if (
-            module.name in ("NN.rmsnorm", "NN.rmsnorm__s1")
-            and len(module.nodes) == 2
-            and module.nodes[0].op.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
-            and module.nodes[1].op.name == "Params.param_scale"
-            and len(module.nodes[1].inputs) >= 2
-            and all(isinstance(out, GraphValue) for out in module.outputs)
-        ):
-            rmsnorm_node = module.nodes[0]
-            param_scale_node = module.nodes[1]
-            x = rmsnorm_node.inputs[0]
-            scale_path = param_scale_node.inputs[1]
-            rmsnorm_noscale_mod = modules_by_name.get(rmsnorm_node.op.name)
-            if (
-                rmsnorm_noscale_mod is not None
-                and len(rmsnorm_noscale_mod.nodes) == 1
-                and rmsnorm_noscale_mod.nodes[0].op.name == "_rmsnorm"
-                and len(rmsnorm_noscale_mod.nodes[0].inputs) >= 2
-            ):
-                eps = rmsnorm_noscale_mod.nodes[0].inputs[1]
-            else:
-                eps = GraphLiteral(value=1e-06, type_expr=TypeFloat())
-            new_node = replace(
-                param_scale_node,
+        local_provenance = provenance.module_symbolic_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module, local_provenance=local_provenance,
+        )
+        shadowed = {value.name for value in module.inputs} | {
+            output.name for node in module.nodes for output in node.outputs
+        }
+        visible_globals = {
+            key: value for key, value in globals_by_provenance.items() if value.name not in shadowed
+        }
+        provenance_to_operand.update(visible_globals)
+        available_values = {value.name for value in module.inputs} | {
+            value.name for value in visible_globals.values()
+        }
+        new_nodes: list[GraphNode] = []
+        for index, node in enumerate(module.nodes):
+            output_provenance = local_provenance.get(node.outputs[0].name) if len(node.outputs) == 1 else None
+            inputs = _rmsnorm_scaled_candidate(
+                node,
+                output_provenance=output_provenance,
+                provenance_to_operand=provenance_to_operand,
+                norm_ops=frozenset({"_rmsnorm"}),
+            )
+            required_values: set[str] = set()
+            for operand in inputs or ():
+                _operand_refs(operand, required_values)
+            inputs_available = required_values <= available_values
+            available_values.update(output.name for output in node.outputs)
+            # The module-wide provenance map can select an equivalent value
+            # produced later. A replacement must only use preceding bindings.
+            if not inputs_available:
+                new_nodes.append(node)
+                continue
+            # Only the explicitly FP32-accumulating, last-axis form is eligible.
+            # The emitter checks runtime dtype/scale shape before using the
+            # weighted kernel; other layouts retain normalize-then-multiply.
+            # Provenance interns numerically equal literals (True and 1).
+            if inputs is None or output_provenance is None or not _is_literal_value(inputs[4], True):
+                new_nodes.append(node)
+                continue
+            if not _rmsnorm_scale_expression_is_safe(node, modules_by_name=modules_by_name):
+                new_nodes.append(node)
+                continue
+            x, scale, eps, _, _ = inputs
+            rewritten = replace(
+                node,
                 op=GraphOp("__mlx_rmsnorm_scaled"),
-                inputs=(
-                    x,
-                    scale_path,
-                    eps,
-                ),
+                inputs=(x, scale, eps),
                 attrs={},
             )
-            new_modules.append(replace(module, nodes=(new_node,)))
+            # Fusion must replace a normalization, not add another reduction
+            # while its unscaled result remains live (possibly through aliases).
+            normalization = next(
+                arg for arg in output_provenance.args if arg.op == "_rmsnorm"
+            )
+            candidate = replace(
+                module, nodes=(*new_nodes, rewritten, *module.nodes[index + 1:]),
+            )
+            if dead_temp_elimination:
+                candidate = _dead_temp_eliminate_module(candidate, module_effects=module_effects)
+            if any(
+                local_provenance.get(output.name) == normalization
+                for remaining in candidate.nodes for output in remaining.outputs
+            ):
+                new_nodes.append(node)
+                continue
+            new_nodes.append(rewritten)
             changed = True
-        else:
-            new_modules.append(module)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
@@ -16261,7 +16356,9 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="mlx_rope_intrinsics")
                 current = candidate
             candidate = (
-                _rewrite_mlx_rmsnorm_scaled_intrinsics(current)
+                _rewrite_mlx_rmsnorm_scaled_intrinsics(
+                    current, dead_temp_elimination=config.dead_temp_elimination,
+                )
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_rmsnorm_scaled")
                 else current
             )

@@ -5,10 +5,10 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
+from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional, TypeTensor
 from ..codegen2_common import normalize_primitive_op
 from ..codegen2_torch.core import _DirectTorchEmitter, graph_main_output_names
-from ..graph_ir import GraphProgram, validate_graph_program
+from ..graph_ir import GraphProgram, graph_operand_type, validate_graph_program
 
 SHARED_COMMON_PRIMITIVES: frozenset[str] = frozenset({
     "params_param",
@@ -982,6 +982,13 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._param_cache[path] = result")
         add(lines, 8, "return result")
         add(lines, 4, "")
+        add(lines, 4, "def _rmsnorm_scaled(self, x, scale, eps):")
+        add(lines, 8, "# The fused kernel requires a feature vector; preserve other")
+        add(lines, 8, "# broadcasting and low-precision rounding with separate operations.")
+        add(lines, 8, "if x.dtype == mx.float32 and scale.dtype == mx.float32 and scale.ndim == 1 and scale.shape[0] == x.shape[-1]:")
+        add(lines, 12, "return mx.fast.rms_norm(x, scale, float(eps))")
+        add(lines, 8, "return mx.fast.rms_norm(x, None, float(eps)) * scale")
+        add(lines, 4, "")
         add(lines, 4, "def _optional_param(self, path):")
         add(lines, 8, "cached = self._param_cache.get(path)")
         add(lines, 8, "if cached is not None:")
@@ -1789,8 +1796,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         if primitive == "_mlx_rmsnorm_scaled":
             x = args[0]
             scale = args[1]
+            if not isinstance(graph_operand_type(node.inputs[1]), TypeTensor):
+                scale = f"self._param({scale})"
             eps = args[2]
-            return f"mx.fast.rms_norm({x}, self._param({scale}), float({eps}))"
+            return f"self._rmsnorm_scaled({x}, {scale}, {eps})"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             return f"({args[0]}.astype(self._dtype_from_name({dtype}) or {args[1]}.dtype) if isinstance({args[0]}, mx.array) else mx.array({args[0]}, dtype=(self._dtype_from_name({dtype}) or {args[1]}.dtype)))"
