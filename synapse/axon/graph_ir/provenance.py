@@ -149,14 +149,34 @@ class GraphRopeApplyFactorsFact:
 
 
 @dataclass(frozen=True)
+class GraphBandKeepFact:
+    """A keep mask that allows a causal or bidirectional band of keys.
+
+    Queries sit at the last Q of K key positions. The string fields name formal inputs of the
+    module the fact comes from, so callers map them to call-site actuals.
+    """
+
+    q: str
+    k: str
+    batch_dim: str
+    q_dim: str
+    k_dim: str
+    causal: bool
+    window: GraphProvenance | None = None  # None: no window; else a formal input or an int literal
+    padding: str | None = None  # None: no padding mask
+    padding_dim: str | None = None  # the padding mask's length; its last K entries are used
+
+
+@dataclass(frozen=True)
 class GraphDerivedProvenanceFact:
     kind: Literal[
         "additive_mask_from_keep",
         "nonempty_keep_rows",
         "sdpa_gqa",
         "rope_apply_factors",
+        "band_keep",
     ]
-    value: GraphProvenance | GraphSdpaGqaFact | GraphRopeApplyFactorsFact
+    value: GraphProvenance | GraphSdpaGqaFact | GraphRopeApplyFactorsFact | GraphBandKeepFact
 
 
 @dataclass(frozen=True)
@@ -904,6 +924,9 @@ def _derived_facts(provenance: GraphProvenance) -> tuple[GraphDerivedProvenanceF
     rope = _rope_apply_factors_fact(provenance)
     if rope is not None:
         facts.append(GraphDerivedProvenanceFact("rope_apply_factors", rope))
+    band_keep = _band_keep_fact(provenance)
+    if band_keep is not None:
+        facts.append(GraphDerivedProvenanceFact("band_keep", band_keep))
     return tuple(facts)
 
 
@@ -980,6 +1003,190 @@ def _contains_op(provenance: GraphProvenance, op_name: str, *, depth: int = 12) 
     if provenance.kind == "op" and provenance.op == op_name:
         return True
     return any(_contains_op(arg, op_name, depth=depth - 1) for arg in provenance.args)
+
+
+def _op_provenance(op: str, *args: GraphProvenance) -> GraphProvenance:
+    return _make_provenance("op", op=op, args=args)
+
+
+def _arange_source(provenance: GraphProvenance, end: GraphProvenance, *, depth: int = 10) -> GraphProvenance | None:
+    """The tensor argument of the first ``_arange(x, 0, end)`` below ``provenance``."""
+    if depth <= 0:
+        return None
+    if (
+        provenance.kind == "op"
+        and provenance.op == "_arange"
+        and len(provenance.args) == 3
+        and provenance.args[1] == _make_provenance("literal", value=0)
+        and provenance.args[2] == end
+    ):
+        return provenance.args[0]
+    for arg in provenance.args:
+        found = _arange_source(arg, end, depth=depth - 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _band_padding(
+    pad_keep: GraphProvenance,
+    batch: GraphProvenance,
+    k_dim: GraphProvenance,
+) -> tuple[str, str] | None:
+    """The (input, length) of ``reshape(cast(pad, bool), [B, 1, 1, K])``, where ``pad`` is an input
+    of K entries or the last K entries of a longer input."""
+    one = _make_provenance("literal", value=1)
+    if pad_keep.kind != "op" or pad_keep.op != "_reshape" or len(pad_keep.args) != 2:
+        return None
+    cast, shape = pad_keep.args
+    if shape != _op_provenance("core.list", batch, one, one, k_dim):
+        return None
+    if cast.kind != "op" or cast.op != "_cast" or len(cast.args) != 2:
+        return None
+    if cast.args[1] != _make_provenance("literal", value="bool"):
+        return None
+    pad = cast.args[0]
+    if pad.kind == "input":
+        return pad.name, k_dim.name
+    if pad.kind != "op" or pad.op != "_slice" or len(pad.args) != 4:
+        return None
+    source, dim, start, end = pad.args
+    if source.kind != "input" or end.kind != "input":
+        return None
+    if dim != _make_provenance("literal", value=-1) or start != _op_provenance("core.binary.-", end, k_dim):
+        return None
+    return source.name, end.name
+
+
+def _band_width(band: GraphProvenance) -> GraphProvenance | None:
+    """The ``w`` of a windowed band's lower bound, ``aligned - w`` or ``aligned - w + 1``. The caller
+    rebuilds the whole band from it, so this only has to find the candidate."""
+    if band.kind != "op" or band.op != "_and" or len(band.args) != 2:
+        return None
+    lower = band.args[1]
+    if lower.kind != "op" or lower.op != "_le" or len(lower.args) != 2:
+        return None
+    start = lower.args[0]
+    if start.kind == "op" and start.op == "core.binary.+" and len(start.args) == 2:
+        start = start.args[0]
+    if start.kind != "op" or start.op != "core.binary.-" or len(start.args) != 2:
+        return None
+    return start.args[1]
+
+
+def _is_band_width(window: GraphProvenance) -> bool:
+    """A formal input or an int literal: both reach the call site exactly. A global does not, since
+    a reference by name could read a binding that shadows it."""
+    if window.kind == "input":
+        return True
+    return window.kind == "literal" and isinstance(window.value, int) and not isinstance(window.value, bool)
+
+
+def _band_keep_fact(provenance: GraphProvenance) -> GraphBandKeepFact | None:
+    """Prove that a keep mask is a band, op by op.
+
+    The expected expressions are rebuilt from the mask's own dims and compared exactly, so an
+    off-by-one window, swapped bounds or an unaligned cache fail the match. The optimizer checks
+    the dim names against the typed inputs. ``keep`` is, with row = arange(Q), col = arange(K) and
+    aligned = row + (K - Q):
+
+    - causal: col <= aligned, and with a window also aligned - window + 1 <= col
+    - bidirectional: all true, and with a window col <= aligned + window and aligned - window <= col
+
+    in a ``window == null`` select when a window is optional (specialization folds it when the
+    window is a constant), reshaped to [1, 1, Q, K] and expanded to [B, 1, Q, K], optionally and-ed
+    with a padding mask.
+    """
+    keep, pad_keep = provenance, None
+    if keep.kind == "op" and keep.op == "_and" and len(keep.args) == 2:
+        keep, pad_keep = keep.args
+    if keep.kind != "op" or keep.op != "_expand" or len(keep.args) != 2:
+        return None
+    reshaped, expand_shape = keep.args
+    if reshaped.kind != "op" or reshaped.op != "_reshape" or len(reshaped.args) != 2:
+        return None
+    if expand_shape.kind != "op" or expand_shape.op != "core.list" or len(expand_shape.args) != 4:
+        return None
+    one = _make_provenance("literal", value=1)
+    batch, _, q_dim, k_dim = expand_shape.args
+    if batch.kind != "input" or q_dim.kind != "input" or k_dim.kind != "input":
+        return None
+    if expand_shape != _op_provenance("core.list", batch, one, q_dim, k_dim):
+        return None
+    band, reshape_shape = reshaped.args
+    if reshape_shape != _op_provenance("core.list", one, one, q_dim, k_dim):
+        return None
+
+    q = _arange_source(band, q_dim)
+    k = _arange_source(band, k_dim)
+    if q is None or k is None or q.kind != "input" or k.kind != "input":
+        return None
+    row = _op_provenance("_reshape", _op_provenance("_arange", q, _make_provenance("literal", value=0), q_dim), _op_provenance("core.list", q_dim, one))
+    col = _op_provenance("_reshape", _op_provenance("_arange", k, _make_provenance("literal", value=0), k_dim), _op_provenance("core.list", one, k_dim))
+    aligned = _op_provenance("core.binary.+", row, _op_provenance("core.binary.-", k_dim, q_dim))
+
+    upper = _op_provenance("_le", col, aligned)
+    every_key = _op_provenance("_eq", _op_provenance("_zeros_like", row), _op_provenance("_zeros_like", col))
+
+    def causal_band(width: GraphProvenance) -> GraphProvenance:
+        start = _op_provenance("core.binary.-", aligned, width)
+        return _op_provenance("_and", upper, _op_provenance("_le", _op_provenance("core.binary.+", start, one), col))
+
+    def bidirectional_band(width: GraphProvenance) -> GraphProvenance:
+        return _op_provenance(
+            "_and",
+            _op_provenance("_le", col, _op_provenance("core.binary.+", aligned, width)),
+            _op_provenance("_le", _op_provenance("core.binary.-", aligned, width), col),
+        )
+
+    window = None
+    if band.kind == "op" and band.op == "core.select" and len(band.args) == 3:
+        condition, full, windowed = band.args
+        if condition.kind != "op" or not condition.args:
+            return None
+        window = condition.args[0]
+        if condition != _op_provenance("core.binary.==", window, _make_provenance("literal", value=None)):
+            return None
+        if full == upper and windowed == causal_band(window):
+            causal = True
+        elif full == every_key and windowed == bidirectional_band(window):
+            causal = False
+        else:
+            return None
+    elif band == upper:
+        causal = True
+    elif band == every_key:
+        causal = False
+    else:
+        window = _band_width(band)
+        if window is None:
+            return None
+        if band == causal_band(window):
+            causal = True
+        elif band == bidirectional_band(window):
+            causal = False
+        else:
+            return None
+    if window is not None and not _is_band_width(window):
+        return None
+
+    padding = padding_dim = None
+    if pad_keep is not None:
+        parsed = _band_padding(pad_keep, batch, k_dim)
+        if parsed is None:
+            return None
+        padding, padding_dim = parsed
+    return GraphBandKeepFact(
+        q=q.name,
+        k=k.name,
+        batch_dim=batch.name,
+        q_dim=q_dim.name,
+        k_dim=k_dim.name,
+        causal=causal,
+        window=window,
+        padding=padding,
+        padding_dim=padding_dim,
+    )
 
 
 def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:

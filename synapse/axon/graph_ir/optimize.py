@@ -71,6 +71,7 @@ from .effects import (
     infer_graph_module_usages,
 )
 from .provenance import (
+    GraphBandKeepFact,
     GraphProvenance,
     GraphRopeApplyFactorsFact,
     GraphSdpaGqaFact,
@@ -141,6 +142,7 @@ _MLX_BACKEND_INTRINSICS = frozenset(
         "__mlx_expert_packed_swiglu_ffn",
         "__mlx_expert_swiglu_ffn",
         "__mlx_sdpa",
+        "__mlx_sdpa_band",
         "__mlx_rmsnorm_scaled",
         "__mlx_rope",
         "__mlx_swiglu_activation",
@@ -6740,6 +6742,210 @@ def _match_graph_binary(
     if actual_op == op_name and len(inputs) == 2:
         return inputs[0], inputs[1]
     return None, None
+
+
+def _module_nodes_are_live(module: GraphModule) -> bool:
+    """Every node feeds an output, so provenance of the outputs covers all the module does."""
+    needed: set[str] = set()
+    for output in module.outputs:
+        _operand_refs(output, needed)
+    for node in reversed(module.nodes):
+        if not any(output.name in needed for output in node.outputs):
+            return False
+        for operand in (*node.inputs, *node.attrs.values()):
+            _operand_refs(operand, needed)
+    return True
+
+
+def _callee_output_facts(
+    call: GraphNode | GraphExpr,
+    *,
+    kind: str,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> tuple[GraphModule, dict[str, GraphOperand], list[object]] | None:
+    """A call's callee, its formals mapped to the call's actuals, and the output facts of ``kind``.
+    Only for callees whose nodes all feed the one output, so that a fusion drops nothing else."""
+    callee = modules_by_name.get(call.op.name)
+    if callee is None or call.attrs or len(callee.outputs) != 1 or len(call.inputs) != len(callee.inputs):
+        return None
+    summary = provenance.module_summary_provenance.get(callee.name, ())
+    if len(summary) != 1 or not _module_nodes_are_live(callee):
+        return None
+    facts = [fact.value for fact in graph_provenance_facts(summary[0]) if fact.kind == kind]
+    actuals = {formal.name: actual for formal, actual in zip(callee.inputs, call.inputs, strict=False)}
+    return callee, actuals, facts
+
+
+def _band_dims_match(fact: GraphBandKeepFact, callee: GraphModule) -> bool:
+    """The dims the mask was built from are the lengths of its typed q, k and padding inputs."""
+    types = {formal.name: formal.type_expr for formal in callee.inputs}
+    q_type, k_type = types.get(fact.q), types.get(fact.k)
+    if not isinstance(q_type, TypeTensor) or not isinstance(k_type, TypeTensor):
+        return False
+    if len(q_type.dims) != 4 or len(k_type.dims) != 4:
+        return False
+    if (q_type.dims[0], q_type.dims[2]) != (fact.batch_dim, fact.q_dim):
+        return False
+    if (k_type.dims[0], k_type.dims[2]) != (fact.batch_dim, fact.k_dim):
+        return False
+    if fact.padding is None:
+        return True
+    pad_type = types.get(fact.padding)
+    return isinstance(pad_type, TypeTensor) and pad_type.dims == (fact.batch_dim, fact.padding_dim)
+
+
+def _same_graph_value(left: GraphOperand, right: GraphOperand) -> bool:
+    if isinstance(left, GraphValueRef) and isinstance(right, GraphValueRef):
+        return left.name == right.name
+    return left == right
+
+
+def _band_keep_call(
+    call: GraphNode | GraphExpr | None,
+    *,
+    q: GraphOperand,
+    k: GraphOperand,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> tuple[GraphBandKeepFact, dict[str, GraphOperand]] | None:
+    """The band fact of a mask call built from the attention's own ``q`` and ``k``, with its actuals."""
+    if call is None:
+        return None
+    found = _callee_output_facts(call, kind="band_keep", modules_by_name=modules_by_name, provenance=provenance)
+    if found is None or len(found[2]) != 1:
+        return None
+    callee, actuals, (fact,) = found
+    if not _band_dims_match(fact, callee):
+        return None
+    if not _same_graph_value(actuals[fact.q], q) or not _same_graph_value(actuals[fact.k], k):
+        return None
+    return fact, actuals
+
+
+def _band_keep_operands(
+    keep: GraphOperand,
+    *,
+    q: GraphOperand,
+    k: GraphOperand,
+    definitions: Mapping[str, GraphNode],
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand] | None:
+    """The (padding_mask, window, causal) operands of a band ``keep``: a mask call, or the select
+    ``pad == null ? mask : mask with pad`` over two calls that differ only by the padding."""
+    null = GraphLiteral(value=None, type_expr=TypeNull())
+
+    def call_of(operand: GraphOperand) -> GraphNode | GraphExpr | None:
+        if isinstance(operand, GraphValueRef):
+            return definitions.get(operand.name)
+        return operand if isinstance(operand, GraphExpr) else None
+
+    def band_of(operand: GraphOperand) -> tuple[GraphBandKeepFact, dict[str, GraphOperand]] | None:
+        return _band_keep_call(call_of(operand), q=q, k=k, modules_by_name=modules_by_name, provenance=provenance)
+
+    def window_of(fact: GraphBandKeepFact, actuals: Mapping[str, GraphOperand]) -> GraphOperand:
+        if fact.window is None:
+            return null
+        if fact.window.kind == "input":
+            return actuals[fact.window.name]
+        return GraphLiteral(value=fact.window.value, type_expr=TypeInt())
+
+    def causal_of(fact: GraphBandKeepFact) -> GraphOperand:
+        return GraphLiteral(value=fact.causal, type_expr=TypeBool())
+
+    call = call_of(keep)
+    if call is None:
+        return None
+    if call.op.name != "core.select":
+        band = band_of(keep)
+        if band is None:
+            return None
+        fact, actuals = band
+        padding = actuals[fact.padding] if fact.padding is not None else null
+        return padding, window_of(fact, actuals), causal_of(fact)
+
+    if len(call.inputs) != 3 or call.attrs:
+        return None
+    condition, unmasked, masked = call.inputs
+    condition_call = call_of(condition)
+    if condition_call is None or condition_call.op.name != "core.binary.==" or len(condition_call.inputs) != 2:
+        return None
+    pad, none = condition_call.inputs
+    if not _is_literal_value(none, None):
+        return None
+    plain, padded = band_of(unmasked), band_of(masked)
+    if plain is None or padded is None:
+        return None
+    (plain_fact, plain_actuals), (padded_fact, padded_actuals) = plain, padded
+    if plain_fact.padding is not None or padded_fact.padding is None or plain_fact.causal != padded_fact.causal:
+        return None
+    if not _same_graph_value(padded_actuals[padded_fact.padding], pad):
+        return None
+    window = window_of(plain_fact, plain_actuals)
+    if not _same_graph_value(window, window_of(padded_fact, padded_actuals)):
+        return None
+    return pad, window, causal_of(plain_fact)
+
+
+def _band_sdpa_inputs(
+    call: GraphNode,
+    *,
+    definitions: Mapping[str, GraphNode],
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> tuple[GraphOperand, ...] | None:
+    """The __mlx_sdpa_band operands of a call whose callee is plain scaled dot-product attention
+    and whose keep mask is proven to be a band, else None. The mask must still be a call: a mask
+    inlined into its caller stays a dense mask, which is slower but correct."""
+    found = _callee_output_facts(call, kind="sdpa_gqa", modules_by_name=modules_by_name, provenance=provenance)
+    if found is None:
+        return None
+    _, actuals, facts = found
+    for fact in facts:
+        if not isinstance(fact, GraphSdpaGqaFact) or not fact.default_scale:
+            continue
+        # Any other input is an option the kernel would drop: the fact also holds on the null
+        # branch of an optional input. Specialization removes the options a call does not pass.
+        if set(actuals) != {fact.q, fact.k, fact.v, fact.keep}:
+            continue
+        band = _band_keep_operands(
+            actuals[fact.keep],
+            q=actuals[fact.q],
+            k=actuals[fact.k],
+            definitions=definitions,
+            modules_by_name=modules_by_name,
+            provenance=provenance,
+        )
+        if band is not None:
+            return (actuals[fact.q], actuals[fact.k], actuals[fact.v], *band)
+    return None
+
+
+def _rewrite_mlx_sdpa_band_intrinsics(graph: GraphProgram) -> GraphProgram:
+    """Attention over a keep mask proven to be a band becomes __mlx_sdpa_band on the same inputs:
+    the backend builds the band the mask describes, or none, instead of the dense mask. The
+    branches of a select are modules by now, so their calls are nodes too."""
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        definitions = {node.outputs[0].name: node for node in module.nodes if len(node.outputs) == 1}
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            inputs = None
+            if len(node.outputs) == 1:
+                inputs = _band_sdpa_inputs(
+                    node, definitions=definitions, modules_by_name=modules_by_name, provenance=provenance,
+                )
+            if inputs is None:
+                new_nodes.append(node)
+                continue
+            new_nodes.append(replace(node, op=GraphOp("__mlx_sdpa_band"), inputs=inputs, attrs={}))
+            changed = True
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
 def _is_literal_value(operand: GraphOperand | None, value: object) -> bool:
@@ -16235,6 +16441,17 @@ def optimize_graph_program(
                     _validate_optimizer_graph(candidate, phase="tinygrad_gqa_repeat_elimination")
                 current = candidate
         if backend_intrinsic_target == "codegen2-mlx":
+            # Before __mlx_sdpa, which would keep the dense mask of the same calls.
+            candidate = (
+                _rewrite_mlx_sdpa_band_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_sdpa_band")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_sdpa_band_intrinsics")
+                current = candidate
             candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__mlx_sdpa")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_sdpa")
