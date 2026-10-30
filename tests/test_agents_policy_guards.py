@@ -61,6 +61,16 @@ def test_builtins_do_not_use_absolute_default_paths() -> None:
     )
 
 
+def test_models_declare_checkpoints() -> None:
+    """axon-benchmark and axon-materialize fail on a model without a CHECKPOINTS pragma."""
+    missing = [
+        str(file_path.relative_to(REPO_ROOT))
+        for file_path in sorted(MODELS_DIR.rglob("*.axon"))
+        if "{-# CHECKPOINTS" not in file_path.read_text(encoding="utf-8")
+    ]
+    assert not missing, "Models without a CHECKPOINTS pragma:\n" + "\n".join(missing)
+
+
 def test_each_builtin_primitive_reference_is_single_source() -> None:
     token = re.compile(r"\b_[a-z][a-z0-9_]*\b")
     counts: Counter[str] = Counter()
