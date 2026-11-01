@@ -217,7 +217,10 @@ def load_torch_model(
         graph_program,
         class_name=class_name,
         model_config=model_config,
-        profile=emit_profile,
+        # codegen2-torch does not take emit profiles yet (the serving-profile
+        # artifact shape is 2b work); its `profile` arg is the optional
+        # timing-profiler flag and must stay False.
+        profile=False,
     )
     model_cls = _exec_generated_class(code, class_name)
 
