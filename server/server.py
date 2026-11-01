@@ -200,7 +200,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _generate_response(self, prompt: str, body: dict[str, Any], *, kind: str) -> None:
         if body.get("stream"):
-            self._respond_sse(prompt, body, kind)
+            self._respond_sse(prompt, body, kind=kind)
             return
         with self.state.slots:
             payload = _full_completion(self.state, prompt, body)
