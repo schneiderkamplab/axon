@@ -57,7 +57,7 @@ include = [
 synapse = "synapse.cli.synapse:app"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "server/tests"]
 addopts = "-ra"
 filterwarnings = [
     "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
