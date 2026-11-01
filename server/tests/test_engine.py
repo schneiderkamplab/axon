@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from server.backends import MlxBackend
 from server.engine import DecodeState, GenerateParams, Session
 
 
@@ -57,12 +58,16 @@ class FakeTokenizer:
 
 @pytest.fixture()
 def patched_mx(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(Session, "_mx", lambda self: _FakeMx)
+    monkeypatch.setattr(MlxBackend, "_mx", lambda self: _FakeMx)
+
+
+def make_mlx_session(model, tokenizer=None) -> Session:
+    return Session(MlxBackend(model, warm_compile=False), tokenizer=tokenizer)
 
 
 def test_prefill_and_step_thread_cache_and_greedy_chain(patched_mx) -> None:
     model = MockModel(vocab=6, eos_token_id=None)  # no EOS: runs to max_new_tokens
-    session = Session(model, tokenizer=None, warm_compile=False)
+    session = make_mlx_session(model)
     state = session.prefill([0])
     assert state.prompt_len == 1
     assert state.token_ids == [0]
@@ -88,7 +93,7 @@ def test_prefill_and_step_thread_cache_and_greedy_chain(patched_mx) -> None:
 def test_generate_ids_stops_at_eos(patched_mx) -> None:
     # Chain 0 -> 1 -> 2 -> 3, with 3 as EOS: yields [1, 2] and stops.
     model = MockModel(vocab=6, eos_token_id=3)
-    session = Session(model, tokenizer=None, warm_compile=False)
+    session = make_mlx_session(model)
     tokens = list(session.generate_ids([0], GenerateParams(max_new_tokens=10, temperature=0.0)))
     assert tokens == [1, 2]
     # Three forwards: prefill + two steps. EOS is discovered from the logits of
@@ -98,7 +103,7 @@ def test_generate_ids_stops_at_eos(patched_mx) -> None:
 
 def test_generate_respects_max_new_tokens_without_eos(patched_mx) -> None:
     model = MockModel(vocab=6, eos_token_id=None)
-    session = Session(model, tokenizer=None, warm_compile=False)
+    session = make_mlx_session(model)
     tokens = list(session.generate_ids([0], GenerateParams(max_new_tokens=4, temperature=0.0)))
     assert tokens == [1, 2, 3, 4]
 
@@ -106,7 +111,7 @@ def test_generate_respects_max_new_tokens_without_eos(patched_mx) -> None:
 def test_generate_streams_text_and_truncates_at_stop(patched_mx) -> None:
     # vocab large enough that (last+1)%vocab walks A->B->C->D->E->F
     model = MockModel(vocab=8, eos_token_id=None)
-    session = Session(model, tokenizer=FakeTokenizer(), warm_compile=False)
+    session = make_mlx_session(model, FakeTokenizer())
     # Prompt "A" (id 0) -> generated B, C, D, ...
     text = "".join(
         session.generate("A", GenerateParams(max_new_tokens=4, temperature=0.0, stop=("D",)))
@@ -116,7 +121,7 @@ def test_generate_streams_text_and_truncates_at_stop(patched_mx) -> None:
 
 def test_generate_ids_stats_report_length_without_eos(patched_mx) -> None:
     model = MockModel(vocab=6, eos_token_id=None)
-    session = Session(model, tokenizer=None, warm_compile=False)
+    session = make_mlx_session(model)
     stats: dict = {}
     tokens = list(
         session.generate_ids([0], GenerateParams(max_new_tokens=4, temperature=0.0), stats)
@@ -127,7 +132,7 @@ def test_generate_ids_stats_report_length_without_eos(patched_mx) -> None:
 
 def test_generate_ids_stats_report_stop_on_eos(patched_mx) -> None:
     model = MockModel(vocab=6, eos_token_id=3)
-    session = Session(model, tokenizer=None, warm_compile=False)
+    session = make_mlx_session(model)
     stats: dict = {}
     tokens = list(
         session.generate_ids([0], GenerateParams(max_new_tokens=10, temperature=0.0), stats)
@@ -141,7 +146,7 @@ def test_generate_stats_stop_string_overrides_finish_reason(patched_mx) -> None:
     # No EOS and the budget not exhausted, yet a stop-string hit must report
     # "stop", overriding the "length" that generate_ids' finally wrote.
     model = MockModel(vocab=8, eos_token_id=None)
-    session = Session(model, tokenizer=FakeTokenizer(), warm_compile=False)
+    session = make_mlx_session(model, FakeTokenizer())
     stats: dict = {}
     text = "".join(
         session.generate(

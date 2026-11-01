@@ -5,9 +5,13 @@ returning ``logits`` plus an updated cache. The ``Session`` drives that interfac
 step by step so the server can stream, sample, and stop *between* tokens — the
 generated ``generate()`` greedy loop is bypassed entirely.
 
-Concurrency model: one ``DecodeState`` per generation (caches are per-state), one
-shared model instance. MLX forwards are thread-safe over shared weights; the
-serving layer caps concurrent decodes explicitly.
+Backends: tensor-facing details (id tensors, result normalization, warm-up)
+live in ``server.backends`` behind the ``ModelBackend`` protocol; the Session
+itself touches no tensor library, so the same loop runs over MLX and torch.
+
+Concurrency model: one ``DecodeState`` per generation (caches are per-state),
+one shared model instance; the serving layer caps concurrent decodes explicitly
+and thread-safety of shared-weight forwards is each backend's concern.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from .backends import ModelBackend
 from .sampling import SamplerConfig, sample_next_token
 
 __all__ = ["DecodeState", "GenerateParams", "Session"]
@@ -60,24 +65,23 @@ class Session:
 
     def __init__(
         self,
-        model: Any,
+        backend: ModelBackend,
         tokenizer: Any | None = None,
         *,
         eos_token_id: int | tuple[int, ...] | None = None,
-        warm_compile: bool = True,
-        max_kv_length: int = 2048,
     ) -> None:
-        self.model = model
+        """``backend`` wraps one generated model instance (warm-up happens at
+        backend construction); ``Session`` owns only the decode loop."""
+        self.backend = backend
+        self.model = backend.model
         self.tokenizer = tokenizer
-        config = getattr(model, "config", None)
+        config = getattr(self.model, "config", None)
         self.config: dict[str, Any] = config if isinstance(config, dict) else {}
         if eos_token_id is None:
             eos_token_id = self.config.get("eos_token_id")
         if eos_token_id is None and tokenizer is not None:
             eos_token_id = getattr(tokenizer, "eos_token_id", None)
         self.eos_token_id = eos_token_id
-        if warm_compile and hasattr(model, "compile"):
-            model.compile(max_kv_length=max_kv_length)
 
     # ── construction ────────────────────────────────────────────────────────
 
@@ -87,22 +91,44 @@ class Session:
         axon_path: Path | str,
         *,
         checkpoint_dir: Path | str | None = None,
-        dtype: str = "float16",
+        backend: str = "mlx",
+        dtype: str | None = None,
         emit_profile: str = "inference",
         warm_compile: bool = True,
         tokenizer_dir: Path | str | None = None,
+        device: str = "cpu",
     ) -> "Session":
-        from .loading import default_checkpoint_dir, load_mlx_model
+        """Compile a materialized ``.axon`` file and wrap it in a backend.
 
+        ``backend`` selects the adapter (``"mlx"`` or ``"torch"``); ``dtype``
+        defaults to ``float16`` on MLX and ``float32`` on torch (CPU-safe).
+        """
         path = Path(axon_path)
-        model = load_mlx_model(
-            path,
-            checkpoint_dir=checkpoint_dir,
-            dtype=dtype,
-            emit_profile=emit_profile,
-        )
         tokenizer = cls._load_tokenizer(tokenizer_dir, checkpoint_dir, path)
-        return cls(model, tokenizer, warm_compile=warm_compile)
+        if backend == "mlx":
+            from .backends import MlxBackend
+            from .loading import load_mlx_model
+
+            model = load_mlx_model(
+                path,
+                checkpoint_dir=checkpoint_dir,
+                dtype=dtype or "float16",
+                emit_profile=emit_profile,
+            )
+            return cls(MlxBackend(model, warm_compile=warm_compile), tokenizer)
+        if backend == "torch":
+            from .backends import TorchBackend
+            from .loading import load_torch_model
+
+            model = load_torch_model(
+                path,
+                checkpoint_dir=checkpoint_dir,
+                dtype=dtype or "float32",
+                emit_profile=emit_profile,
+                device=device,
+            )
+            return cls(TorchBackend(model, device=device), tokenizer)
+        raise ValueError(f"Unknown backend {backend!r}: expected 'mlx' or 'torch'")
 
     @staticmethod
     def _load_tokenizer(
@@ -125,15 +151,14 @@ class Session:
     def prefill(self, input_ids: list[int] | list[list[int]]) -> DecodeState:
         """Run the prompt through the model once; returns a DecodeState with
         the KV cache and the last-position logits pending sampling."""
-        mx = self._mx()
-        ids = self._as_2d(input_ids, mx)
-        result = self.model.forward(ids, past_kv=None, use_cache=True)
-        logits = self._extract_logits(result)
+        backend = self.backend
+        ids = backend.ids_2d(input_ids)
+        result = backend.forward(ids, past_kv=None, use_cache=True)
         state = DecodeState(
-            cache=self._extract_cache(result),
-            token_ids=[int(v) for v in list(ids.reshape(-1))],
-            prompt_len=int(ids.shape[1]),
-            pending_logits=self._last_logits(logits),
+            cache=backend.extract_cache(result),
+            token_ids=backend.flat_ids(ids),
+            prompt_len=backend.seq_len(ids),
+            pending_logits=backend.last_logits(backend.extract_logits(result)),
         )
         return state
 
@@ -154,7 +179,7 @@ class Session:
             if new_cache is not None:
                 state.cache = new_cache
         token = sample_next_token(
-            self._to_numpy(last_logits), params.sampler(), params.rng()
+            self.backend.to_numpy(last_logits), params.sampler(), params.rng()
         )
         state.token_ids.append(token)
         if self._is_eos(token):
@@ -194,7 +219,7 @@ class Session:
                     last_logits, new_cache = self._forward_step(state)
                     if new_cache is not None:
                         state.cache = new_cache
-                token = sample_next_token(self._to_numpy(last_logits), sampler, rng)
+                token = sample_next_token(self.backend.to_numpy(last_logits), sampler, rng)
                 state.token_ids.append(token)
                 completion_tokens += 1
                 if self._is_eos(token):
@@ -247,13 +272,16 @@ class Session:
 
     def _forward_step(self, state: DecodeState) -> tuple[Any, Any]:
         """One S=1 forward; returns (last-position logits, updated cache)."""
-        mx = self._mx()
-        result = self.model.forward(
-            mx.array([[state.token_ids[-1]]], dtype=mx.int64),
+        backend = self.backend
+        result = backend.forward(
+            backend.step_2d(state.token_ids[-1]),
             past_kv=state.cache,
             use_cache=True,
         )
-        return self._last_logits(self._extract_logits(result)), self._extract_cache(result)
+        return (
+            backend.last_logits(backend.extract_logits(result)),
+            backend.extract_cache(result),
+        )
 
     def _encode(self, prompt: str | list[int]) -> list[int]:
         if isinstance(prompt, str):
@@ -277,45 +305,3 @@ class Session:
             if stop and stop in text:
                 return text.split(stop, 1)[0]
         return None
-
-    def _mx(self) -> Any:
-        import mlx.core as mx
-
-        return mx
-
-    @staticmethod
-    def _as_2d(input_ids: list[int] | list[list[int]], mx: Any) -> Any:
-        if input_ids and isinstance(input_ids[0], (list, tuple)):
-            return mx.array([list(row) for row in input_ids], dtype=mx.int64)
-        return mx.array([list(input_ids)], dtype=mx.int64)
-
-    @staticmethod
-    def _extract_logits(result: Any) -> Any:
-        if isinstance(result, dict):
-            return result.get("logits")
-        if isinstance(result, (list, tuple)):
-            return result[0]
-        return result
-
-    @staticmethod
-    def _extract_cache(result: Any, previous: Any = None) -> Any:
-        if isinstance(result, dict):
-            for key in ("new_kv", "past_kv", "cache"):
-                if key in result and result[key] is not None:
-                    return result[key]
-            return previous
-        if isinstance(result, (list, tuple)) and len(result) > 1:
-            return result[1]
-        return previous
-
-    @staticmethod
-    def _last_logits(logits: Any) -> Any:
-        if logits is None:
-            raise RuntimeError("Model forward returned no logits")
-        return logits[:, -1, :]
-
-    @staticmethod
-    def _to_numpy(values: Any) -> Any:
-        import numpy as np
-
-        return np.asarray(values)
