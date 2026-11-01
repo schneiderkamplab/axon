@@ -77,6 +77,8 @@ def _sse_chunks(state: _ServeState, kind: str, prompt: str, body: dict[str, Any]
     created = int(time.time())
     object_name = "chat.completion.chunk" if kind == "chat" else "text_completion.chunk"
     params = _params_from_body(body)
+    stream_options = body.get("stream_options")
+    include_usage = isinstance(stream_options, dict) and bool(stream_options.get("include_usage"))
 
     def chunk(delta: dict[str, Any], finish_reason: str | None = None) -> str:
         payload = {
@@ -88,28 +90,52 @@ def _sse_chunks(state: _ServeState, kind: str, prompt: str, body: dict[str, Any]
         }
         return f"data: {json.dumps(payload)}\n\n"
 
+    stats: dict[str, Any] = {}
     yield chunk({"role": "assistant"} if kind == "chat" else {})
-    for text in state.session.generate(prompt, params):
+    for text in state.session.generate(prompt, params, stats):
         yield chunk({"content": text})
-    yield chunk({}, finish_reason="stop")
+    yield chunk({}, finish_reason=stats.get("finish_reason", "stop"))
+    if include_usage:
+        prompt_tokens = int(stats.get("prompt_tokens", 0))
+        completion_tokens = int(stats.get("completion_tokens", 0))
+        usage_payload = {
+            "id": request_id,
+            "object": object_name,
+            "created": created,
+            "model": state.model_name,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
+        yield f"data: {json.dumps(usage_payload)}\n\n"
     yield "data: [DONE]\n\n"
 
 
 def _full_completion(state: _ServeState, prompt: str, body: dict[str, Any]) -> dict[str, Any]:
     params = _params_from_body(body)
+    stats: dict[str, Any] = {}
     pieces: list[str] = []
-    completion_tokens = 0
-    for text in state.session.generate(prompt, params):
+    for text in state.session.generate(prompt, params, stats):
         pieces.append(text)
-        completion_tokens += 1
+    prompt_tokens = int(stats.get("prompt_tokens", 0))
+    completion_tokens = int(stats.get("completion_tokens", 0))
     return {
         "object": "text_completion",
         "model": state.model_name,
-        "choices": [{"index": 0, "text": "".join(pieces), "finish_reason": "stop"}],
+        "choices": [
+            {
+                "index": 0,
+                "text": "".join(pieces),
+                "finish_reason": stats.get("finish_reason", "stop"),
+            }
+        ],
         "usage": {
-            "prompt_tokens": -1,
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "total_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
         },
     }
 
@@ -188,7 +214,7 @@ class _Handler(BaseHTTPRequestHandler):
                     {
                         "index": 0,
                         "message": {"role": "assistant", "content": text},
-                        "finish_reason": "stop",
+                        "finish_reason": payload["choices"][0]["finish_reason"],
                     }
                 ],
                 "usage": payload["usage"],

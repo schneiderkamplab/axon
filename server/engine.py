@@ -163,50 +163,85 @@ class Session:
         return token
 
     def generate_ids(
-        self, prompt: str | list[int], params: GenerateParams | None = None
+        self,
+        prompt: str | list[int],
+        params: GenerateParams | None = None,
+        stats: dict[str, Any] | None = None,
     ) -> Iterator[int]:
-        """Yield sampled token ids one at a time (excludes the prompt)."""
+        """Yield sampled token ids one at a time (excludes the prompt).
+
+        When ``stats`` is given, fills ``prompt_tokens``, ``completion_tokens``
+        and ``finish_reason`` (``"stop"`` on EOS, ``"length"`` when the token
+        budget is exhausted) as generation proceeds. ``completion_tokens``
+        counts every generated token, including a terminating EOS — the EOS
+        token itself is consumed, never yielded (vLLM/OpenAI usage accounting).
+        """
         params = params or GenerateParams()
-        state = self.prefill(self._encode(prompt))
+        prompt_ids = self._encode(prompt)
+        if stats is not None:
+            stats["prompt_tokens"] = len(prompt_ids)
+        state = self.prefill(prompt_ids)
         sampler = params.sampler()
         rng = params.rng()
-        for _ in range(max(0, int(params.max_new_tokens))):
-            if state.pending_logits is not None:
-                last_logits = state.pending_logits
-                state.pending_logits = None
-            else:
-                last_logits, new_cache = self._forward_step(state)
-                if new_cache is not None:
-                    state.cache = new_cache
-            token = sample_next_token(self._to_numpy(last_logits), sampler, rng)
-            state.token_ids.append(token)
-            if self._is_eos(token):
-                state.finished = True
-                return
-            yield token
-        state.finished = True
+        completion_tokens = 0
+        hit_eos = False
+        try:
+            for _ in range(max(0, int(params.max_new_tokens))):
+                if state.pending_logits is not None:
+                    last_logits = state.pending_logits
+                    state.pending_logits = None
+                else:
+                    last_logits, new_cache = self._forward_step(state)
+                    if new_cache is not None:
+                        state.cache = new_cache
+                token = sample_next_token(self._to_numpy(last_logits), sampler, rng)
+                state.token_ids.append(token)
+                completion_tokens += 1
+                if self._is_eos(token):
+                    state.finished = True
+                    hit_eos = True
+                    return
+                yield token
+            state.finished = True
+        finally:
+            if stats is not None:
+                stats["completion_tokens"] = completion_tokens
+                stats["finish_reason"] = "stop" if hit_eos else "length"
 
     def generate(
-        self, prompt: str | list[int], params: GenerateParams | None = None
+        self,
+        prompt: str | list[int],
+        params: GenerateParams | None = None,
+        stats: dict[str, Any] | None = None,
     ) -> Iterator[str]:
-        """Stream decoded completion text chunks as generation proceeds."""
+        """Stream decoded completion text chunks as generation proceeds.
+
+        When ``stats`` is given it is filled through ``generate_ids``; a
+        stop-string truncation overrides ``finish_reason`` to ``"stop"``.
+        """
         if self.tokenizer is None:
             raise RuntimeError("Session requires a tokenizer to stream text")
         params = params or GenerateParams()
         generated: list[int] = []
         emitted = 0
-        for token in self.generate_ids(prompt, params):
+        stop_hit = False
+        token_stream = self.generate_ids(prompt, params, stats)
+        for token in token_stream:
             generated.append(token)
             text = self.tokenizer.decode(generated)
             new_text = text[emitted:]
             emitted += len(new_text)
             cut = self._truncate_at_stop(new_text, params.stop)
             if cut is not None:
+                stop_hit = True
                 if cut:
                     yield cut
-                return
+                break
             if new_text:
                 yield new_text
+        token_stream.close()  # run generate_ids' finally deterministically
+        if stats is not None and stop_hit:
+            stats["finish_reason"] = "stop"
 
     # ── internals ───────────────────────────────────────────────────────────
 

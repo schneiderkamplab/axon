@@ -114,6 +114,44 @@ def test_generate_streams_text_and_truncates_at_stop(patched_mx) -> None:
     assert text == "BC"  # truncated before the stop sequence "D"
 
 
+def test_generate_ids_stats_report_length_without_eos(patched_mx) -> None:
+    model = MockModel(vocab=6, eos_token_id=None)
+    session = Session(model, tokenizer=None, warm_compile=False)
+    stats: dict = {}
+    tokens = list(
+        session.generate_ids([0], GenerateParams(max_new_tokens=4, temperature=0.0), stats)
+    )
+    assert tokens == [1, 2, 3, 4]
+    assert stats == {"prompt_tokens": 1, "completion_tokens": 4, "finish_reason": "length"}
+
+
+def test_generate_ids_stats_report_stop_on_eos(patched_mx) -> None:
+    model = MockModel(vocab=6, eos_token_id=3)
+    session = Session(model, tokenizer=None, warm_compile=False)
+    stats: dict = {}
+    tokens = list(
+        session.generate_ids([0], GenerateParams(max_new_tokens=10, temperature=0.0), stats)
+    )
+    assert tokens == [1, 2]
+    # EOS is charged as a generated token (vLLM accounting) though not yielded.
+    assert stats == {"prompt_tokens": 1, "completion_tokens": 3, "finish_reason": "stop"}
+
+
+def test_generate_stats_stop_string_overrides_finish_reason(patched_mx) -> None:
+    # No EOS and the budget not exhausted, yet a stop-string hit must report
+    # "stop", overriding the "length" that generate_ids' finally wrote.
+    model = MockModel(vocab=8, eos_token_id=None)
+    session = Session(model, tokenizer=FakeTokenizer(), warm_compile=False)
+    stats: dict = {}
+    text = "".join(
+        session.generate(
+            "A", GenerateParams(max_new_tokens=4, temperature=0.0, stop=("D",)), stats
+        )
+    )
+    assert text == "BC"
+    assert stats == {"prompt_tokens": 1, "completion_tokens": 3, "finish_reason": "stop"}
+
+
 def test_decode_state_defaults(patched_mx) -> None:
     state = DecodeState()
     assert state.token_ids == []
