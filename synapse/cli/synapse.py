@@ -240,6 +240,7 @@ def _axon_codegen_dump_to_text(
     align_devices: bool = False,
     debug_optimize_timings: bool = False,
     builtins_overlays: list[str] | tuple[str, ...] | None = None,
+    emit_profile: str = "serving",
 ) -> str:
     axon_module = _axon_module()
     resolve_fn = getattr(axon_module, "resolve_axon_program_from_path")
@@ -265,6 +266,10 @@ def _axon_codegen_dump_to_text(
         )
     if backend in {"codegen2-mlx", "codegen2-jax"} and align_devices:
         raise typer.BadParameter(f"--align-devices is not supported with --backend {backend}")
+    if emit_profile != "serving" and backend != "codegen2-mlx":
+        raise typer.BadParameter(
+            f"--emit-profile is currently supported only with --backend codegen2-mlx, got {backend}"
+        )
 
     model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
     model_config = None
@@ -329,7 +334,12 @@ def _axon_codegen_dump_to_text(
         )
     emit_module = importlib.import_module("synapse.axon.codegen2_mlx")
     emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
-    return emit_fn(graph, class_name=class_name, model_config=model_config)
+    return emit_fn(
+        graph,
+        class_name=class_name,
+        model_config=model_config,
+        emit_profile=emit_profile,
+    )
 
 
 def _ensure_overwrite_allowed(path: Path, *, force: bool) -> None:
@@ -723,6 +733,15 @@ def axon_codegen_dump(
         "-f",
         help="Overwrite output file if it already exists.",
     ),
+    emit_profile: str = typer.Option(
+        "serving",
+        "--emit-profile",
+        help=(
+            "Artifact shape for the intended use (codegen2-mlx only): 'serving' "
+            "(default, full inference artifact), 'inference' (forward-only contract "
+            "for the Session engine), or 'training' (not supported yet)."
+        ),
+    ),
 ) -> None:
     """Render generated codegen2 Python code for an Axon program."""
     _ensure_overwrite_allowed(output_path, force=force)
@@ -746,6 +765,7 @@ def axon_codegen_dump(
             weights=weights,
             profile=profile_code,
             align_devices=align_devices,
+            emit_profile=emit_profile,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

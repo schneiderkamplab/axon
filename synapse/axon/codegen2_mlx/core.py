@@ -1991,7 +1991,27 @@ def emit_model_code_from_graph_ir(
     class_name: str = "AxonMlxModel",
     model_config: dict[str, Any] | None = None,
     profile: bool = False,
+    emit_profile: str = "serving",
 ) -> str:
+    """Emit a standalone MLX model module from Graph IR.
+
+    ``emit_profile`` selects the artifact shape for the intended use:
+    - ``"serving"`` (default): full inference artifact (current behavior).
+    - ``"inference"``: same artifact, marked for engine-driven decode; the
+      ``Session`` engine owns the decode loop, so the module stays
+      forward-only by contract.
+    - ``"training"``: not supported yet — raises a clear diagnostic.
+    """
+    if emit_profile not in {"serving", "inference", "training"}:
+        raise ValueError(
+            f"emit_profile must be one of 'serving', 'inference', 'training'; got {emit_profile!r}"
+        )
+    if emit_profile == "training":
+        raise NotImplementedError(
+            "codegen2-mlx emit_profile='training' is not supported yet: "
+            "the compiler does not emit backward graphs. Use the torch backend "
+            "or request training-profile support in a separate change."
+        )
     validate_graph_program(graph)
     unsupported = non_obvious_mlx_ops(graph)
     if unsupported:
@@ -2021,6 +2041,7 @@ def emit_model_code_from_graph_ir(
             ")",
             "",
             f"_MODEL_CONFIG = {model_config!r}",
+            f'_EMIT_PROFILE = {emit_profile!r}',
             "",
             "class _KVCache:",
             '    """Pre-allocated KV cache buffer — O(n) vs O(n²) for concatenate."""',
