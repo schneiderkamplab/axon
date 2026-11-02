@@ -247,7 +247,12 @@ def load_torch_model(
     checkpoint = Path(checkpoint_dir).resolve() if checkpoint_dir else default_checkpoint_dir(path)
     shards = resolve_safetensors_paths(checkpoint)
     state_dict = _load_torch_state_dict(shards, device="cpu", dtype=dtype)
-    return model_cls.from_state_dict(state_dict).to(device).eval()
+    # The generated model holds its weights in state_dict_tensors, not as
+    # nn.Parameters, so nn.Module.to(device) cannot move them. Placement goes
+    # through the class's own param_devices mechanism (single device: every
+    # tensor on it); the trailing .to() only covers genuinely registered
+    # buffers and is a no-op for already-placed tensors.
+    return model_cls.from_state_dict(state_dict, param_devices=[device]).to(device).eval()
 
 
 def _torch_backend_intrinsics_enabled(spec: str | None) -> frozenset[str]:

@@ -408,6 +408,15 @@ class PagedAttention(torch.nn.Module):
         layer = int(layer_idx.item()) if isinstance(layer_idx, torch.Tensor) else int(layer_idx)
         k_cache = self._layer_slice(self.k_cache, layer)
         v_cache = self._layer_slice(self.v_cache, layer)
+        # Attention runs in the value dtype, matching the non-paged _sdpa
+        # helper's contract. Rope factors are deliberately float32, so q/k
+        # arrive promoted to float32 on sub-float32 models; without this
+        # alignment the store silently narrows k/v into the pool while q
+        # stays wide and SDPA rejects the mix.
+        if q.dtype != value.dtype:
+            q = q.to(value.dtype)
+        if key.dtype != value.dtype:
+            key = key.to(value.dtype)
         # [B, H, S, D] -> [B*S, H, D] rows in the packed batch order.
         q_rows = q.transpose(1, 2).reshape(batch * seq_len, num_heads, head_dim)
         k_rows = key.transpose(1, 2).reshape(batch * seq_len, self.num_kv_heads, self.head_dim)

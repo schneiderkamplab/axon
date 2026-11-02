@@ -88,7 +88,10 @@ class ModelRunner:
     def _to_device(self, values: list, dtype: torch.dtype) -> torch.Tensor:
         tensor = torch.tensor(values, dtype=dtype, pin_memory=self.device.type == "cuda")
         if self.device.type != "cpu":
-            return tensor.to(self.device, non_blocking=True)
+            # non_blocking is only sound where the source is pinned (CUDA);
+            # CPU->MPS async copies without pinned memory fail with
+            # "Placeholder storage has not been allocated on MPS device".
+            return tensor.to(self.device, non_blocking=self.device.type == "cuda")
         return tensor
 
     def prepare_block_tables(self, seqs: list[Sequence]) -> torch.Tensor:

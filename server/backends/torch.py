@@ -60,4 +60,8 @@ class TorchBackend:
 
         if isinstance(values, torch.Tensor):
             values = values.detach().to("cpu")
+            if values.dtype is torch.bfloat16:
+                # numpy has no bfloat16; the cast is lossless (bfloat16 is a
+                # truncated float32).
+                values = values.to(torch.float32)
         return np.asarray(values)
