@@ -66,6 +66,7 @@ from ..graph_ir.effects import (
 )
 from ..graph_ir.ownership import infer_graph_ownership
 from ..graph_ir.substitute import substitute_graph_node_dims, substitute_graph_operand_dims
+from .serving import SERVING_HEAD_META_KEY, lower_graph_for_serving
 
 
 def _graph_path_payload(path: GraphPath) -> dict[str, Any]:
@@ -3116,11 +3117,20 @@ class _DirectTorchEmitter:
         class_name: str,
         profile: bool = False,
         align_devices: bool = False,
+        emit_profile: str = "inference",
+        serving_head_module: str | None = None,
     ) -> None:
         self.program = program
         self.class_name = class_name
         self.profile = bool(profile)
         self.align_devices = bool(align_devices)
+        self.emit_profile = emit_profile
+        self.serving_head_module = serving_head_module
+        if (emit_profile == "serving") != (serving_head_module is not None):
+            raise ValueError(
+                "emit_profile='serving' requires the serving head module from "
+                "lower_graph_for_serving, and no other profile may set one"
+            )
         self.modules_by_name = {module.name: module for module in program.modules}
         self.method_names = {name: f"_def_{_py_ident(name)}" for name in self.modules_by_name}
         self.global_symbol_names = _runtime_symbol_module_names(program)
@@ -3130,6 +3140,10 @@ class _DirectTorchEmitter:
         )
         self.state_key_filter_prefixes = _state_key_filter_prefixes(program)
         self.emitted_module_names = self._emitted_module_names()
+        if self.serving_head_module is not None:
+            # The head module is called from compute_logits, not from any
+            # graph node, so the reachability closure alone would drop it.
+            self.emitted_module_names.add(self.serving_head_module)
         self.needs_expert_banks = _graph_uses_expert_linear(program)
         self.ownership = infer_graph_ownership(program, assume_module_inputs_owned=True)
         self.inplace_owned_primitive_ops = _owned_inplace_primitive_ops(
@@ -3140,6 +3154,9 @@ class _DirectTorchEmitter:
         self._emitted_defs_stack: list[dict[str, Any]] = []
         self._emitted_aliases_stack: list[dict[str, GraphOperand]] = []
         self._int_locals: set[str] = set()
+        self._paged_attention_sites, self._paged_attention_site_by_node = (
+            self._scan_paged_attention_sites()
+        )
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -3154,8 +3171,115 @@ class _DirectTorchEmitter:
         lines.append("")
         self._emit_forward(lines)
         lines.append("")
-        self._emit_generate(lines)
+        if self.emit_profile == "serving":
+            self._emit_compute_logits(lines)
+        else:
+            self._emit_generate(lines)
         return "\n".join(lines)
+
+    def _scan_paged_attention_sites(
+        self,
+    ) -> tuple[list[dict[str, str]], dict[tuple[str, str, str], str]]:
+        """Collect the ``__torch_paged_attention`` sites and their configs.
+
+        Head geometry comes from the primitive's operand types (query heads
+        from ``q``'s head axis, KV heads from ``k``'s); dim expressions are
+        emitted over the runtime symbol table so the artifact stays
+        config-driven rather than baking numbers in.
+
+        Sites are keyed by head geometry, not node identity: the emitter
+        inlines callee modules (rewriting node ids and local names), and a
+        geometry is exactly what identifies the wrapper a call needs — the
+        module is stateless per call apart from the engine-bound pool.  Sites
+        with identical geometry therefore share one ``PagedAttention``
+        instance (every cache-backed attention site in a decoder layer stack
+        addresses the same per-layer pool slice).
+        """
+        sites: list[dict[str, str]] = []
+        attr_by_geometry: dict[tuple[str, str, str], str] = {}
+        for module in self.program.modules:
+            for node in module.nodes:
+                if node.op.name != "__torch_paged_attention":
+                    continue
+                if len(node.inputs) != 4:
+                    raise ValueError(
+                        "__torch_paged_attention expects q, k, v, layer_idx; got "
+                        f"{len(node.inputs)} inputs in module {module.name!r}"
+                    )
+                q_type = node.inputs[0].type_expr
+                k_type = node.inputs[1].type_expr
+                q_dims = getattr(q_type, "dims", None)
+                k_dims = getattr(k_type, "dims", None)
+                if q_dims is None or k_dims is None or len(q_dims) != 4 or len(k_dims) != 4:
+                    raise ValueError(
+                        f"__torch_paged_attention site in module {module.name!r} needs "
+                        "rank-4 head-split q/k types with dim tokens"
+                    )
+                geometry = (
+                    self._paged_dim_expr(q_dims[1]),
+                    self._paged_dim_expr(k_dims[1]),
+                    self._paged_dim_expr(q_dims[3]),
+                )
+                if geometry not in attr_by_geometry:
+                    attr_by_geometry[geometry] = f"_paged_attn_{len(sites)}"
+                    sites.append(
+                        {
+                            "attr": attr_by_geometry[geometry],
+                            "num_heads": geometry[0],
+                            "num_kv_heads": geometry[1],
+                            "head_dim": geometry[2],
+                        }
+                    )
+        return sites, attr_by_geometry
+
+    def _paged_dim_expr(self, token: Any) -> str:
+        """Render a type-dim token as a runtime expression over ``_symbols``."""
+        if isinstance(token, DimExprBinary):
+            op = {"+": "+", "-": "-", "*": "*", "/": "//"}.get(token.op)
+            if op is None:
+                raise ValueError(f"unsupported dim operator for the paged site config: {token.op!r}")
+            return f"({self._paged_dim_expr(token.left)} {op} {self._paged_dim_expr(token.right)})"
+        if isinstance(token, str):
+            return f"int(self._symbols[{token!r}])"
+        if isinstance(token, bool):
+            raise ValueError(f"unsupported dim token for the paged site config: {token!r}")
+        if isinstance(token, int):
+            return str(token)
+        raise ValueError(f"unsupported dim token for the paged site config: {token!r}")
+
+    def _paged_attention_attr(self, node: Any) -> str:
+        """The ``_paged_attn_{n}`` attribute for a paged primitive node.
+
+        Keyed by head geometry (see ``_scan_paged_attention_sites``): node
+        identity does not survive the emitter's module inlining.
+        """
+        q_dims = getattr(node.inputs[0].type_expr, "dims", None)
+        k_dims = getattr(node.inputs[1].type_expr, "dims", None)
+        if q_dims is None or k_dims is None or len(q_dims) != 4 or len(k_dims) != 4:
+            raise ValueError("__torch_paged_attention node lacks rank-4 head-split q/k types")
+        geometry = (
+            self._paged_dim_expr(q_dims[1]),
+            self._paged_dim_expr(k_dims[1]),
+            self._paged_dim_expr(q_dims[3]),
+        )
+        attr = self._paged_attention_site_by_node.get(geometry)
+        if attr is None:
+            raise ValueError(
+                f"paged attention node {node.id!r} was not registered for emission"
+            )
+        return attr
+
+    def _emit_compute_logits(self, lines: list[str]) -> None:
+        add = self._add
+        head_name = self.serving_head_module
+        method = self.method_names[head_name]
+        # The artifact stays typed ([B, S, D] -> [B, S, V]); the fleet runner
+        # owns flattening to packed rows ([N, V]) before sampling, matching
+        # its flat sample_rows indexing. Module calls return tuples, so the
+        # single head output is unpacked like forward does.
+        add(lines, 4, "def compute_logits(self, hidden):")
+        add(lines, 8, f"result = self.{method}(hidden)")
+        add(lines, 8, "return result[0]")
 
     def _repeat_callee_is_inlineable(self, node: Any) -> bool:
         if node.op.name != "core.repeat":
@@ -3494,8 +3618,8 @@ class _DirectTorchEmitter:
         add(lines, 8, "self._materialize_int8_aliases(state)")
         add(lines, 8, "_materialize_packed_parameters(state, self._PACKED_PARAMETER_SPECS)")
         add(lines, 8, "self.state_dict_tensors = self._place_state_dict(state, self.param_devices)")
-        add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
+        add(lines, 8, "self.setup()")
         add(lines, 8, "return self")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
@@ -3520,9 +3644,25 @@ class _DirectTorchEmitter:
         add(lines, 8, "return state_dict")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
-        add(lines, 8, "pass")
+        if self._paged_attention_sites:
+            add(lines, 8, "self._setup_paged_attention()")
+        else:
+            add(lines, 8, "pass")
         add(lines, 8, "return None")
         add(lines, 4, "")
+        if self._paged_attention_sites:
+            add(lines, 4, "def _setup_paged_attention(self):")
+            for site in self._paged_attention_sites:
+                add(
+                    lines,
+                    8,
+                    "self.{attr} = PagedAttention("
+                    "num_heads={num_heads}, num_kv_heads={num_kv_heads}, head_dim={head_dim})".format(
+                        **site
+                    ),
+                )
+            add(lines, 8, "return None")
+            add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _normalize_param_devices(param_devices):")
         add(lines, 8, "if param_devices is None:")
@@ -5948,6 +6088,10 @@ class _DirectTorchEmitter:
                 f"self._sdpa({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
                 f"scale={scale}, enable_gqa={bool_arg(5)})"
             )
+        if primitive == "_torch_paged_attention":
+            if len(args) != 4:
+                raise ValueError("__torch_paged_attention expects q, k, v, layer_idx")
+            return f"self.{self._paged_attention_attr(node)}({args[0]}, {args[1]}, {args[2]}, {args[3]})"
         if primitive == "_torch_rope_apply_factors":
             if len(args) < 4:
                 raise ValueError("__torch_rope_apply_factors expects x, sin, cos, interleaved")
@@ -6455,14 +6599,38 @@ def emit_model_code_from_graph_ir(
     model_config: dict[str, Any] | None = None,
     profile: bool = False,
     align_devices: bool = False,
+    emit_profile: str = "inference",
 ) -> str:
-    """Emit direct Python/PyTorch model code from graph IR."""
+    """Emit direct Python/PyTorch model code from graph IR.
+
+    ``emit_profile="serving"`` first lowers the graph through
+    :func:`lower_graph_for_serving` (cache threading stripped, layer index
+    threaded into the paged attention sites, head split out) and emits the
+    fleet-runner contract — ``forward(input_ids, positions) -> hidden`` plus
+    ``compute_logits`` — instead of the standalone decode loop.
+    """
     validate_graph_program(program)
+    if emit_profile != "serving" and any(
+        node.op.name == "__torch_paged_attention"
+        for module in program.modules
+        for node in module.nodes
+    ):
+        raise ValueError(
+            "the program contains __torch_paged_attention sites; emission requires "
+            "emit_profile='serving' (the pairing is enforced by the loader and the "
+            "serving transform rewrites the artifact contract around them)"
+        )
+    serving_head_module: str | None = None
+    if emit_profile == "serving":
+        program, serving_meta = lower_graph_for_serving(program)
+        serving_head_module = serving_meta[SERVING_HEAD_META_KEY]
     emitter = _DirectTorchEmitter(
         program=program,
         class_name=class_name,
         profile=profile,
         align_devices=align_devices,
+        emit_profile=emit_profile,
+        serving_head_module=serving_head_module,
     )
     body = emitter.emit()
     header = [
@@ -6486,6 +6654,14 @@ def emit_model_code_from_graph_ir(
             "    required_state_value as _common_required_state_value,",
             "    require_value as _common_require_value,",
             ")",
+        ]
+    )
+    if serving_head_module is not None:
+        header.append(
+            "from synapse.axon.codegen2_torch.paged_attention import PagedAttention"
+        )
+    header.extend(
+        [
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",

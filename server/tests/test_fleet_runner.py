@@ -51,6 +51,10 @@ class MockContextModel(torch.nn.Module):
         self.calls: list[dict] = []
 
     def forward(self, input_ids, positions):  # noqa: ANN001
+        # The runner's contract is the artifact's graph contract: [B, S]
+        # inputs (prefill packs rows as [1, N]); flatten for the mock math.
+        input_ids = input_ids.reshape(-1)
+        positions = positions.reshape(-1)
         ctx = get_context()
         self.calls.append(
             {
@@ -111,7 +115,7 @@ def test_runner_builds_paged_context_contract() -> None:
     assert call["ids"] == [10, 11, 12, 13]
     assert call["positions"] == [0, 1, 2, 3]
     assert call["cu_seqlens_q"] == [0, 4]
-    assert call["block_tables"] is None  # no prefix cache: flat contiguous path
+    assert call["block_tables"] == [[0]]  # tables always set: one block per fresh seq
     assert call["slot_mapping"] == [0, 1, 2, 3]  # block 0, one slot per token
 
     engine.step()  # decode: the sampled token (13+1)%8=6 is fed back at position 4
@@ -137,7 +141,7 @@ def test_prefill_with_prefix_cache_sets_block_tables() -> None:
     engine.add_request(seed, SamplingParams(temperature=1.0, max_tokens=1))
     engine.step()
     seed_call = engine.model_runner.model.calls[-1]
-    assert seed_call["block_tables"] is None  # first seq: no cache hit yet
+    assert seed_call["block_tables"] == [[0, 1]]  # 300 tokens over 256-sized blocks; no cache hit yet
 
     # Second seq shares the first 256 tokens (a full block) with the seed.
     engine.add_request(list(range(256)) + [777, 778], SamplingParams(temperature=1.0, max_tokens=1))

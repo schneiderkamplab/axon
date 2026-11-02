@@ -66,16 +66,22 @@ class ModelRunner:
             dtype=hf_config.dtype,
             device=self.device,
         )
-        layer_id = 0
+        bound = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = self.kv_cache[0, layer_id]
-                module.v_cache = self.kv_cache[1, layer_id]
-                layer_id += 1
-        assert layer_id == hf_config.num_hidden_layers, (
-            f"model exposes {layer_id} KV-cache layers, config says "
-            f"{hf_config.num_hidden_layers}"
-        )
+                # Cache-carrying modules receive the FULL [L, blocks, bs, H, D]
+                # stacks and address their layer through layer_idx at call
+                # time: the Axon serving artifact registers one PagedAttention
+                # per head geometry (shared across the layer stack), not one
+                # module per layer.
+                module.k_cache = self.kv_cache[0]
+                module.v_cache = self.kv_cache[1]
+                bound += 1
+        if bound == 0:
+            raise ValueError(
+                "the model exposes no KV-cache modules (k_cache/v_cache attributes); "
+                "the serving contract requires paged attention modules to bind"
+            )
 
     # ── batching ────────────────────────────────────────────────────────────
 
@@ -125,8 +131,11 @@ class ModelRunner:
                     slot_end = seq.block_table[i] * self.block_size + end - i * self.block_size
                 slot_mapping.extend(range(slot_start, slot_end))
             sample_rows.append(len(input_ids) - 1)
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:  # prefix cache
-            block_tables = self.prepare_block_tables(seqs)
+        # The paged kernel reads history through the pool, so block tables
+        # are required on every prefill — not only with a cached prefix
+        # (each scheduled sequence's blocks are allocated by the scheduler
+        # before this runs).
+        block_tables = self.prepare_block_tables(seqs)
         input_ids = self._to_device(input_ids, torch.int64)
         positions = self._to_device(positions, torch.int64)
         cu_seqlens_q = self._to_device(cu_seqlens_q, torch.int32)
@@ -164,9 +173,25 @@ class ModelRunner:
     # ── forward ─────────────────────────────────────────────────────────────
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor) -> Any:
+    def run_model(
+        self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool
+    ) -> Any:
         # CUDA-graph capture is upstream-only for now; eager always.
-        return self.model.compute_logits(self.model(input_ids, positions))
+        # The Axon serving artifact takes ``positions`` by keyword (its forward
+        # forwards extra named inputs), and its graph contract is [B, S]:
+        # prefill packs all scheduled rows into one [1, N] view, decode is
+        # [num_seqs, 1].
+        if is_prefill:
+            input_ids = input_ids.view(1, -1)
+            positions = positions.view(1, -1)
+        else:
+            input_ids = input_ids.unsqueeze(-1)
+            positions = positions.unsqueeze(-1)
+        # Packed logits rows for the flat sample_rows indexing: [B, S, V]
+        # from the artifact flattens to [N, V]; already-flat [N, V] mock
+        # output is a no-op.
+        logits = self.model.compute_logits(self.model(input_ids, positions=positions))
+        return logits.reshape(-1, logits.shape[-1])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         if is_prefill:
@@ -175,7 +200,7 @@ class ModelRunner:
             input_ids, positions = self.prepare_decode(seqs)
             sample_rows = None
         temperatures = self.prepare_sample(seqs)
-        logits = self.run_model(input_ids, positions)
+        logits = self.run_model(input_ids, positions, is_prefill)
         if sample_rows is not None:
             logits = logits[sample_rows]  # [B, V]: one row per scheduled seq
         with torch.inference_mode():

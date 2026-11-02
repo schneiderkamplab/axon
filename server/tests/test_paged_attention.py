@@ -226,9 +226,10 @@ def test_prefill_with_prefix_cache_matches_reference() -> None:
     assert torch.allclose(out, expected, atol=1e-5), (out - expected).abs().max()
 
 
-def test_decode_contiguous_single_stream_matches_reference() -> None:
-    # Without block tables the cache is addressed by absolute position —
-    # the single-stream contiguous artifact path.
+def test_decode_single_stream_matches_reference() -> None:
+    # A single stream stored from slot 0 with a trivial one-block table:
+    # same math as the old contiguous mode, now via the mandatory paged
+    # addressing.
     max_len = 7
     k_cache = torch.zeros(2, BS, H_KV, D)
     v_cache = torch.zeros(2, BS, H_KV, D)
@@ -244,7 +245,7 @@ def test_decode_contiguous_single_stream_matches_reference() -> None:
         False,
         context_lens=torch.tensor([max_len + 1]),
         slot_mapping=torch.tensor([max_len]),
-        block_tables=None,
+        block_tables=torch.tensor([[0, 1]], dtype=torch.int32),
     )
     try:
         out = paged_attention(q, k_new, v_new, k_cache, v_cache,
@@ -255,6 +256,37 @@ def test_decode_contiguous_single_stream_matches_reference() -> None:
         q, [torch.cat([k_hist, k_new])], [torch.cat([v_hist, v_new])]
     )
     assert torch.allclose(out, expected, atol=1e-5), (out - expected).abs().max()
+
+
+def test_missing_block_tables_raise_loudly() -> None:
+    # One addressing scheme: the pool is block-addressed on the store side,
+    # so reads without tables are a contract violation, not a silent mode.
+    k_cache = torch.zeros(2, BS, H_KV, D)
+    v_cache = torch.zeros(2, BS, H_KV, D)
+    q_pre = torch.randn(3, H, D)
+    set_context(
+        True,
+        cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int32),
+        cu_seqlens_k=torch.tensor([0, 3], dtype=torch.int32),
+        slot_mapping=torch.arange(3),
+    )
+    try:
+        with pytest.raises(ValueError, match="block_tables"):
+            paged_attention(q_pre, torch.randn(3, H_KV, D), torch.randn(3, H_KV, D),
+                            k_cache, v_cache, num_heads=H, num_kv_heads=H_KV, head_dim=D)
+    finally:
+        reset_context()
+    set_context(
+        False,
+        context_lens=torch.tensor([3], dtype=torch.int32),
+        slot_mapping=torch.tensor([3]),
+    )
+    try:
+        with pytest.raises(ValueError, match="block_tables"):
+            paged_attention(torch.randn(1, H, D), torch.randn(1, H_KV, D), torch.randn(1, H_KV, D),
+                            k_cache, v_cache, num_heads=H, num_kv_heads=H_KV, head_dim=D)
+    finally:
+        reset_context()
 
 
 def test_prefill_helpers_direct_call_matches_paged_attention() -> None:

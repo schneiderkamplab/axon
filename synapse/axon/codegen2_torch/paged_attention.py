@@ -40,6 +40,7 @@ from torch.nn import functional as F
 from .serving_context import get_context
 
 __all__ = [
+    "PagedAttention",
     "paged_attention",
     "store_kvcache_paged",
     "varlen_paged_sdpa",
@@ -111,16 +112,23 @@ def varlen_paged_sdpa(
     """Varlen prefill attention over the pool.
 
     ``q`` is the packed batch ``[N, num_heads, head_dim]``. Keys/values are
-    gathered from the pool per sequence:
+    gathered from the pool per sequence through ``block_tables``: each
+    sequence's blocks are gathered and concatenated in position order, then
+    trimmed to its ``cu_seqlens_k`` span.
 
-    - with ``block_tables`` (paged addressing): each sequence's blocks are
-      gathered and concatenated in position order,
-    - without ``block_tables`` (contiguous addressing): the cache rows
-      ``[0, key_len)`` hold every sequence's history back-to-back — the
-      gather is the cache's own layout (prefix cache disabled).
+    There is no contiguous fallback: the pool is block-addressed everywhere
+    (``store_kvcache_paged`` writes through slot mappings into per-sequence
+    blocks), so attention must gather history through the same tables — a
+    missing table is a contract violation, not a mode.
 
     Returns the merged output ``[N, num_heads * head_dim]``.
     """
+    if block_tables is None:
+        raise ValueError(
+            "varlen_paged_sdpa requires block_tables: the pool is "
+            "block-addressed (store_kvcache_paged writes per-sequence "
+            "blocks), so history must be gathered through the same tables"
+        )
     device = q.device
     dtype = q.dtype
     assert cu_seqlens_q is not None and cu_seqlens_k is not None
@@ -131,26 +139,22 @@ def varlen_paged_sdpa(
     total_k = int(cu_k[-1].item())
 
     # Gather keys/values in position order across the packed batch.
-    if block_tables is not None:
-        tables = block_tables.to(device=device, dtype=torch.long)
-        pieces_k: list[torch.Tensor] = []
-        pieces_v: list[torch.Tensor] = []
-        for seq in range(num_seqs):
-            start, end = int(cu_k[seq].item()), int(cu_k[seq + 1].item())
-            if end == start:
-                continue
-            needed = (end - start + k_cache.shape[1] - 1) // k_cache.shape[1]
-            table = tables[seq, :needed].clamp_min(0)
-            k_seq, v_seq = _gather_kv_via_block_tables(
-                k_cache, v_cache, table.unsqueeze(0)
-            )
-            pieces_k.append(k_seq[0][: end - start])
-            pieces_v.append(v_seq[0][: end - start])
-        keys = torch.cat(pieces_k, dim=0) if pieces_k else k_cache.new_zeros(0, num_kv_heads, head_dim)
-        values = torch.cat(pieces_v, dim=0) if pieces_v else v_cache.new_zeros(0, num_kv_heads, head_dim)
-    else:
-        keys = k_cache.reshape(-1, num_kv_heads, head_dim)[:total_k]
-        values = v_cache.reshape(-1, num_kv_heads, head_dim)[:total_k]
+    tables = block_tables.to(device=device, dtype=torch.long)
+    pieces_k: list[torch.Tensor] = []
+    pieces_v: list[torch.Tensor] = []
+    for seq in range(num_seqs):
+        start, end = int(cu_k[seq].item()), int(cu_k[seq + 1].item())
+        if end == start:
+            continue
+        needed = (end - start + k_cache.shape[1] - 1) // k_cache.shape[1]
+        table = tables[seq, :needed].clamp_min(0)
+        k_seq, v_seq = _gather_kv_via_block_tables(
+            k_cache, v_cache, table.unsqueeze(0)
+        )
+        pieces_k.append(k_seq[0][: end - start])
+        pieces_v.append(v_seq[0][: end - start])
+    keys = torch.cat(pieces_k, dim=0) if pieces_k else k_cache.new_zeros(0, num_kv_heads, head_dim)
+    values = torch.cat(pieces_v, dim=0) if pieces_v else v_cache.new_zeros(0, num_kv_heads, head_dim)
 
     keys = keys.transpose(0, 1).unsqueeze(0)  # [1, H_kv, total_k, D]
     values = values.transpose(0, 1).unsqueeze(0)
@@ -168,10 +172,6 @@ def varlen_paged_sdpa(
     q_span = cu_q[1:] - cu_q[:-1]
     k_span = cu_k[1:] - cu_k[:-1]
     cached = (k_span - q_span).clamp_min(0)[q_seq]
-    if block_tables is None:
-        # Contiguous addressing carries no per-sequence prefix in one batch
-        # (the runner sets block tables whenever cached tokens exist).
-        assert bool((cached == 0).all()), "contiguous addressing cannot express cached prefixes"
     q_pos = q_local + cached
     same_seq = q_seq.unsqueeze(1) == k_seq.unsqueeze(0)
     causal = q_pos.unsqueeze(1) >= k_local.unsqueeze(0)
@@ -209,30 +209,29 @@ def decode_paged_sdpa(
     """Decode attention over the pool.
 
     ``q`` is ``[B, num_heads, head_dim]`` (one row per sequence). Keys/values
-    are gathered through ``block_tables`` ``[B, max_blocks]`` (paged) or read
-    from the contiguous cache prefix ``[0, context_len)`` per row. Keys at or
-    beyond each row's ``context_len`` are masked out.
+    are gathered through ``block_tables`` ``[B, max_blocks]``; keys at or
+    beyond each row's ``context_len`` are masked out. There is no contiguous
+    fallback: the pool is block-addressed (store and read must agree on one
+    scheme), so a missing table is a contract violation, not a mode.
 
     Returns the merged output ``[B, num_heads * head_dim]``.
     """
     device = q.device
     dtype = q.dtype
     assert context_lens is not None
+    if block_tables is None:
+        raise ValueError(
+            "decode_paged_sdpa requires block_tables: the pool is "
+            "block-addressed (store_kvcache_paged writes per-sequence "
+            "blocks), so history must be gathered through the same tables"
+        )
     lens = context_lens.to(device=device, dtype=torch.long)
     batch = q.shape[0]
     max_len = int(lens.max().item()) if lens.numel() else 0
 
-    if block_tables is not None:
-        keys, values = _gather_kv_via_block_tables(
-            k_cache, v_cache, block_tables.to(device=device, dtype=torch.long)
-        )  # [B, positions, H_kv, D]
-    else:
-        keys = k_cache.reshape(-1, num_kv_heads, head_dim)[:max_len].unsqueeze(0).expand(
-            batch, -1, -1, -1
-        )
-        values = v_cache.reshape(-1, num_kv_heads, head_dim)[:max_len].unsqueeze(0).expand(
-            batch, -1, -1, -1
-        )
+    keys, values = _gather_kv_via_block_tables(
+        k_cache, v_cache, block_tables.to(device=device, dtype=torch.long)
+    )  # [B, positions, H_kv, D]
 
     keys = keys[:, :max_len].transpose(1, 2)  # [B, H_kv, max_len, D]
     values = values[:, :max_len].transpose(1, 2)
@@ -278,8 +277,9 @@ def paged_attention(
     head_dim]`` / ``[N, H_kv, head_dim]``); the result is merged
     ``[N, num_heads * head_dim]``.
 
-    With ``block_tables`` in the context this is paged addressing; without it
-    the cache is addressed by absolute position (contiguous artifacts).
+    With ``block_tables`` in the context this is paged addressing; the tables
+    are required — the pool is block-addressed on both the store and the read
+    side, so a missing table is a contract violation, not a mode.
     """
     if context is None:
         context = get_context()
@@ -309,3 +309,81 @@ def paged_attention(
         context_lens=context.context_lens,
         block_tables=context.block_tables,
     )
+
+
+class PagedAttention(torch.nn.Module):
+    """Generated-artifact wrapper around :func:`paged_attention`.
+
+    The serving-profile emitter lowers the ``__torch_paged_attention``
+    intrinsic to one instance per attention site.  The engine binds the
+    ``k_cache``/``v_cache`` attributes to this layer stack's pool views
+    (``[num_layers, num_blocks, block_size, num_kv_heads, head_dim]``);
+    each call slices ``layer_idx`` out of the stack, stores this step's
+    K/V rows at ``get_context().slot_mapping`` and attends over the pool.
+
+    Operands are the head-split batched tensors the graph carries:
+    ``q`` ``[B, num_heads, S, head_dim]``, ``k``/``v`` ``[B, num_kv_heads,
+    S, head_dim]`` (the fresh, un-expanded values).  The result matches the
+    plain attention call it replaces: ``[B, num_heads, S, head_dim]``.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        scale: float | None = None,
+    ) -> None:
+        super().__init__()
+        if num_heads % num_kv_heads != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+            )
+        self.num_heads = int(num_heads)
+        self.num_kv_heads = int(num_kv_heads)
+        self.head_dim = int(head_dim)
+        self.scale = scale
+        # Engine-owned pool views; None until the runner binds them.
+        self.k_cache: torch.Tensor | None = None
+        self.v_cache: torch.Tensor | None = None
+
+    def _layer_slice(self, cache: torch.Tensor, layer_idx: int) -> torch.Tensor:
+        if cache.dim() >= 5:
+            return cache[layer_idx]
+        return cache
+
+    def extra_repr(self) -> str:
+        return f"num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, head_dim={self.head_dim}"
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_idx: torch.Tensor | int,
+    ) -> torch.Tensor:
+        if self.k_cache is None or self.v_cache is None:
+            raise RuntimeError(
+                "PagedAttention caches are not bound; the engine must set k_cache/v_cache"
+            )
+        batch, num_heads, seq_len, head_dim = q.shape
+        layer = int(layer_idx.item()) if isinstance(layer_idx, torch.Tensor) else int(layer_idx)
+        k_cache = self._layer_slice(self.k_cache, layer)
+        v_cache = self._layer_slice(self.v_cache, layer)
+        # [B, H, S, D] -> [B*S, H, D] rows in the packed batch order.
+        q_rows = q.transpose(1, 2).reshape(batch * seq_len, num_heads, head_dim)
+        k_rows = key.transpose(1, 2).reshape(batch * seq_len, self.num_kv_heads, self.head_dim)
+        v_rows = value.transpose(1, 2).reshape(batch * seq_len, self.num_kv_heads, self.head_dim)
+        out = paged_attention(
+            q_rows,
+            k_rows,
+            v_rows,
+            k_cache,
+            v_cache,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            scale=self.scale,
+        )
+        # [B*S, H*D] merged -> [B, H, S, D] (inverse of merge_heads' permute).
+        return out.reshape(batch, seq_len, num_heads, head_dim).transpose(1, 2)

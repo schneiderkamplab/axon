@@ -185,16 +185,32 @@ def load_torch_model(
     optimize_graph: bool = True,
     optimize_ast: bool = True,
     emit_profile: str = "inference",
+    backend_intrinsics: str | None = None,
     device: str = "cpu",
 ) -> Any:
     """Compile a materialized ``.axon`` file and instantiate the torch model.
 
     Mirrors ``load_mlx_model`` with the torch emitter and torch weight
     loading; ``device`` places the model (CPU is the agnosticism proof path).
+
+    ``emit_profile="serving"`` produces the fleet-runner artifact (paged
+    attention, no decode loop) and is paired with the ``__torch_paged_attention``
+    intrinsic: the profile is never applied without the explicit kernel
+    opt-in, and the intrinsic is never enabled outside the serving profile
+    (no silent fallbacks in either direction).
     """
     if emit_profile not in _VALID_EMIT_PROFILES:
         raise ValueError(
             f"emit_profile must be one of {sorted(_VALID_EMIT_PROFILES)}, got {emit_profile!r}"
+        )
+    enabled = _torch_backend_intrinsics_enabled(backend_intrinsics)
+    serving_paged = "__torch_paged_attention" in enabled
+    if serving_paged != (emit_profile == "serving"):
+        raise ValueError(
+            "the __torch_paged_attention intrinsic and emit_profile='serving' are a "
+            f"paired opt-in: intrinsic enabled={serving_paged}, emit_profile={emit_profile!r}. "
+            "The paged kernel is never injected implicitly, and the serving profile is "
+            "never emitted without it."
         )
     path = Path(axon_path).resolve()
     if not path.exists():
@@ -205,9 +221,7 @@ def load_torch_model(
         checkpoint_dir=checkpoint_dir,
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
-        # No intrinsics on the default torch path: torch has no opted-in
-        # backend intrinsics yet; the plain graph lowering is the contract.
-        backend_intrinsics=None,
+        backend_intrinsics=backend_intrinsics,
     )
 
     from synapse.axon.codegen2_torch import emit_model_code_from_graph_ir as emit_torch
@@ -217,9 +231,8 @@ def load_torch_model(
         graph_program,
         class_name=class_name,
         model_config=model_config,
-        # codegen2-torch does not take emit profiles yet (the serving-profile
-        # artifact shape is 2b work); its `profile` arg is the optional
-        # timing-profiler flag and must stay False.
+        emit_profile=emit_profile,
+        # `profile` is the optional timing-profiler flag and must stay False.
         profile=False,
     )
     model_cls = _exec_generated_class(code, class_name)
@@ -228,6 +241,21 @@ def load_torch_model(
     shards = resolve_safetensors_paths(checkpoint)
     state_dict = _load_torch_state_dict(shards, device="cpu", dtype=dtype)
     return model_cls.from_state_dict(state_dict).to(device).eval()
+
+
+def _torch_backend_intrinsics_enabled(spec: str | None) -> frozenset[str]:
+    """The torch intrinsics a loader-level spec enables (empty when none)."""
+    if spec is None:
+        return frozenset()
+    from synapse.axon.graph_ir.optimize import _parse_backend_intrinsics
+
+    target, enabled = _parse_backend_intrinsics(spec)
+    if target is None or target != "codegen2-torch":
+        raise ValueError(
+            f"unsupported torch backend intrinsics target in {spec!r}; expected "
+            "'codegen2-torch:intrinsic[,intrinsic...]'"
+        )
+    return enabled
 
 
 def _load_torch_state_dict(paths: list[Path], *, device: str, dtype: str) -> dict[str, Any]:

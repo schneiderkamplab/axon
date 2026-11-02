@@ -111,6 +111,7 @@ _TORCH_BACKEND_INTRINSICS = frozenset(
     {
         "__torch_expert_packed_swiglu_ffn",
         "__torch_expert_swiglu_ffn",
+        "__torch_paged_attention",
         "__torch_rope_apply_factors",
         "__torch_rope_pair_apply_factors",
         "__torch_rmsnorm_scaled",
@@ -240,6 +241,21 @@ def _normalize_backend_intrinsic_name(name: str, *, target: str) -> str:
     return token
 
 
+_OPT_IN_ONLY_BACKEND_INTRINSICS = frozenset({"__torch_paged_attention"})
+
+
+def _default_backend_intrinsics(target: str) -> frozenset[str]:
+    """The intrinsics a bare ``target:*`` opt-in grants.
+
+    Opt-in-only intrinsics are excluded: they change the artifact contract
+    (``__torch_paged_attention`` replaces attention with the paged runtime
+    and requires the serving profile), so they are granted only when named
+    explicitly, never bundled into an "all fast-paths" selection.
+    """
+    intrinsics = _BACKEND_INTRINSICS_BY_TARGET[target]
+    return frozenset(intrinsics - _OPT_IN_ONLY_BACKEND_INTRINSICS)
+
+
 def _parse_backend_intrinsics(value: str | None) -> tuple[str | None, frozenset[str]]:
     if value is None:
         return None, frozenset()
@@ -256,10 +272,10 @@ def _parse_backend_intrinsics(value: str | None) -> tuple[str | None, frozenset[
         )
     allowed_intrinsics = _BACKEND_INTRINSICS_BY_TARGET[target]
     if not sep or selector_text.strip() in {"", "*", "all"}:
-        return target, allowed_intrinsics
+        return target, _default_backend_intrinsics(target)
     selected = {_normalize_backend_intrinsic_name(item, target=target) for item in selector_text.split(",")}
     if "*" in selected or "all" in selected:
-        return target, allowed_intrinsics
+        return target, _default_backend_intrinsics(target)
     return target, frozenset(selected)
 
 
@@ -6175,6 +6191,171 @@ def _eliminate_gqa_repeat_for_sdpa(graph: GraphProgram) -> GraphProgram:
                     and len(n.outputs) >= 1
                 )
             ]
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+_PAGED_ATTENTION_CACHE_UPDATE_OPS = ("Cache.update",)
+
+
+def _is_torch_paged_cache_update_call(node: GraphNode) -> bool:
+    """Structurally recognize the static KV-cache update builtin call.
+
+    The paged lowering stores the *fresh* K/V (the update call's operands),
+    not the stored concatenation the attention consumes.  The builtin is
+    part of the supported builtins surface (like the SDPA callee names the
+    backend SDPA rewrites match), and the full attention-site pattern it
+    must appear in makes the recognition unambiguous.
+    """
+    return any(
+        node.op.name == name or node.op.name.startswith(f"{name}__")
+        for name in _PAGED_ATTENTION_CACHE_UPDATE_OPS
+    )
+
+
+def _torch_paged_repeat_source_operand(node: GraphNode) -> GraphOperand | None:
+    """Source operand of a KV-head repeat (primitive or Tensor.repeat call)."""
+    if node.op.name in {"_repeat", "Tensor.repeat"} and len(node.inputs) >= 2:
+        return node.inputs[0]
+    return None
+
+
+def _trace_fresh_kv_for_paged_attention(
+    k_operand: GraphOperand,
+    v_operand: GraphOperand,
+    *,
+    nodes_by_output: Mapping[str, GraphNode],
+) -> tuple[GraphNode, GraphOperand, GraphOperand] | None:
+    """Trace attention K/V back to the fresh (pre-store) cache-update operands.
+
+    The attention consumes the stored concatenation expanded to the query
+    head count; the paged primitive wants the un-expanded fresh K/V the
+    cache update stores.  Both operands must trace to the *same* update
+    call (through an optional GQA head-axis repeat).
+    """
+
+    def producer(operand: GraphOperand) -> GraphNode | None:
+        if not isinstance(operand, GraphValueRef):
+            return None
+        return nodes_by_output.get(operand.name)
+
+    def through_repeat(node: GraphNode | None) -> GraphNode | None:
+        if node is None or _is_torch_paged_cache_update_call(node):
+            return node
+        source = _torch_paged_repeat_source_operand(node)
+        if source is None:
+            return None
+        return producer(source)
+
+    k_node = through_repeat(producer(k_operand))
+    v_node = through_repeat(producer(v_operand))
+    if k_node is None or v_node is None or k_node is not v_node:
+        return None
+    if not _is_torch_paged_cache_update_call(k_node) or len(k_node.inputs) < 3 or len(k_node.outputs) < 3:
+        return None
+    return k_node, k_node.inputs[1], k_node.inputs[2]
+
+
+def _maybe_rewrite_node_to_torch_paged_attention(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+    nodes_by_output: Mapping[str, GraphNode],
+) -> GraphNode | None:
+    """Rewrite one cache-threaded attention site to the paged primitive.
+
+    Opt-in intrinsic ``__torch_paged_attention``: sites whose SDPA provenance
+    is backed by the static KV-cache update lower to a primitive carrying the
+    fresh K/V; the engine-owned pool replaces the threaded cache values.  A
+    detected attention site that cannot be traced to the cache update is an
+    error under this intrinsic — the paged profile requires every attention
+    site to be cache-threaded (no silent fallback).
+    """
+    if len(node.outputs) != 1 or node.attrs or node.op.name not in modules_by_name:
+        return None
+    callee = modules_by_name[node.op.name]
+    if len(node.inputs) > len(callee.inputs):
+        return None
+    output_facts = tuple(
+        graph_provenance_facts(item)
+        for item in provenance.module_summary_provenance.get(callee.name, ())
+    )
+    if not output_facts:
+        return None
+    sdpa_facts = [
+        fact.value
+        for fact in output_facts[0]
+        if fact.kind == "sdpa_gqa" and isinstance(fact.value, GraphSdpaGqaFact)
+    ]
+    if not sdpa_facts:
+        return None
+    formal_to_actual = {
+        formal.name: actual
+        for formal, actual in zip(callee.inputs, node.inputs, strict=False)
+    }
+    for fact in sdpa_facts:
+        try:
+            q = formal_to_actual[fact.q]
+            k = formal_to_actual[fact.k]
+            v = formal_to_actual[fact.v]
+        except KeyError:
+            continue
+        if not fact.default_scale or fact.scale is not None:
+            raise ValueError(
+                f"__torch_paged_attention requires the default attention scale; "
+                f"module {module.name!r} site {node.id!r} uses a custom scale"
+            )
+        traced = _trace_fresh_kv_for_paged_attention(k, v, nodes_by_output=nodes_by_output)
+        if traced is None:
+            raise ValueError(
+                f"__torch_paged_attention could not trace K/V of module {module.name!r} "
+                f"site {node.id!r} to a cache update; the paged profile requires "
+                "every attention site to be backed by the static KV cache"
+            )
+        _update_node, fresh_k, fresh_v = traced
+        return replace(
+            node,
+            op=GraphOp("__torch_paged_attention"),
+            inputs=(q, fresh_k, fresh_v),
+            attrs={},
+        )
+    return None
+
+
+def _check_conflicting_torch_intrinsics(enabled_intrinsics: frozenset[str]) -> None:
+    """Reject intrinsic combinations that cannot compose (no silent precedence)."""
+    if "__torch_paged_attention" in enabled_intrinsics and "__torch_sdpa" in enabled_intrinsics:
+        raise ValueError(
+            "conflicting backend intrinsics: __torch_paged_attention replaces the "
+            "attention site with the paged runtime and cannot compose with __torch_sdpa"
+        )
+
+
+def _rewrite_torch_paged_attention_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        nodes_by_output = {
+            output.name: node for node in module.nodes for output in node.outputs
+        }
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = _maybe_rewrite_node_to_torch_paged_attention(
+                node,
+                module=module,
+                modules_by_name=modules_by_name,
+                provenance=provenance,
+                nodes_by_output=nodes_by_output,
+            )
+            if rewritten is None:
+                new_nodes.append(node)
+            else:
+                changed = True
+                new_nodes.append(rewritten)
         new_modules.append(replace(module, nodes=tuple(new_nodes)))
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
@@ -15391,6 +15572,17 @@ def optimize_graph_program(
                 current = candidate
         backend_start = time.perf_counter() if debug_timings else 0.0
         if backend_intrinsic_target == "codegen2-torch":
+            _check_conflicting_torch_intrinsics(enabled_backend_intrinsics)
+            candidate = (
+                _rewrite_torch_paged_attention_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_paged_attention")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_paged_attention_intrinsics")
+                current = candidate
             candidate = (
                 _rewrite_torch_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
                 if (
