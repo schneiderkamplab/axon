@@ -30,6 +30,10 @@ class Context:
     slot_mapping: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
     block_tables: torch.Tensor | None = None
+    # Per-sequence PrefixLM boundary (absolute prompt-token count) for
+    # non-causal prefill artifacts; the paged kernel builds the two-region
+    # mask from it. None for causal models.
+    prefix_lens: torch.Tensor | None = None
 
 
 _CONTEXT = Context()
@@ -48,6 +52,7 @@ def set_context(  # noqa: ANN001 - mirroring the upstream call signature
     slot_mapping=None,
     context_lens=None,
     block_tables=None,
+    prefix_lens=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -59,6 +64,7 @@ def set_context(  # noqa: ANN001 - mirroring the upstream call signature
         slot_mapping,
         context_lens,
         block_tables,
+        prefix_lens,
     )
 
 

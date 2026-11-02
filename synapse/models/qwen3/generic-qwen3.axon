@@ -84,7 +84,7 @@ qwen3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
   key_len <- mask_length_for_input input_ids attn_mask past_length
-  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
   work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
   read_kv <- Cache.read past_kv work_kv
   x, new_kv <- scope@model do

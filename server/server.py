@@ -1,8 +1,13 @@
-"""Minimal OpenAI-compatible HTTP server over the ``Session`` engine.
+"""Minimal OpenAI-compatible HTTP server over either engine.
 
-Deliberately thin: the substance lives in ``Session`` (decode loop, cache,
-sampling). This module only speaks HTTP/SSE and caps concurrency. Uses only
-the standard library so serving adds zero dependencies.
+Deliberately thin: the substance lives in the engines. ``--engine session``
+runs the per-request Session shim (one decode loop per request, serialized
+through the concurrency cap); ``--engine fleet`` runs the continuous-batching
+``FleetSession`` (one shared engine step carries every scheduled sequence).
+Both speak the same per-request streaming contract
+(``generate(prompt, params, stats) -> Iterator[str]``), so this module only
+speaks HTTP/SSE and caps concurrency. Uses only the standard library so
+serving adds zero dependencies.
 
 Endpoints:
 - ``GET  /health``               liveness
@@ -10,10 +15,10 @@ Endpoints:
 - ``POST /v1/completions``       text completion (``stream`` supported, SSE)
 - ``POST /v1/chat/completions``  chat completion (``stream`` supported, SSE)
 
-Dynamic batching: v1 interleaves concurrent requests through a bounded
-semaphore (each request streams its own decode over shared weights). True
-cross-request batched decode is deferred until the cache contract supports
-batched per-sequence caches; the scheduler seam lives behind ``Session``.
+Dynamic batching: session mode interleaves concurrent requests through a
+bounded semaphore (each request streams its own decode over shared weights);
+fleet mode batches them inside the engine — the semaphore only bounds HTTP
+worker threads, not engine batching.
 """
 
 from __future__ import annotations
@@ -25,14 +30,21 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from .engine import GenerateParams, Session
+
+if TYPE_CHECKING:
+    from .fleet.session import FleetSession
+
+    _AnySession = Session | FleetSession
+else:  # the handlers treat both engines uniformly (duck-typed contract)
+    _AnySession = Any
 
 __all__ = ["serve", "main"]
 
 
-def _render_chat(session: Session, messages: list[dict[str, Any]]) -> str:
+def _render_chat(session: _AnySession, messages: list[dict[str, Any]]) -> str:
     """Apply the checkpoint's chat template when available, else a naive join."""
     tokenizer = session.tokenizer
     if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
@@ -63,9 +75,9 @@ def _params_from_body(body: dict[str, Any]) -> GenerateParams:
 
 
 class _ServeState:
-    """Shared server state: one Session, a concurrency cap, request bookkeeping."""
+    """Shared server state: one engine, a concurrency cap, request bookkeeping."""
 
-    def __init__(self, session: Session, model_name: str, max_concurrency: int) -> None:
+    def __init__(self, session: _AnySession, model_name: str, max_concurrency: int) -> None:
         self.session = session
         self.model_name = model_name
         self.slots = threading.BoundedSemaphore(max_concurrency)
@@ -256,30 +268,82 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"error": {"message": message, "code": status}}, status=status)
 
 
+def _fleet_session(
+    axon_path: Path,
+    *,
+    checkpoint_dir: Path | str | None,
+    dtype: str | None,
+) -> "FleetSession":
+    """Build the continuous-batching engine over a serving-profile artifact."""
+    from .engine import Session as _Session
+    from .fleet.session import FleetSession
+    from .loading import (
+        TORCH_PAGED_INTRINSICS,
+        default_checkpoint_dir,
+        load_model_config,
+        load_torch_model,
+    )
+
+    path = Path(axon_path)
+    checkpoint = (
+        Path(checkpoint_dir).resolve() if checkpoint_dir else default_checkpoint_dir(path)
+    )
+    model = load_torch_model(
+        path,
+        checkpoint_dir=checkpoint,
+        dtype=dtype or "float32",
+        emit_profile="serving",
+        backend_intrinsics=TORCH_PAGED_INTRINSICS,
+    )
+    model_config = load_model_config(checkpoint)
+    # Same tokenizer path as the Session shim (one loader, one contract).
+    tokenizer = _Session._load_tokenizer(None, checkpoint, path)
+    return FleetSession(model, model_config=model_config, tokenizer=tokenizer)
+
+
 def serve(
     axon_path: Path | str,
     *,
+    engine: str = "session",
     checkpoint_dir: Path | str | None = None,
     host: str = "127.0.0.1",
     port: int = 8000,
     max_concurrency: int = 2,
-    dtype: str = "float16",
+    dtype: str | None = None,
     warm_compile: bool = True,
 ) -> None:
-    """Load the model and block serving requests (Ctrl+C to stop)."""
-    session = Session.from_axon(
-        axon_path,
-        checkpoint_dir=checkpoint_dir,
-        dtype=dtype,
-        emit_profile="inference",
-        warm_compile=warm_compile,
-    )
+    """Load the model and block serving requests (Ctrl+C to stop).
+
+    ``engine="session"`` builds the per-request Session shim; ``engine="fleet"``
+    builds the continuous-batching FleetSession over the paged serving
+    artifact. ``dtype`` resolution is per engine: MLX session float16, torch
+    paths float32 (CPU-safe) unless given explicitly.
+    """
+    if engine == "fleet":
+        session: _AnySession = _fleet_session(
+            Path(axon_path), checkpoint_dir=checkpoint_dir, dtype=dtype
+        )
+    elif engine == "session":
+        session = Session.from_axon(
+            axon_path,
+            checkpoint_dir=checkpoint_dir,
+            dtype=dtype,
+            emit_profile="inference",
+            warm_compile=warm_compile,
+        )
+    else:
+        raise ValueError(
+            f"unknown engine {engine!r}: expected 'session' or 'fleet'"
+        )
     model_name = Path(axon_path).stem
     state = _ServeState(session, model_name, max_concurrency=max(1, int(max_concurrency)))
 
     handler = type("_BoundHandler", (_Handler,), {"state": state})
     httpd = ThreadingHTTPServer((host, port), handler)
-    print(f"axon-serve: {model_name} on http://{host}:{port} (max_concurrency={max_concurrency})")
+    print(
+        f"axon-serve: {model_name} on http://{host}:{port} "
+        f"(engine={engine}, max_concurrency={max_concurrency})"
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -291,15 +355,22 @@ def serve(
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m server")
     parser.add_argument("--axon", required=True, help="Path to a materialized .axon model file")
+    parser.add_argument(
+        "--engine",
+        choices=("session", "fleet"),
+        default="session",
+        help="session: per-request decode shim; fleet: continuous batching over the paged artifact",
+    )
     parser.add_argument("--checkpoint", default=None, help="HF checkpoint dir (default: models/<family>)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-concurrency", type=int, default=2)
-    parser.add_argument("--dtype", default="float16")
+    parser.add_argument("--dtype", default=None, help="float16 on MLX, float32 on torch by default")
     parser.add_argument("--no-warm-compile", action="store_true")
     args = parser.parse_args(argv)
     serve(
         args.axon,
+        engine=args.engine,
         checkpoint_dir=args.checkpoint,
         host=args.host,
         port=args.port,

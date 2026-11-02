@@ -108,6 +108,8 @@ def varlen_paged_sdpa(
     cu_seqlens_q: torch.Tensor | None = None,
     cu_seqlens_k: torch.Tensor | None = None,
     block_tables: torch.Tensor | None = None,
+    causal: bool = True,
+    prefix_lens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Varlen prefill attention over the pool.
 
@@ -121,6 +123,16 @@ def varlen_paged_sdpa(
     blocks), so attention must gather history through the same tables — a
     missing table is a contract violation, not a mode.
 
+    Masking: with ``causal=True`` (the default, and the only mode causal
+    models compile to) queries attend to keys at or before their absolute
+    position. With ``causal=False`` (PrefixLM artifacts) each sequence
+    carries a prefix boundary ``p`` through ``prefix_lens`` and the mask is
+    the two-region form ``keep(r, c) = (r < p and c < p) or (r >= p and
+    c <= r)``: prompt rows attend bidirectionally within the prompt region,
+    response rows causally. ``p`` spanning the whole sequence (fresh prefill)
+    degenerates to pure bidirectional attention. ``prefix_lens`` is required
+    when ``causal=False`` — there is no implicit boundary.
+
     Returns the merged output ``[N, num_heads * head_dim]``.
     """
     if block_tables is None:
@@ -128,6 +140,11 @@ def varlen_paged_sdpa(
             "varlen_paged_sdpa requires block_tables: the pool is "
             "block-addressed (store_kvcache_paged writes per-sequence "
             "blocks), so history must be gathered through the same tables"
+        )
+    if not causal and prefix_lens is None:
+        raise ValueError(
+            "varlen_paged_sdpa with causal=False (PrefixLM) requires "
+            "prefix_lens: the two-region mask has no implicit boundary"
         )
     device = q.device
     dtype = q.dtype
@@ -160,9 +177,10 @@ def varlen_paged_sdpa(
     values = values.transpose(0, 1).unsqueeze(0)
     queries = q.transpose(0, 1).unsqueeze(0)  # [1, H, N, D]
 
-    # Block-diagonal causal mask over the packed batch. Queries sit at
-    # absolute positions `cached + local` within their sequence's key span
-    # (cached > 0 with prefix cache or chunked prefill).
+    # Mask over the packed batch. Queries sit at absolute positions
+    # `cached + local` within their sequence's key span (cached > 0 with
+    # prefix cache or chunked prefill); keys are indexed by their absolute
+    # position within the same span.
     q_index = torch.arange(n, device=device)
     k_index = torch.arange(total_k, device=device)
     q_seq = torch.searchsorted(cu_q[1:], q_index, right=True)
@@ -174,9 +192,17 @@ def varlen_paged_sdpa(
     cached = (k_span - q_span).clamp_min(0)[q_seq]
     q_pos = q_local + cached
     same_seq = q_seq.unsqueeze(1) == k_seq.unsqueeze(0)
-    causal = q_pos.unsqueeze(1) >= k_local.unsqueeze(0)
+    if causal:
+        keep = q_pos.unsqueeze(1) >= k_local.unsqueeze(0)
+    else:
+        boundary = prefix_lens.to(device=device, dtype=torch.long)[q_seq]
+        q_row = q_pos.unsqueeze(1)
+        k_col = k_local.unsqueeze(0)
+        prefix_region = (q_row < boundary.unsqueeze(1)) & (k_col < boundary.unsqueeze(1))
+        response_region = (q_row >= boundary.unsqueeze(1)) & (k_col <= q_row)
+        keep = prefix_region | response_region
     mask = torch.where(
-        same_seq & causal,
+        same_seq & keep,
         torch.zeros((), device=device, dtype=dtype),
         torch.full((), _NEG_INF, device=device, dtype=dtype),
     )
@@ -268,6 +294,7 @@ def paged_attention(
     head_dim: int,
     scale: float | None = None,
     context: Any | None = None,
+    causal: bool = True,
 ) -> torch.Tensor:
     """One attention step against the engine-owned pool.
 
@@ -275,7 +302,8 @@ def paged_attention(
     ambient context: varlen prefill over the packed batch, or one-row decode
     per sequence. ``q``/``key``/``value`` are head-split tensors (``[N, H,
     head_dim]`` / ``[N, H_kv, head_dim]``); the result is merged
-    ``[N, num_heads * head_dim]``.
+    ``[N, num_heads * head_dim]``. ``causal`` selects the prefill masking
+    mode (see :func:`varlen_paged_sdpa`); decode is mask-free either way.
 
     With ``block_tables`` in the context this is paged addressing; the tables
     are required — the pool is block-addressed on both the store and the read
@@ -297,6 +325,8 @@ def paged_attention(
             cu_seqlens_q=context.cu_seqlens_q,
             cu_seqlens_k=context.cu_seqlens_k,
             block_tables=context.block_tables,
+            causal=causal,
+            prefix_lens=context.prefix_lens,
         )
     return decode_paged_sdpa(
         q,
@@ -333,6 +363,7 @@ class PagedAttention(torch.nn.Module):
         num_kv_heads: int,
         head_dim: int,
         scale: float | None = None,
+        causal: bool = True,
     ) -> None:
         super().__init__()
         if num_heads % num_kv_heads != 0:
@@ -343,6 +374,10 @@ class PagedAttention(torch.nn.Module):
         self.num_kv_heads = int(num_kv_heads)
         self.head_dim = int(head_dim)
         self.scale = scale
+        # Prefill masking mode, baked at codegen from the model's masking
+        # builtin (causal_mask_for_input vs bidirectional_mask_for_input);
+        # never inferred at runtime.
+        self.causal = bool(causal)
         # Engine-owned pool views; None until the runner binds them.
         self.k_cache: torch.Tensor | None = None
         self.v_cache: torch.Tensor | None = None
@@ -353,7 +388,10 @@ class PagedAttention(torch.nn.Module):
         return cache
 
     def extra_repr(self) -> str:
-        return f"num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, head_dim={self.head_dim}"
+        return (
+            f"num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, "
+            f"head_dim={self.head_dim}, causal={self.causal}"
+        )
 
     def forward(
         self,
@@ -384,6 +422,7 @@ class PagedAttention(torch.nn.Module):
             num_kv_heads=self.num_kv_heads,
             head_dim=self.head_dim,
             scale=self.scale,
+            causal=self.causal,
         )
         # [B*S, H*D] merged -> [B, H, S, D] (inverse of merge_heads' permute).
         return out.reshape(batch, seq_len, num_heads, head_dim).transpose(1, 2)

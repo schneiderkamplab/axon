@@ -141,8 +141,17 @@ class ModelRunner:
         cu_seqlens_q = self._to_device(cu_seqlens_q, torch.int32)
         cu_seqlens_k = self._to_device(cu_seqlens_k, torch.int32)
         slot_mapping = self._to_device(slot_mapping, torch.int32)
+        # PrefixLM artifacts carry the per-sequence prompt boundary so the
+        # paged kernel builds the two-region mask (prompt rows bidirectional,
+        # generated rows causal). Positions are absolute, and a preemption
+        # recompute re-prefills prompt+generated with the boundary kept at
+        # num_prompt_tokens.
+        prefix_lens = None
+        if not self.config.prefill_causal:
+            prefix_lens = self._to_device([seq.num_prompt_tokens for seq in seqs], torch.int64)
         set_context(
-            True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables
+            True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None,
+            block_tables, prefix_lens,
         )
         return input_ids, positions, sample_rows
 
@@ -166,9 +175,14 @@ class ModelRunner:
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
 
-    def prepare_sample(self, seqs: list[Sequence]) -> torch.Tensor:
-        temperatures = [seq.temperature for seq in seqs]
-        return self._to_device(temperatures, torch.float32)
+    def prepare_sample(self, seqs: list[Sequence]) -> dict[str, torch.Tensor]:
+        # Sentinel convention (sampler-side): top_k <= 0 and top_p outside
+        # (0, 1) disable the filter, matching the Session sampler's None.
+        return {
+            "temperatures": self._to_device([seq.temperature for seq in seqs], torch.float32),
+            "top_ks": self._to_device([seq.top_k or 0 for seq in seqs], torch.int64),
+            "top_ps": self._to_device([seq.top_p if seq.top_p is not None else 1.0 for seq in seqs], torch.float32),
+        }
 
     # ── forward ─────────────────────────────────────────────────────────────
 
@@ -204,6 +218,6 @@ class ModelRunner:
         if sample_rows is not None:
             logits = logits[sample_rows]  # [B, V]: one row per scheduled seq
         with torch.inference_mode():
-            token_ids = self.sampler(logits, temperatures).tolist()
+            token_ids = self.sampler(logits, **temperatures).tolist()
         reset_context()
         return token_ids

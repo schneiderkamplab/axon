@@ -136,3 +136,96 @@ def test_config_view_maps_model_config_dict() -> None:
     assert config.hf_config.dtype is torch.float16
     with pytest.raises(AttributeError):
         _ = config.hf_config.nonexistent_field
+
+
+def test_abort_drops_running_and_waiting_sequences_and_frees_blocks() -> None:
+    scheduler = Scheduler(make_config(num_blocks=8))
+    a = Sequence(list(range(10)), SamplingParams(temperature=1.0, max_tokens=8))
+    b = Sequence(list(range(10)), SamplingParams(temperature=1.0, max_tokens=8))
+    scheduler.add(a)
+    scheduler.add(b)
+    seqs, is_prefill = scheduler.schedule()
+    assert seqs == [a, b] and is_prefill
+    assert len(scheduler.block_manager.used_block_ids) == 2  # one block per seq
+
+    assert scheduler.abort(a.seq_id) is True
+    assert list(scheduler.running) == [b]
+    assert len(scheduler.block_manager.used_block_ids) == 1  # a's block released
+
+    # Scheduling continues for the survivor only.
+    seqs, is_prefill = scheduler.schedule()
+    assert seqs == [b] and not is_prefill
+    scheduler.postprocess(seqs, [42], is_prefill)
+
+    # A waiting sequence aborts before ever being scheduled.
+    c = Sequence(list(range(5)), SamplingParams(temperature=1.0, max_tokens=2))
+    scheduler.add(c)
+    assert scheduler.abort(c.seq_id) is True
+    assert list(scheduler.waiting) == []
+    assert scheduler.abort(999) is False
+    assert not scheduler.is_finished()  # b is still decoding
+
+
+def _prefixlm_config(num_blocks: int = 16, max_batched: int = 4096) -> Config:
+    return Config(
+        model_config=MODEL_CONFIG,
+        prefill_causal=False,
+        num_kvcache_blocks=num_blocks,
+        max_num_batched_tokens=max_batched,
+    )
+
+
+def test_prefixlm_scheduler_rejects_chunked_prefill() -> None:
+    # A prompt longer than the token budget cannot be split for a non-causal
+    # model: an earlier prompt chunk's KV depends on later prompt tokens that
+    # are not in the cache yet. Fail loudly instead of computing wrong KV.
+    scheduler = Scheduler(_prefixlm_config(max_batched=100))
+    seq = Sequence(list(range(300)), SamplingParams(temperature=1.0, max_tokens=2))
+    scheduler.add(seq)
+    with pytest.raises(ValueError, match="cannot chunk prefill"):
+        scheduler.schedule()
+
+
+def test_prefixlm_scheduler_still_schedules_whole_prompts() -> None:
+    # Whole prompts that fit are scheduled normally (the guard only fires on
+    # actual chunking), and later sequences in the same step defer whole.
+    scheduler = Scheduler(_prefixlm_config(max_batched=100))
+    a = Sequence(list(range(100)), SamplingParams(temperature=1.0, max_tokens=2))
+    b = Sequence(list(range(50)), SamplingParams(temperature=1.0, max_tokens=2))
+    scheduler.add(a)
+    scheduler.add(b)
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [a]
+    assert a.num_scheduled_tokens == 100
+    scheduler.postprocess(seqs, [7], True)
+    assert a.status == SequenceStatus.RUNNING
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [b]
+    assert b.num_scheduled_tokens == 50
+
+
+def test_prefixlm_block_manager_never_shares_prefix_blocks() -> None:
+    # Without prefix caching, two identical prompts allocate independent
+    # blocks: partial-prefix reuse would be invalid (a prompt token's KV
+    # depends on the whole prompt).
+    scheduler = Scheduler(_prefixlm_config(num_blocks=8))
+    shared = list(range(512))
+    a = Sequence(shared + [900, 901], SamplingParams(max_tokens=1))
+    scheduler.add(a)
+    seqs, _ = scheduler.schedule()
+    scheduler.postprocess(seqs, [950], True)
+    assert a.is_finished
+
+    b = Sequence(shared + [800, 801], SamplingParams(max_tokens=1))
+    scheduler.add(b)
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill
+    # No cache hit: the whole prompt is scheduled into fresh blocks.
+    assert b.num_cached_tokens == 0
+    assert b.num_scheduled_tokens == 514
+    assert len(b.block_table) == 3  # 514 tokens, block size 256
+    scheduler.postprocess(seqs, [960], True)
+    assert b.is_finished
+    # Both sequences' blocks return to the free pool exactly once (no shared
+    # refcounts linger from a would-be prefix hit).
+    assert len(scheduler.block_manager.free_block_ids) == 8

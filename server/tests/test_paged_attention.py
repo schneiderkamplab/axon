@@ -323,3 +323,178 @@ def test_prefill_helpers_direct_call_matches_paged_attention() -> None:
     finally:
         reset_context()
     assert torch.allclose(via_wrapper, direct, atol=1e-6)
+
+
+def _ref_prefixlm_seq(q, k, v, prefix_len):
+    """Two-region PrefixLM SDPA for one sequence.
+
+    keep(r, c) = (r < p and c < p) or (r >= p and c <= r): prompt rows attend
+    bidirectionally within the prompt region, response rows causally. p = the
+    full span degenerates to pure bidirectional; p = 0 to plain causal.
+    """
+    length = q.shape[0]
+    qh = q.transpose(0, 1).unsqueeze(0)
+    kh = k.transpose(0, 1).unsqueeze(0)
+    vh = v.transpose(0, 1).unsqueeze(0)
+    q_pos = torch.arange(length).unsqueeze(1)
+    k_pos = torch.arange(k.shape[0]).unsqueeze(0)
+    keep = ((q_pos < prefix_len) & (k_pos < prefix_len)) | (
+        (q_pos >= prefix_len) & (k_pos <= q_pos)
+    )
+    mask = torch.where(keep, 0.0, float("-inf"))
+    out = F.scaled_dot_product_attention(
+        qh, kh, vh, attn_mask=mask.unsqueeze(0).unsqueeze(0),
+        enable_gqa=H != H_KV,
+    )
+    return out.squeeze(0).transpose(0, 1).reshape(length, H * D)
+
+
+def test_prefixlm_full_span_prefill_is_bidirectional() -> None:
+    # Fresh prefill: every row is prompt (p = span) -> pure bidirectional,
+    # i.e. the unmasked SDPA answer.
+    length = 5
+    case = PagedCase([length])
+    gen = torch.Generator().manual_seed(53)
+    q = torch.randn(length, H, D, generator=gen)
+    k = torch.randn(length, H_KV, D, generator=gen)
+    v = torch.randn(length, H_KV, D, generator=gen)
+    set_context(
+        True,
+        cu_seqlens_q=torch.tensor([0, length]),
+        cu_seqlens_k=torch.tensor([0, length]),
+        slot_mapping=torch.tensor(case.slots(0, range(length))),
+        block_tables=torch.tensor(case.pad_tables()),
+        prefix_lens=torch.tensor([length]),
+    )
+    try:
+        out = paged_attention(q, k, v, case.k_cache, case.v_cache,
+                              num_heads=H, num_kv_heads=H_KV, head_dim=D, causal=False)
+    finally:
+        reset_context()
+    expected = _ref_prefixlm_seq(q, k, v, length)
+    assert torch.allclose(out, expected, atol=1e-5), (out - expected).abs().max()
+
+
+def test_prefixlm_recompute_two_region_matches_reference() -> None:
+    # Preemption recompute: prompt (4) + generated (2) re-prefilled with the
+    # boundary kept at num_prompt_tokens. Prompt rows must attend
+    # bidirectionally within the prompt region; generated rows causally.
+    prompt, generated = 4, 2
+    length = prompt + generated
+    case = PagedCase([length])
+    gen = torch.Generator().manual_seed(59)
+    q = torch.randn(length, H, D, generator=gen)
+    k = torch.randn(length, H_KV, D, generator=gen)
+    v = torch.randn(length, H_KV, D, generator=gen)
+    set_context(
+        True,
+        cu_seqlens_q=torch.tensor([0, length]),
+        cu_seqlens_k=torch.tensor([0, length]),
+        slot_mapping=torch.tensor(case.slots(0, range(length))),
+        block_tables=torch.tensor(case.pad_tables()),
+        prefix_lens=torch.tensor([prompt]),
+    )
+    try:
+        out = paged_attention(q, k, v, case.k_cache, case.v_cache,
+                              num_heads=H, num_kv_heads=H_KV, head_dim=D, causal=False)
+    finally:
+        reset_context()
+    expected = _ref_prefixlm_seq(q, k, v, prompt)
+    assert torch.allclose(out, expected, atol=1e-5), (out - expected).abs().max()
+
+
+def test_prefixlm_batched_mixed_boundaries_match_reference() -> None:
+    # One packed prefill batch with different per-sequence boundaries:
+    # seq 0 = prompt 3 + generated 2 (recompute, p=3); seq 1 = pure prompt
+    # (p=2 = full span). Boundaries are per sequence.
+    boundaries = [3, 2]
+    lengths = [5, 2]
+    case = PagedCase(lengths)
+    gen = torch.Generator().manual_seed(61)
+    qs, ks, vs = [], [], []
+    for length in lengths:
+        qs.append(torch.randn(length, H, D, generator=gen))
+        ks.append(torch.randn(length, H_KV, D, generator=gen))
+        vs.append(torch.randn(length, H_KV, D, generator=gen))
+    slot_rows = []
+    for seq, length in enumerate(lengths):
+        slot_rows.extend(case.slots(seq, range(length)))
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    set_context(
+        True,
+        cu_seqlens_q=torch.tensor(cu),
+        cu_seqlens_k=torch.tensor(cu),
+        slot_mapping=torch.tensor(slot_rows),
+        block_tables=torch.tensor(case.pad_tables()),
+        prefix_lens=torch.tensor(boundaries),
+    )
+    try:
+        out = paged_attention(torch.cat(qs), torch.cat(ks), torch.cat(vs),
+                              case.k_cache, case.v_cache,
+                              num_heads=H, num_kv_heads=H_KV, head_dim=D, causal=False)
+    finally:
+        reset_context()
+    expected = torch.cat([
+        _ref_prefixlm_seq(qs[i], ks[i], vs[i], boundaries[i]) for i in range(len(lengths))
+    ])
+    assert torch.allclose(out, expected, atol=1e-5), (out - expected).abs().max()
+
+
+def test_prefixlm_without_prefix_lens_raises_loudly() -> None:
+    # causal=False has no implicit boundary: the two-region mask needs the
+    # per-sequence prompt counts.
+    length = 3
+    case = PagedCase([length])
+    q = torch.randn(length, H, D)
+    set_context(
+        True,
+        cu_seqlens_q=torch.tensor([0, length]),
+        cu_seqlens_k=torch.tensor([0, length]),
+        slot_mapping=torch.tensor(case.slots(0, range(length))),
+        block_tables=torch.tensor(case.pad_tables()),
+    )
+    try:
+        with pytest.raises(ValueError, match="prefix_lens"):
+            paged_attention(q, torch.randn(length, H_KV, D), torch.randn(length, H_KV, D),
+                            case.k_cache, case.v_cache,
+                            num_heads=H, num_kv_heads=H_KV, head_dim=D, causal=False)
+    finally:
+        reset_context()
+
+
+def test_paged_attention_module_threads_causal_flag() -> None:
+    # The generated modules construct PagedAttention with the baked mode; the
+    # flag must reach the kernel (and the repr documents it).
+    from synapse.axon.codegen2_torch.paged_attention import PagedAttention
+
+    length, prompt = 4, 2
+    case = PagedCase([length])
+    gen = torch.Generator().manual_seed(67)
+    q4 = torch.randn(1, H, length, D, generator=gen)  # [B, H, S, D]
+    k4 = torch.randn(1, H_KV, length, D, generator=gen)
+    v4 = torch.randn(1, H_KV, length, D, generator=gen)
+    set_context(
+        True,
+        cu_seqlens_q=torch.tensor([0, length]),
+        cu_seqlens_k=torch.tensor([0, length]),
+        slot_mapping=torch.tensor(case.slots(0, range(length))),
+        block_tables=torch.tensor(case.pad_tables()),
+        prefix_lens=torch.tensor([prompt]),
+    )
+    try:
+        module = PagedAttention(num_heads=H, num_kv_heads=H_KV, head_dim=D, causal=False)
+        module.k_cache = case.k_cache
+        module.v_cache = case.v_cache
+        assert "causal=False" in module.extra_repr()
+        out = module(q4, k4, v4, layer_idx=0)
+    finally:
+        reset_context()
+    q_rows = q4.transpose(1, 2).reshape(length, H, D)
+    k_rows = k4.transpose(1, 2).reshape(length, H_KV, D)
+    v_rows = v4.transpose(1, 2).reshape(length, H_KV, D)
+    expected = _ref_prefixlm_seq(q_rows, k_rows, v_rows, prompt)
+    # module returns [B, H, S, D]; the reference is [S, H*D] rows.
+    expected = expected.reshape(length, H, D).transpose(0, 1).unsqueeze(0)
+    assert torch.allclose(out, expected, atol=1e-5), (out - expected).abs().max()

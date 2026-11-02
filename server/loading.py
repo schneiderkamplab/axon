@@ -29,6 +29,7 @@ from synapse.axon import (
 
 __all__ = [
     "MLX_INTRINSICS_SPEC",
+    "TORCH_PAGED_INTRINSICS",
     "default_checkpoint_dir",
     "load_mlx_model",
     "load_torch_model",
@@ -37,6 +38,12 @@ __all__ = [
 
 # Default opt-in MLX fast-path intrinsics (matches the harness default).
 MLX_INTRINSICS_SPEC = "codegen2-mlx:__mlx_sdpa,__mlx_rope"
+
+# The serving-profile pairing (see load_torch_model): the paged kernel is an
+# explicit opt-in and is paired with emit_profile='serving' in both
+# directions. The fleet engine must never load a serving artifact any other
+# way.
+TORCH_PAGED_INTRINSICS = "codegen2-torch:__torch_paged_attention"
 
 _VALID_EMIT_PROFILES = {"inference", "serving"}
 

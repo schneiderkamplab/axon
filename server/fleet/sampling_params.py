@@ -1,7 +1,10 @@
 # Vendored from nano-vllm (https://github.com/GeeeekExplorer/nano-vllm)
 # Copyright (c) 2025 Xingkai Yu — MIT License.
-# Unmodified. NOTE: upstream forbids greedy (temperature assert); the OpenAI
-# shim maps temperature=0 before constructing these — see server.server.
+# Modified: upstream forbids greedy (temperature assert) and samples with
+# temperature only. The OpenAI surface needs temperature=0 = exact greedy
+# (the standard contract) plus top_k/top_p; ``seed`` is deferred until a
+# per-request RNG can be threaded through the engine (a fresh generator per
+# step would replay the same noise every step).
 from dataclasses import dataclass
 
 
@@ -9,7 +12,9 @@ from dataclasses import dataclass
 class SamplingParams:
     temperature: float = 1.0
     max_tokens: int = 64
+    top_k: int | None = None
+    top_p: float | None = None
     ignore_eos: bool = False
 
     def __post_init__(self):
-        assert self.temperature > 1e-10, "greedy sampling is not permitted"
+        assert self.temperature >= 0.0, "temperature must be >= 0 (0 = greedy)"

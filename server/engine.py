@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .backends import ModelBackend
+from .detokenize import stream_text
 from .sampling import SamplerConfig, sample_next_token
 
 __all__ = ["DecodeState", "GenerateParams", "Session"]
@@ -247,26 +248,8 @@ class Session:
         if self.tokenizer is None:
             raise RuntimeError("Session requires a tokenizer to stream text")
         params = params or GenerateParams()
-        generated: list[int] = []
-        emitted = 0
-        stop_hit = False
         token_stream = self.generate_ids(prompt, params, stats)
-        for token in token_stream:
-            generated.append(token)
-            text = self.tokenizer.decode(generated)
-            new_text = text[emitted:]
-            emitted += len(new_text)
-            cut = self._truncate_at_stop(new_text, params.stop)
-            if cut is not None:
-                stop_hit = True
-                if cut:
-                    yield cut
-                break
-            if new_text:
-                yield new_text
-        token_stream.close()  # run generate_ids' finally deterministically
-        if stats is not None and stop_hit:
-            stats["finish_reason"] = "stop"
+        yield from stream_text(self.tokenizer, token_stream, params.stop, stats)
 
     # ── internals ───────────────────────────────────────────────────────────
 
@@ -297,11 +280,3 @@ class Session:
         if isinstance(eos, int):
             return token == eos
         return token in eos
-
-    @staticmethod
-    def _truncate_at_stop(text: str, stops: tuple[str, ...]) -> str | None:
-        """Return text truncated before the first stop sequence, or None."""
-        for stop in stops:
-            if stop and stop in text:
-                return text.split(stop, 1)[0]
-        return None

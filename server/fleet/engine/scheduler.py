@@ -1,6 +1,7 @@
 # Vendored from nano-vllm (https://github.com/GeeeekExplorer/nano-vllm)
 # Copyright (c) 2025 Xingkai Yu — MIT License.
-# Unmodified except: import paths point at the server.fleet package.
+# Unmodified except: import paths point at the server.fleet package, and
+# ``abort`` is ours (per-request cancellation; upstream has no equivalent).
 from collections import deque
 
 from ..config import Config
@@ -15,7 +16,15 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        # PrefixLM artifacts (prefill_causal=False) cannot chunk prefill and
+        # cannot share prefix blocks (a prompt token's KV depends on the
+        # whole prompt); both guards live here and in the block manager.
+        self.prefill_causal = config.prefill_causal
+        self.block_manager = BlockManager(
+            config.num_kvcache_blocks,
+            config.kvcache_block_size,
+            enable_prefix_cache=config.prefill_causal,
+        )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -24,6 +33,22 @@ class Scheduler:
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
+
+    def abort(self, seq_id: int) -> bool:
+        """Drop a sequence wherever it currently lives, freeing its blocks.
+
+        Returns whether a sequence with that id was found. Call only from the
+        thread that owns the engine loop (the adapter serializes scheduling
+        mutations through it).
+        """
+        for pending in (self.waiting, self.running):
+            for seq in pending:
+                if seq.seq_id == seq_id:
+                    pending.remove(seq)
+                    seq.status = SequenceStatus.FINISHED
+                    self.block_manager.deallocate(seq)
+                    return True
+        return False
 
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
@@ -44,6 +69,18 @@ class Scheduler:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
             if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
                 break
+            if remaining < num_tokens and not self.prefill_causal:
+                # The first sequence would be chunked; a PrefixLM model cannot
+                # chunk prefill (an earlier prompt chunk's KV depends on later
+                # prompt tokens that are not in the cache yet), so fail loudly
+                # instead of computing wrong KV. Whole-sequence deferral (the
+                # break above) stays fine.
+                raise ValueError(
+                    f"sequence {seq.seq_id} needs {num_tokens} prefill tokens but only "
+                    f"{remaining} fit in this step: a non-causal (PrefixLM) model cannot "
+                    "chunk prefill because bidirectional KV depends on the whole prompt; "
+                    "raise max_num_batched_tokens to fit the longest prompt"
+                )
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
@@ -89,7 +126,9 @@ class Scheduler:
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
                 continue
             seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            # ``>=`` (not ==): a zero-token budget must still finish after the
+            # prefill append — with ``==`` the sequence would never terminate.
+            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens >= seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
                 self.running.remove(seq)

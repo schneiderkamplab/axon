@@ -146,6 +146,11 @@ class GraphProgram:
     main_module: str
     pragmas: dict[str, object]
     packed_parameters: tuple[GraphPackedParameter, ...] = ()
+    # Prefill masking mode stamped by the paged-attention rewrite phase
+    # ("causal" or "prefixlm"), derived from the model's masking-builtin
+    # calls while their chains are still live. None for graphs the phase
+    # did not run on (no paged sites).
+    paged_prefill_masking: str | None = None
 
 
 @dataclass

@@ -6333,9 +6333,99 @@ def _check_conflicting_torch_intrinsics(enabled_intrinsics: frozenset[str]) -> N
         )
 
 
+# The paged runtime replaces the model's materialized attention mask with its
+# own prefill mask, so it must know which masking semantics the model
+# declared. The masking builtins are the standard-library interface for that
+# declaration: matching their module names is semantic-interface matching
+# (like op codes), not model-family inference. Suffixes cover the
+# specialization structure (top level + keep/masked bodies); hoisted
+# ``__cond_else_`` selects are internal control flow, not builtin calls.
+_PAGED_PREFILL_MASKING_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("Masking.causal_mask_for_input", "causal"),
+    ("Masking.bidirectional_mask_for_input", "prefixlm"),
+)
+_PAGED_PREFILL_MASKING_SUFFIXES: tuple[str, ...] = ("", "_keep", "_masked")
+
+
+def _match_masking_builtin_family(op_name: str) -> str | None:
+    for prefix, mode in _PAGED_PREFILL_MASKING_FAMILIES:
+        if op_name.startswith(prefix) and op_name[len(prefix) :] in _PAGED_PREFILL_MASKING_SUFFIXES:
+            return mode
+    return None
+
+
+def _masking_call_window_error(node: GraphNode, callee: GraphModule) -> str | None:
+    """A bound non-null window actual means a genuinely banded mask.
+
+    The paged kernel has no banded masking; a vacuous full-capacity window is
+    spelled by simply not passing one (specialization drops the formal), so
+    anything still bound here is a real band and must not reach the kernel.
+    """
+    for index, formal in enumerate(callee.inputs):
+        if formal.name != "window":
+            continue
+        if index >= len(node.inputs):
+            return None
+        actual = node.inputs[index]
+        if isinstance(actual, GraphLiteral) and actual.value is None:
+            return None
+        return (
+            f"masking builtin {node.op.name!r} binds a non-null window; the paged "
+            "runtime does not support windowed (banded) masks — drop a vacuous "
+            "full-capacity window from the model definition, or do not compile "
+            "this model with the paged profile"
+        )
+    return None
+
+
+def _scan_paged_prefill_masking(
+    graph: GraphProgram, modules_by_name: dict[str, GraphModule]
+) -> tuple[str | None, str | None]:
+    """Derive the prefill masking mode from the model's masking-builtin calls.
+
+    Scanned while the mask chains are still live (the rewrite phase runs
+    before dead-code elimination removes them). Returns ``(mode, error)``;
+    exactly one of the two is non-None. The caller raises only when paged
+    sites were actually rewritten, so a paged-less graph is never rejected
+    for its masking.
+    """
+    modes: dict[str, int] = {}
+    error: str | None = None
+    for module in graph.modules:
+        for node in module.nodes:
+            mode = _match_masking_builtin_family(node.op.name)
+            if mode is None:
+                continue
+            modes[mode] = modes.get(mode, 0) + 1
+            if error is not None:
+                continue
+            callee = modules_by_name.get(node.op.name)
+            if callee is None:
+                error = (
+                    f"masking builtin call {node.op.name!r} has no callee module; "
+                    "cannot validate the paged prefill masking mode"
+                )
+                continue
+            error = _masking_call_window_error(node, callee)
+    if len(modes) > 1:
+        return None, (
+            "model mixes causal and bidirectional masking builtins; the paged "
+            "runtime requires a single prefill masking mode per model"
+        )
+    if not modes:
+        return None, (
+            "no masking builtin call found (expected Masking.causal_mask_for_input or "
+            "Masking.bidirectional_mask_for_input); the paged runtime derives the "
+            "prefill masking mode from the model's masking builtins and cannot serve "
+            "a model that builds its mask another way"
+        )
+    return next(iter(modes)), error
+
+
 def _rewrite_torch_paged_attention_intrinsics(graph: GraphProgram) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     modules_by_name = {module.name: module for module in graph.modules}
+    masking_mode, masking_error = _scan_paged_prefill_masking(graph, modules_by_name)
     changed = False
     new_modules: list[GraphModule] = []
     for module in graph.modules:
@@ -6357,7 +6447,17 @@ def _rewrite_torch_paged_attention_intrinsics(graph: GraphProgram) -> GraphProgr
                 changed = True
                 new_nodes.append(rewritten)
         new_modules.append(replace(module, nodes=tuple(new_nodes)))
-    return replace(graph, modules=tuple(new_modules)) if changed else graph
+    if not changed:
+        return graph
+    if masking_error is not None:
+        raise ValueError(masking_error)
+    if masking_mode is None:
+        raise ValueError(
+            "paged attention sites were rewritten but no prefill masking mode was derived"
+        )
+    return replace(
+        graph, modules=tuple(new_modules), paged_prefill_masking=masking_mode
+    )
 
 
 def _canonical_specialization_operand(

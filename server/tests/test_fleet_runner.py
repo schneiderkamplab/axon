@@ -44,6 +44,10 @@ class MockLayer(torch.nn.Module):
 class MockContextModel(torch.nn.Module):
     """Hidden state = token id broadcast; logits favor (id + 1) % vocab."""
 
+    # The fleet engine requires the artifact's prefill masking declaration;
+    # the mock is a causal decoder.
+    serving_prefill_masking = "causal"
+
     def __init__(self, vocab: int = 8, num_layers: int = 2) -> None:
         super().__init__()
         self.vocab = vocab
@@ -65,6 +69,7 @@ class MockContextModel(torch.nn.Module):
                 "context_lens": None if ctx.context_lens is None else ctx.context_lens.tolist(),
                 "block_tables": None if ctx.block_tables is None else ctx.block_tables.tolist(),
                 "cu_seqlens_q": None if ctx.cu_seqlens_q is None else ctx.cu_seqlens_q.tolist(),
+                "prefix_lens": None if ctx.prefix_lens is None else ctx.prefix_lens.tolist(),
             }
         )
         return input_ids.to(torch.float32).unsqueeze(1).repeat(1, 4)
@@ -176,6 +181,64 @@ def test_eos_finishes_and_releases_blocks() -> None:
     assert token_ids == [5]
     assert engine.is_finished()
     assert len(engine.scheduler.block_manager.free_block_ids) == 8
+
+
+class _Unmarked(MockContextModel):
+    serving_prefill_masking = None
+
+
+class _BadMode(MockContextModel):
+    serving_prefill_masking = "banded"
+
+
+class _PrefixLM(MockContextModel):
+    serving_prefill_masking = "prefixlm"
+
+
+def test_engine_requires_declared_prefill_masking() -> None:
+    with pytest.raises(ValueError, match="serving_prefill_masking"):
+        make_engine(_Unmarked(), num_kvcache_blocks=16)
+    with pytest.raises(ValueError, match="unknown serving_prefill_masking"):
+        make_engine(_BadMode(), num_kvcache_blocks=16)
+
+
+def test_prefixlm_engine_config_flows_to_scheduler_and_runner() -> None:
+    engine = make_engine(_PrefixLM(), num_kvcache_blocks=16)
+    assert engine.config.prefill_causal is False
+    assert engine.scheduler.prefill_causal is False
+    assert engine.scheduler.block_manager.enable_prefix_cache is False
+
+    engine.add_request([10, 11, 12, 13], SamplingParams(temperature=1.0, max_tokens=2))
+    engine.step()  # prefill
+    call = engine.model_runner.model.calls[-1]
+    # The prompt boundary rides the context so the paged kernel builds the
+    # two-region mask.
+    assert call["prefix_lens"] == [4]
+    engine.step()  # decode: mask-free, no boundary
+    call = engine.model_runner.model.calls[-1]
+    assert call["prefix_lens"] is None
+
+
+def test_prefixlm_preemption_recompute_keeps_prompt_boundary() -> None:
+    # Two 256-token prompts fill a 2-block pool. The first decode step needs a
+    # fresh block, so the LRU (b) is preempted; when a finishes, b recomputes
+    # prompt + generated in one prefill with the boundary at num_prompt_tokens.
+    engine = make_engine(_PrefixLM(), num_kvcache_blocks=2)
+    engine.add_request(list(range(256)), SamplingParams(temperature=1.0, max_tokens=2))
+    engine.add_request(list(range(256, 512)), SamplingParams(temperature=1.0, max_tokens=2))
+
+    engine.step()  # prefill both
+    engine.step()  # decode a; b preempted
+    assert engine.scheduler.waiting and not engine.is_finished()
+    engine.step()  # a finishes; b recomputes prompt + generated
+    calls = engine.model_runner.model.calls
+    recompute = calls[-1]
+    assert recompute["is_prefill"] is True
+    assert len(recompute["ids"]) == 257  # 256 prompt tokens + 1 generated
+    assert recompute["positions"] == list(range(257))
+    # The boundary stays at the prompt length: prompt rows bidirectional,
+    # generated rows causal — the two-region recompute mask.
+    assert recompute["prefix_lens"] == [256]
 
 
 def test_pool_autosizes_when_not_configured() -> None:

@@ -47,6 +47,11 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1   # -1: the runner sizes the pool conservatively
+    # Prefill masking mode of the served artifact (fleet addition, not in
+    # upstream nano-vllm): True for causal decoders, False for PrefixLM
+    # artifacts (bidirectional attention over the prompt region). Set by
+    # LLMEngine from the artifact's serving_prefill_masking.
+    prefill_causal: bool = True
 
     def __post_init__(self):
         assert self.kvcache_block_size % 256 == 0

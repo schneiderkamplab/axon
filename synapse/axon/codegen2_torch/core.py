@@ -3157,6 +3157,29 @@ class _DirectTorchEmitter:
         self._paged_attention_sites, self._paged_attention_site_by_node = (
             self._scan_paged_attention_sites()
         )
+        self.paged_prefill_masking = self._resolve_paged_prefill_masking()
+
+    def _resolve_paged_prefill_masking(self) -> str | None:
+        """Prefill masking mode from the rewrite phase; required with paged sites.
+
+        The optimizer stamps the mode while the model's masking chains are
+        still live; a paged artifact without it would silently mis-mask, so
+        it is required here rather than defaulted.
+        """
+        if not self._paged_attention_sites:
+            return None
+        mode = self.program.paged_prefill_masking
+        if mode is None:
+            raise ValueError(
+                "paged attention sites present but the graph carries no prefill "
+                "masking mode; the paged rewrite phase must stamp "
+                "paged_prefill_masking before emission"
+            )
+        if mode not in ("causal", "prefixlm"):
+            raise ValueError(
+                f"unknown paged prefill masking mode {mode!r}; expected 'causal' or 'prefixlm'"
+            )
+        return mode
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -3651,15 +3674,16 @@ class _DirectTorchEmitter:
         add(lines, 8, "return None")
         add(lines, 4, "")
         if self._paged_attention_sites:
+            assert self.paged_prefill_masking is not None
+            causal = "True" if self.paged_prefill_masking == "causal" else "False"
             add(lines, 4, "def _setup_paged_attention(self):")
             for site in self._paged_attention_sites:
                 add(
                     lines,
                     8,
                     "self.{attr} = PagedAttention("
-                    "num_heads={num_heads}, num_kv_heads={num_kv_heads}, head_dim={head_dim})".format(
-                        **site
-                    ),
+                    "num_heads={num_heads}, num_kv_heads={num_kv_heads}, head_dim={head_dim}, "
+                    "causal={causal})".format(causal=causal, **site),
                 )
             add(lines, 8, "return None")
             add(lines, 4, "")
@@ -3691,6 +3715,9 @@ class _DirectTorchEmitter:
         add(lines, 12, "plan[str(key)] = layer_to_device[idx] if idx is not None else devices[0]")
         add(lines, 8, "return plan")
         add(lines, 4, "")
+        if self.paged_prefill_masking is not None:
+            add(lines, 4, f"serving_prefill_masking = {self.paged_prefill_masking!r}")
+            add(lines, 4, "")
         add(lines, 4, f"_STATE_KEY_FILTER_PREFIXES = {self.state_key_filter_prefixes!r}")
         add(lines, 4, f"_PACKED_PARAMETER_SPECS = {tuple(_packed_parameter_spec_payload(item) for item in self.program.packed_parameters)!r}")
         add(lines, 4, "")

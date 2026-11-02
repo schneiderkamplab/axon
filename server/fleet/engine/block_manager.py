@@ -3,6 +3,10 @@
 # Modified: xxhash replaced with stdlib hashlib.blake2b (64-bit) to keep the
 # serving layer dependency-free; hash values are internal to one process, so
 # only determinism and speed matter. Revisit if profiling says otherwise.
+# Also modified: `enable_prefix_cache=False` (non-causal/PrefixLM models)
+# skips hash registration and matching entirely — a prompt token's KV depends
+# on the whole prompt, so partial-prefix blocks cached under a different
+# suffix would be invalid.
 from collections import deque
 import hashlib
 
@@ -31,8 +35,9 @@ class Block:
 
 class BlockManager:
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(self, num_blocks: int, block_size: int, enable_prefix_cache: bool = True):
         self.block_size = block_size
+        self.enable_prefix_cache = enable_prefix_cache
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
@@ -65,15 +70,16 @@ class BlockManager:
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
-        for i in range(seq.num_blocks - 1):
-            token_ids = seq.block(i)
-            h = self.compute_hash(token_ids, h)
-            block_id = self.hash_to_block_id.get(h, -1)
-            if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
-                break
-            num_cached_blocks += 1
-            if block_id in self.used_block_ids:
-                num_new_blocks -= 1
+        if self.enable_prefix_cache:
+            for i in range(seq.num_blocks - 1):
+                token_ids = seq.block(i)
+                h = self.compute_hash(token_ids, h)
+                block_id = self.hash_to_block_id.get(h, -1)
+                if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
+                    break
+                num_cached_blocks += 1
+                if block_id in self.used_block_ids:
+                    num_new_blocks -= 1
         if len(self.free_block_ids) < num_new_blocks:
             return -1
         return num_cached_blocks
@@ -114,6 +120,8 @@ class BlockManager:
             seq.block_table.append(self._allocate_block())
 
     def hash_blocks(self, seq: Sequence):
+        if not self.enable_prefix_cache:
+            return
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
         if start == end: return
