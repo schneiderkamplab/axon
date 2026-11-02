@@ -110,6 +110,8 @@ def varlen_paged_sdpa(
     block_tables: torch.Tensor | None = None,
     causal: bool = True,
     prefix_lens: torch.Tensor | None = None,
+    cu_seqlens_q_host: list[int] | None = None,
+    cu_seqlens_k_host: list[int] | None = None,
 ) -> torch.Tensor:
     """Varlen prefill attention over the pool.
 
@@ -151,16 +153,25 @@ def varlen_paged_sdpa(
     assert cu_seqlens_q is not None and cu_seqlens_k is not None
     cu_q = cu_seqlens_q.to(device=device, dtype=torch.long)
     cu_k = cu_seqlens_k.to(device=device, dtype=torch.long)
-    num_seqs = cu_q.numel() - 1
-    n = int(cu_q[-1].item())
-    total_k = int(cu_k[-1].item())
+    # Host-side boundaries from the engine's context (see Context):
+    # recomputing them here would sync the pipeline once per layer call.
+    if cu_seqlens_q_host is not None and cu_seqlens_k_host is not None:
+        num_seqs = len(cu_seqlens_q_host) - 1
+        n = cu_seqlens_q_host[-1]
+        total_k = cu_seqlens_k_host[-1]
+        k_boundaries = cu_seqlens_k_host
+    else:
+        num_seqs = cu_q.numel() - 1
+        n = int(cu_q[-1].item())
+        total_k = int(cu_k[-1].item())
+        k_boundaries = [int(cu_k[i].item()) for i in range(num_seqs + 1)]
 
     # Gather keys/values in position order across the packed batch.
     tables = block_tables.to(device=device, dtype=torch.long)
     pieces_k: list[torch.Tensor] = []
     pieces_v: list[torch.Tensor] = []
     for seq in range(num_seqs):
-        start, end = int(cu_k[seq].item()), int(cu_k[seq + 1].item())
+        start, end = k_boundaries[seq], k_boundaries[seq + 1]
         if end == start:
             continue
         needed = (end - start + k_cache.shape[1] - 1) // k_cache.shape[1]
@@ -231,6 +242,7 @@ def decode_paged_sdpa(
     scale: float | None = None,
     context_lens: torch.Tensor | None = None,
     block_tables: torch.Tensor | None = None,
+    context_lens_max: int | None = None,
 ) -> torch.Tensor:
     """Decode attention over the pool.
 
@@ -253,7 +265,13 @@ def decode_paged_sdpa(
         )
     lens = context_lens.to(device=device, dtype=torch.long)
     batch = q.shape[0]
-    max_len = int(lens.max().item()) if lens.numel() else 0
+    # context_lens_max arrives from the engine's context (computed host-side
+    # once per step); recomputing it here syncs the pipeline once per layer.
+    max_len = (
+        context_lens_max
+        if context_lens_max is not None
+        else (int(lens.max().item()) if lens.numel() else 0)
+    )
 
     keys, values = _gather_kv_via_block_tables(
         k_cache, v_cache, block_tables.to(device=device, dtype=torch.long)
@@ -327,6 +345,8 @@ def paged_attention(
             block_tables=context.block_tables,
             causal=causal,
             prefix_lens=context.prefix_lens,
+            cu_seqlens_q_host=context.cu_seqlens_q_host,
+            cu_seqlens_k_host=context.cu_seqlens_k_host,
         )
     return decode_paged_sdpa(
         q,
@@ -338,6 +358,7 @@ def paged_attention(
         scale=scale,
         context_lens=context.context_lens,
         block_tables=context.block_tables,
+        context_lens_max=context.context_lens_max,
     )
 
 

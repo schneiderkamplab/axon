@@ -35,23 +35,26 @@ bfloat16, greedy, four prompts of 24 tokens generating 32 new tokens each
 | path                                   | per token (solo) | aggregate, 4 concurrent |
 |----------------------------------------|-----------------:|------------------------:|
 | barebone artifact `generate()`          | 68 ms            | 15 tok/s — a hard cap   |
-| Session shim (2-slot concurrency)       | 56 ms            | 19 tok/s                |
-| fleet engine, solo                      | 83 ms            | —                       |
-| **fleet engine, 4 concurrent streams**  | **23 ms/token**  | **43 tok/s**            |
+| Session shim (2-slot concurrency)       | 56 ms            | 20 tok/s                |
+| fleet engine, solo                      | 60 ms            | —                       |
+| **fleet engine, 4 concurrent streams**  | **20 ms/token**  | **51 tok/s**            |
+| the same, over real HTTP (`/v1/completions`) | —           | 47 tok/s                |
 
 The single-sequence paths cannot turn concurrent load into throughput: the
 barebone loop and the shim spend one forward call per token of one sequence,
 so four queued requests are four sequential runs at the solo rate. The
 fleet's per-step cost is nearly flat in batch width — 33 forwards carried
-4 × 32 tokens, where the shim needed 128 — so the same GPU that delivers
-12–18 tok/s to one client delivers 43 tok/s to four.
+4 × 32 tokens, where the shim needed 128 — so the same GPU delivers 51 tok/s
+to four clients where any single-sequence path delivers 15–20.
 
-The trade is explicit: solo, the fleet pays ~1.5× per token over the
-barebone loop (83 vs 68 ms) for the paged runtime, block-table bookkeeping
-and scheduler. Under concurrent load that fixed per-step tax amortizes to a
-2.3× throughput win over the shim and ~3× over the barebone loop. Serving
-one request at a time? Use the shim. Two-plus requests in flight? The fleet
-is the only path whose throughput grows with load.
+The solo penalty is engineered out, not inherent: an early build paid
+~1.5× per token over the barebone loop because the paged kernel re-extracted
+scalars from device tensors once per layer — ~30 forced CPU↔GPU pipeline
+syncs per step (each ~1 ms on MPS; 35–38% of step time). The engine now
+derives those scalars once per step host-side and carries them on the
+serving context, so a decode step syncs exactly once (the sampled token
+coming back). After that, fleet solo (60 ms/token) beats the barebone loop
+while scaling to 2.6× the shim's throughput at four streams.
 
 Backend note: these numbers are torch-MPS. On MLX the shim reaches
 75 tok/s solo / 113 tok/s at four streams — the fleet is torch-only until

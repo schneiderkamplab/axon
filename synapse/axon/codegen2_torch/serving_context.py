@@ -34,6 +34,16 @@ class Context:
     # non-causal prefill artifacts; the paged kernel builds the two-region
     # mask from it. None for causal models.
     prefix_lens: torch.Tensor | None = None
+    # Host-side scalars the engine derives once per step (it holds the Python
+    # lists before moving them to the device). The paged kernel reads these
+    # instead of re-extracting scalars from device tensors once per LAYER —
+    # each extraction is a full pipeline sync (~1 ms on MPS), and the same
+    # values would be recomputed 28x per step. None/absent = the kernel
+    # recomputes them itself (correct, slower; the path for direct kernel
+    # callers that bypass the engine).
+    cu_seqlens_q_host: list[int] | None = None
+    cu_seqlens_k_host: list[int] | None = None
+    context_lens_max: int | None = None
 
 
 _CONTEXT = Context()
@@ -53,6 +63,9 @@ def set_context(  # noqa: ANN001 - mirroring the upstream call signature
     context_lens=None,
     block_tables=None,
     prefix_lens=None,
+    cu_seqlens_q_host=None,
+    cu_seqlens_k_host=None,
+    context_lens_max=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -65,6 +78,9 @@ def set_context(  # noqa: ANN001 - mirroring the upstream call signature
         context_lens,
         block_tables,
         prefix_lens,
+        cu_seqlens_q_host,
+        cu_seqlens_k_host,
+        context_lens_max,
     )
 
 

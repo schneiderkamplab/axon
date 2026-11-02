@@ -7,8 +7,9 @@
 # - device-parametric (upstream hardcodes CUDA); no nccl / SharedMemory TP
 #   machinery in v1 (tensor_parallel_size=1; the upstream structure returns
 #   when TP lands, using the vendored linear.py as the reference)
-# - the pool is sized from ``config.num_kvcache_blocks`` (no CUDA
-#   mem_get_info); -1 falls back to a conservative max_model_len x max_num_seqs
+# - the pool is sized from ``config.num_kvcache_blocks``; -1 sizes from the
+#   device's recommended memory minus resident weights (the upstream
+#   max_model_len x max_num_seqs worst case asks hundreds of GiB on laptops)
 # - CUDA-graph capture dropped for now (eager path always; enforce_eager
 #   stays a config field for when capture returns)
 # - warmup forward dropped (it exists upstream to size CUDA memory)
@@ -18,6 +19,7 @@
 #   batches crash (and mis-sample if they did not).
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -28,6 +30,31 @@ from ..utils.context import get_context, reset_context, set_context
 from .sequence import Sequence
 
 __all__ = ["ModelRunner"]
+
+
+def _device_memory_budget(device: torch.device) -> int:
+    """The device's recommended memory ceiling in bytes, for pool sizing.
+
+    MPS reports its recommended max working set (the number macOS actually
+    enforces); CUDA reports total device memory; CPU falls back to installed
+    RAM. No silent fallbacks: an unknown or unqueryable device raises.
+    """
+    if device.type == "mps":
+        return int(torch.mps.recommended_max_memory())
+    if device.type == "cuda":
+        return int(torch.cuda.get_device_properties(device).total_memory)
+    if device.type == "cpu":
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        if page_size <= 0 or page_count <= 0:
+            raise ValueError(
+                "cannot determine installed RAM for CPU pool sizing; "
+                "pass num_kvcache_blocks explicitly"
+            )
+        return page_size * page_count
+    raise ValueError(
+        f"no memory budget known for device {device}; pass num_kvcache_blocks explicitly"
+    )
 
 
 class ModelRunner:
@@ -53,8 +80,9 @@ class ModelRunner:
             or hf_config.hidden_size // hf_config.num_attention_heads
         )
         if config.num_kvcache_blocks < 0:
-            blocks_per_seq = -(-config.max_model_len // self.block_size)
-            config.num_kvcache_blocks = blocks_per_seq * config.max_num_seqs
+            config.num_kvcache_blocks = self._autosize_num_blocks(
+                hf_config.num_hidden_layers, num_kv_heads, head_dim
+            )
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(
             2,
@@ -82,6 +110,55 @@ class ModelRunner:
                 "the model exposes no KV-cache modules (k_cache/v_cache attributes); "
                 "the serving contract requires paged attention modules to bind"
             )
+
+    _POOL_BUDGET_FRACTION = 0.25  # of the device's recommended memory, for the pool
+
+    def _autosize_num_blocks(
+        self, num_layers: int, num_kv_heads: int, head_dim: int
+    ) -> int:
+        """Size the pool from device memory, not from a worst-case shape.
+
+        The upstream formula (every sequence at max_model_len simultaneously)
+        asks e.g. 224 GiB on a laptop: a request that either fails loudly or,
+        worse, drives the machine into swap. Instead: budget a fixed fraction
+        of the device's recommended memory minus the resident weights, floor
+        at one full-length sequence, and print the derivation. Pass
+        ``num_kvcache_blocks`` explicitly to opt out.
+        """
+        bytes_per_block = (
+            num_layers * 2 * num_kv_heads * head_dim * self.block_size
+            * self.config.hf_config.dtype.itemsize
+        )
+        budget = _device_memory_budget(self.device)
+        weights = sum(p.numel() * p.element_size() for p in self.model.parameters())
+        state = getattr(self.model, "state_dict_tensors", None)
+        if state:
+            weights += sum(
+                t.numel() * t.element_size() for t in state.values() if torch.is_tensor(t)
+            )
+        pool_bytes = int(budget * self._POOL_BUDGET_FRACTION) - weights
+        memory_blocks = pool_bytes // bytes_per_block
+        floor_blocks = -(-self.config.max_model_len // self.block_size)
+        if memory_blocks < floor_blocks:
+            raise ValueError(
+                f"device {self.device} has no room for even one max-length sequence: "
+                f"pool budget {pool_bytes / 2**30:.2f} GiB (25% of "
+                f"{budget / 2**30:.2f} GiB minus {weights / 2**30:.2f} GiB weights) "
+                f"holds {memory_blocks} blocks of {bytes_per_block / 2**20:.1f} MiB, "
+                f"but max_model_len {self.config.max_model_len} needs {floor_blocks}; "
+                "lower --max-model-len or pass --num-kvcache-blocks on a larger device"
+            )
+        worst_case = floor_blocks * self.config.max_num_seqs
+        blocks = max(floor_blocks, min(worst_case, memory_blocks))
+        print(
+            f"fleet: KV pool autosized to {blocks} blocks "
+            f"({blocks * bytes_per_block / 2**30:.2f} GiB): "
+            f"{self._POOL_BUDGET_FRACTION:.0%} of {budget / 2**30:.1f} GiB device budget "
+            f"minus {weights / 2**30:.2f} GiB weights; floor {floor_blocks} blocks "
+            f"(one max-length sequence), worst case {worst_case} blocks "
+            f"({self.config.max_num_seqs} sequences x {self.config.max_model_len} tokens)"
+        )
+        return blocks
 
     # ── batching ────────────────────────────────────────────────────────────
 
@@ -155,6 +232,10 @@ class ModelRunner:
         set_context(
             True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None,
             block_tables, prefix_lens,
+            # The cu arrays existed as Python lists a moment ago; carry them so
+            # the paged kernel does not re-extract scalars per layer (each
+            # extraction is a full MPS/CUDA pipeline sync).
+            cu_seqlens_q_host=cu_seqlens_q, cu_seqlens_k_host=cu_seqlens_k,
         )
         return input_ids, positions, sample_rows
 
@@ -170,12 +251,18 @@ class ModelRunner:
             slot_mapping.append(
                 seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
             )
+        max_context_lens = max(context_lens) if context_lens else 0
         input_ids = self._to_device(input_ids, torch.int64)
         positions = self._to_device(positions, torch.int64)
         slot_mapping = self._to_device(slot_mapping, torch.int32)
         context_lens = self._to_device(context_lens, torch.int32)
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        set_context(
+            False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables,
+            # max(context_lens) is already known host-side; carrying it saves
+            # one pipeline sync per layer in the decode kernel.
+            context_lens_max=max_context_lens,
+        )
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]) -> dict[str, torch.Tensor]:

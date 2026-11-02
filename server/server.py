@@ -274,6 +274,9 @@ def _fleet_session(
     checkpoint_dir: Path | str | None,
     dtype: str | None,
     device: str | None = None,
+    max_model_len: int | None = None,
+    max_num_seqs: int | None = None,
+    num_kvcache_blocks: int | None = None,
 ) -> "FleetSession":
     """Build the continuous-batching engine over a serving-profile artifact."""
     from .engine import Session as _Session
@@ -301,7 +304,16 @@ def _fleet_session(
     model_config = load_model_config(checkpoint)
     # Same tokenizer path as the Session shim (one loader, one contract).
     tokenizer = _Session._load_tokenizer(None, checkpoint, path)
-    return FleetSession(model, model_config=model_config, tokenizer=tokenizer, device=target_device)
+    sizing: dict[str, Any] = {}
+    if max_model_len is not None:
+        sizing["max_model_len"] = max_model_len
+    if max_num_seqs is not None:
+        sizing["max_num_seqs"] = max_num_seqs
+    if num_kvcache_blocks is not None:
+        sizing["num_kvcache_blocks"] = num_kvcache_blocks
+    return FleetSession(
+        model, model_config=model_config, tokenizer=tokenizer, device=target_device, **sizing
+    )
 
 
 def serve(
@@ -315,6 +327,9 @@ def serve(
     dtype: str | None = None,
     warm_compile: bool = True,
     device: str | None = None,
+    max_model_len: int | None = None,
+    max_num_seqs: int | None = None,
+    num_kvcache_blocks: int | None = None,
 ) -> None:
     """Load the model and block serving requests (Ctrl+C to stop).
 
@@ -324,17 +339,32 @@ def serve(
     paths float32 (CPU-safe) unless given explicitly. ``device`` places the
     fleet engine's torch model (default cpu); the session engine selects its
     backend — and with it the device — implicitly, so an explicit device
-    there is rejected rather than silently ignored.
+    there is rejected rather than silently ignored. ``max_model_len`` /
+    ``max_num_seqs`` / ``num_kvcache_blocks`` are fleet-only; left unset the
+    pool sizes itself from the device's recommended memory minus the
+    resident weights.
     """
     if engine == "fleet":
         session: _AnySession = _fleet_session(
-            Path(axon_path), checkpoint_dir=checkpoint_dir, dtype=dtype, device=device
+            Path(axon_path),
+            checkpoint_dir=checkpoint_dir,
+            dtype=dtype,
+            device=device,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+            num_kvcache_blocks=num_kvcache_blocks,
         )
     elif engine == "session":
         if device is not None:
             raise ValueError(
                 "--device applies to the fleet engine; the session engine picks "
                 "its backend (and device) implicitly"
+            )
+        if max_model_len is not None or max_num_seqs is not None or num_kvcache_blocks is not None:
+            raise ValueError(
+                "--max-model-len / --max-num-seqs / --num-kvcache-blocks apply to "
+                "the fleet engine; the session engine keeps a per-request cache "
+                "and has no pool"
             )
         session = Session.from_axon(
             axon_path,
@@ -379,6 +409,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-concurrency", type=int, default=2)
     parser.add_argument("--dtype", default=None, help="float16 on MLX, float32 on torch by default")
     parser.add_argument("--device", default=None, help="torch device for the fleet engine (default cpu)")
+    parser.add_argument("--max-model-len", type=int, default=None, help="fleet: maximum sequence length (default: 4096, capped by the checkpoint)")
+    parser.add_argument("--max-num-seqs", type=int, default=None, help="fleet: maximum concurrent sequences in the engine (default 512)")
+    parser.add_argument("--num-kvcache-blocks", type=int, default=None, help="fleet: KV pool blocks (default: sized from device memory minus weights)")
     parser.add_argument("--no-warm-compile", action="store_true")
     args = parser.parse_args(argv)
     serve(
@@ -391,6 +424,9 @@ def main(argv: list[str] | None = None) -> None:
         dtype=args.dtype,
         warm_compile=not args.no_warm_compile,
         device=args.device,
+        max_model_len=args.max_model_len,
+        max_num_seqs=args.max_num_seqs,
+        num_kvcache_blocks=args.num_kvcache_blocks,
     )
 
 
