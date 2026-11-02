@@ -1,0 +1,13 @@
+{-# CHECKPOINTS ["OpenMed/OpenMed-NER-ChemicalDetect-ModernMed-149M"] #-}
+{-# TASK "token_classification" #-}
+
+import Masking (Mask)
+import ModernBertEncoder
+import NN
+
+-- classifier_bias applies to head.dense. HF's classifier always has a bias. Its size comes from the weights.
+modernbert_token_classification :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,C]
+modernbert_token_classification input_ids attn_mask = do
+  hidden <- ModernBertEncoder.encode input_ids attn_mask
+  x <- ModernBertEncoder.prediction_head hidden
+  return NN.linear@classifier x bias=true

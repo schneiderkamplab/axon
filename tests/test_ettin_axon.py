@@ -122,7 +122,8 @@ def mlx_models(weights):
     for arch, host in (("encoder", Encoder), ("decoder", Decoder)):
         state = {name: mx.array(value) for name, value in weights[arch].items()}
         fused, code = _generated(arch, "mlx", optimize=True, intrinsics=FUSED)
-        assert code.count("self._sdpa_band(") == 4
+        forward = code[code.index(f"def {ARCHS[arch]['entry']}("):]
+        assert forward[: forward.index("\n    def ")].count("self._sdpa_band(") == 2  # full and sliding layers
         unfused, _ = _generated(arch, "mlx", optimize=False)
         models[arch, "fused"] = host(fused.from_state_dict(state, model_config=CONFIG))
         models[arch, "unfused"] = host(unfused.from_state_dict(state, model_config=CONFIG))
