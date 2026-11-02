@@ -47,6 +47,12 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1   # -1: the runner sizes the pool conservatively
+    # Fraction of the device's recommended memory budgeted to weights + KV
+    # pool when num_kvcache_blocks is -1 (fleet addition, not in upstream
+    # nano-vllm). Apple unified memory: the recommended working set is the
+    # ceiling macOS actually enforces (~78% of RAM here); 0.6 of it keeps a
+    # shared machine comfortable, raise it (e.g. 0.9) on a dedicated box.
+    pool_memory_fraction: float = 0.6
     # Prefill masking mode of the served artifact (fleet addition, not in
     # upstream nano-vllm): True for causal decoders, False for PrefixLM
     # artifacts (bidirectional attention over the prompt region). Set by

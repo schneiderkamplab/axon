@@ -246,7 +246,10 @@ def load_torch_model(
 
     checkpoint = Path(checkpoint_dir).resolve() if checkpoint_dir else default_checkpoint_dir(path)
     shards = resolve_safetensors_paths(checkpoint)
-    state_dict = _load_torch_state_dict(shards, device="cpu", dtype=dtype)
+    # Load straight onto the target device (safetensors places tensors there
+    # directly). On unified-memory Macs a CPU detour would hold every weight
+    # twice during load and copy it again for placement.
+    state_dict = _load_torch_state_dict(shards, device=device, dtype=dtype)
     # The generated model holds its weights in state_dict_tensors, not as
     # nn.Parameters, so nn.Module.to(device) cannot move them. Placement goes
     # through the class's own param_devices mechanism (single device: every

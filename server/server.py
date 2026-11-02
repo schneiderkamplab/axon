@@ -277,6 +277,7 @@ def _fleet_session(
     max_model_len: int | None = None,
     max_num_seqs: int | None = None,
     num_kvcache_blocks: int | None = None,
+    pool_memory_fraction: float | None = None,
 ) -> "FleetSession":
     """Build the continuous-batching engine over a serving-profile artifact."""
     from .engine import Session as _Session
@@ -311,6 +312,8 @@ def _fleet_session(
         sizing["max_num_seqs"] = max_num_seqs
     if num_kvcache_blocks is not None:
         sizing["num_kvcache_blocks"] = num_kvcache_blocks
+    if pool_memory_fraction is not None:
+        sizing["pool_memory_fraction"] = pool_memory_fraction
     return FleetSession(
         model, model_config=model_config, tokenizer=tokenizer, device=target_device, **sizing
     )
@@ -330,6 +333,7 @@ def serve(
     max_model_len: int | None = None,
     max_num_seqs: int | None = None,
     num_kvcache_blocks: int | None = None,
+    pool_memory_fraction: float | None = None,
 ) -> None:
     """Load the model and block serving requests (Ctrl+C to stop).
 
@@ -340,9 +344,9 @@ def serve(
     fleet engine's torch model (default cpu); the session engine selects its
     backend — and with it the device — implicitly, so an explicit device
     there is rejected rather than silently ignored. ``max_model_len`` /
-    ``max_num_seqs`` / ``num_kvcache_blocks`` are fleet-only; left unset the
-    pool sizes itself from the device's recommended memory minus the
-    resident weights.
+    ``max_num_seqs`` / ``num_kvcache_blocks`` / ``pool_memory_fraction`` are
+    fleet-only; left unset the pool sizes itself from the device's
+    recommended memory minus the resident weights.
     """
     if engine == "fleet":
         session: _AnySession = _fleet_session(
@@ -353,6 +357,7 @@ def serve(
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
             num_kvcache_blocks=num_kvcache_blocks,
+            pool_memory_fraction=pool_memory_fraction,
         )
     elif engine == "session":
         if device is not None:
@@ -360,11 +365,15 @@ def serve(
                 "--device applies to the fleet engine; the session engine picks "
                 "its backend (and device) implicitly"
             )
-        if max_model_len is not None or max_num_seqs is not None or num_kvcache_blocks is not None:
+        fleet_only = (
+            max_model_len is not None or max_num_seqs is not None
+            or num_kvcache_blocks is not None or pool_memory_fraction is not None
+        )
+        if fleet_only:
             raise ValueError(
-                "--max-model-len / --max-num-seqs / --num-kvcache-blocks apply to "
-                "the fleet engine; the session engine keeps a per-request cache "
-                "and has no pool"
+                "--max-model-len / --max-num-seqs / --num-kvcache-blocks / "
+                "--pool-memory-fraction apply to the fleet engine; the session "
+                "engine keeps a per-request cache and has no pool"
             )
         session = Session.from_axon(
             axon_path,
@@ -412,6 +421,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-model-len", type=int, default=None, help="fleet: maximum sequence length (default: 4096, capped by the checkpoint)")
     parser.add_argument("--max-num-seqs", type=int, default=None, help="fleet: maximum concurrent sequences in the engine (default 512)")
     parser.add_argument("--num-kvcache-blocks", type=int, default=None, help="fleet: KV pool blocks (default: sized from device memory minus weights)")
+    parser.add_argument("--pool-memory-fraction", type=float, default=None, help="fleet: fraction of the device's recommended memory for weights + KV pool (default 0.6)")
     parser.add_argument("--no-warm-compile", action="store_true")
     args = parser.parse_args(argv)
     serve(
@@ -427,6 +437,7 @@ def main(argv: list[str] | None = None) -> None:
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
         num_kvcache_blocks=args.num_kvcache_blocks,
+        pool_memory_fraction=args.pool_memory_fraction,
     )
 
 

@@ -111,8 +111,6 @@ class ModelRunner:
                 "the serving contract requires paged attention modules to bind"
             )
 
-    _POOL_BUDGET_FRACTION = 0.25  # of the device's recommended memory, for the pool
-
     def _autosize_num_blocks(
         self, num_layers: int, num_kv_heads: int, head_dim: int
     ) -> int:
@@ -120,15 +118,17 @@ class ModelRunner:
 
         The upstream formula (every sequence at max_model_len simultaneously)
         asks e.g. 224 GiB on a laptop: a request that either fails loudly or,
-        worse, drives the machine into swap. Instead: budget a fixed fraction
-        of the device's recommended memory minus the resident weights, floor
-        at one full-length sequence, and print the derivation. Pass
-        ``num_kvcache_blocks`` explicitly to opt out.
+        worse, drives the machine into swap. Instead: budget
+        ``config.pool_memory_fraction`` of the device's recommended memory
+        (the ceiling macOS actually enforces on unified memory) minus the
+        resident weights, floor at one full-length sequence, and print the
+        derivation. Pass ``num_kvcache_blocks`` explicitly to opt out.
         """
         bytes_per_block = (
             num_layers * 2 * num_kv_heads * head_dim * self.block_size
             * self.config.hf_config.dtype.itemsize
         )
+        fraction = self.config.pool_memory_fraction
         budget = _device_memory_budget(self.device)
         weights = sum(p.numel() * p.element_size() for p in self.model.parameters())
         state = getattr(self.model, "state_dict_tensors", None)
@@ -136,13 +136,13 @@ class ModelRunner:
             weights += sum(
                 t.numel() * t.element_size() for t in state.values() if torch.is_tensor(t)
             )
-        pool_bytes = int(budget * self._POOL_BUDGET_FRACTION) - weights
+        pool_bytes = int(budget * fraction) - weights
         memory_blocks = pool_bytes // bytes_per_block
         floor_blocks = -(-self.config.max_model_len // self.block_size)
         if memory_blocks < floor_blocks:
             raise ValueError(
                 f"device {self.device} has no room for even one max-length sequence: "
-                f"pool budget {pool_bytes / 2**30:.2f} GiB (25% of "
+                f"pool budget {pool_bytes / 2**30:.2f} GiB ({fraction:.0%} of "
                 f"{budget / 2**30:.2f} GiB minus {weights / 2**30:.2f} GiB weights) "
                 f"holds {memory_blocks} blocks of {bytes_per_block / 2**20:.1f} MiB, "
                 f"but max_model_len {self.config.max_model_len} needs {floor_blocks}; "
@@ -153,7 +153,7 @@ class ModelRunner:
         print(
             f"fleet: KV pool autosized to {blocks} blocks "
             f"({blocks * bytes_per_block / 2**30:.2f} GiB): "
-            f"{self._POOL_BUDGET_FRACTION:.0%} of {budget / 2**30:.1f} GiB device budget "
+            f"{fraction:.0%} of {budget / 2**30:.1f} GiB device budget "
             f"minus {weights / 2**30:.2f} GiB weights; floor {floor_blocks} blocks "
             f"(one max-length sequence), worst case {worst_case} blocks "
             f"({self.config.max_num_seqs} sequences x {self.config.max_model_len} tokens)"
