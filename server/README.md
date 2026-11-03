@@ -28,33 +28,53 @@ python -m server --axon synapse/models/qwen3/generic-qwen3.axon \
 
 ## Throughput: the online server is what makes it scale
 
-Measured on the qwen3 0.6B-class checkpoint, torch MPS (Apple GPU),
-bfloat16, greedy, four prompts of 24 tokens generating 32 new tokens each
-(`log/qwen3-throughput-real.py` and `log/probe-mps-*.py`):
+All numbers from one measurement session on the qwen3 0.6B-class checkpoint,
+torch MPS (Apple GPU), bfloat16, greedy, decode to a 56-token total length.
+Barebone rows come from the canonical runner (`synapse axon-benchmark
+--benchmark-mode generate`, default `__torch_sdpa` intrinsics, artifact's own
+`generate()`), logged under `log/qwen3-barebone-bench/`; server rows from
+`log/probe-http-throughput.py` against `python -m server`. The runner prints
+per-sequence tok/s; aggregates below multiply the batch back in.
 
-| path                                   | per token (solo) | aggregate, 4 concurrent |
-|----------------------------------------|-----------------:|------------------------:|
-| barebone artifact `generate()`          | 68 ms            | 15 tok/s — a hard cap   |
-| Session shim (2-slot concurrency)       | 56 ms            | 20 tok/s                |
-| fleet engine, solo                      | 60 ms            | —                       |
-| **fleet engine, 4 concurrent streams**  | **20 ms/token**  | **51 tok/s**            |
-| the same, over real HTTP (`/v1/completions`) | —           | 47 tok/s                |
+| path                                    | per step (ms) | aggregate tok/s |
+|-----------------------------------------|--------------:|----------------:|
+| barebone `generate()`, 1 sequence        | 29.5          | 33              |
+| barebone `generate()`, static batch 2    | 31.7          | 63              |
+| barebone `generate()`, static batch 4    | 34.1          | 117             |
+| **fleet engine over HTTP, 1 stream**     | 32.6          | **31**          |
+| **fleet engine over HTTP, 4 concurrent** | ~54           | **74**          |
 
-The single-sequence paths cannot turn concurrent load into throughput: the
-barebone loop and the shim spend one forward call per token of one sequence,
-so four queued requests are four sequential runs at the solo rate. The
-fleet's per-step cost is nearly flat in batch width — 33 forwards carried
-4 × 32 tokens, where the shim needed 128 — so the same GPU delivers 51 tok/s
-to four clients where any single-sequence path delivers 15–20.
+- If every client arrives at once and you statically batch them, the barebone
+  loop is the ceiling: per-step cost is nearly flat in batch width on MPS
+  (29.5 → 34.1 ms from batch 1 to 4), so a static batch 4 reaches 117 tok/s.
+  That path has no server around it, though: the batch is fixed when the call
+  starts, KV memory grows with the longest sequence in the batch, and request
+  5 waits for the whole batch to drain.
+- The online server turns asynchronous arrivals into the same kind of batch:
+  four streams that connected independently finish at 74 tok/s aggregate —
+  2.4× the server's own solo rate. The solo rate itself (31) matches the
+  barebone solo loop (33) to within ~5%: that margin is what the paged
+  serving layer costs per step.
+- Remaining gap: at batch 4 the fleet's step is ~54 ms versus the static
+  path's 34 ms (1.6×) — paged-attention gather plus engine bookkeeping
+  versus one fused SDPA call over a contiguous cache. Closing that gap is
+  worth up to the 117 tok/s static ceiling.
 
-The solo penalty is engineered out, not inherent: an early build paid
-~1.5× per token over the barebone loop because the paged kernel re-extracted
-scalars from device tensors once per layer — ~30 forced CPU↔GPU pipeline
-syncs per step (each ~1 ms on MPS; 35–38% of step time). The engine now
-derives those scalars once per step host-side and carries them on the
-serving context, so a decode step syncs exactly once (the sampled token
-coming back). After that, fleet solo (60 ms/token) beats the barebone loop
-while scaling to 2.6× the shim's throughput at four streams.
+Reproduce the barebone rows (the runner maps a declared checkpoint id to
+`<repo-root>/models/<id>`; this checkout's layout puts `models/` one level
+above the package, hence the pragma rewrite into a log-local copy):
+
+```
+sed '1s/.*/{-# CHECKPOINTS ["qwen3"] #-}/' synapse/models/qwen3/generic-qwen3.axon \
+    > log/qwen3-barebone-bench/qwen3-bench.axon
+synapse axon-benchmark log/qwen3-barebone-bench/qwen3-bench.axon \
+    --checkpoint qwen3 --device mps --dtype bfloat16 \
+    --benchmark-mode generate --max-len 56 --generate-warmup 1 --generate-repeat 3 \
+    --skip-hf --tokenizer models/qwen3 --text "The future of AI is" \
+    --log-dir log/qwen3-barebone-bench
+```
+
+Repeat `--text` for the static batches (2 prompts → 63 tok/s, 4 → 117).
 
 Backend note: these numbers are torch-MPS. On MLX the shim reaches
 75 tok/s solo / 113 tok/s at four streams — the fleet is torch-only until
