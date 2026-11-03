@@ -110,6 +110,16 @@ per-call rates at batch 8 against the same pool):
 | HTTP, 1 stream                            | 23–25 tok/s                   | 29–30 tok/s                   |
 | HTTP, 4 concurrent                        | 57–58 tok/s                   | 87–95 tok/s                   |
 
+- The comparison the flag was built for, same session as the rows above: the
+  barebone artifact's own `generate()` loop (static batch, no server, default
+  `__torch_sdpa` attention) measured 67–72 tok/s at static batch 4 and 125 at
+  static batch 8 — the fleet with the metal kernel beats it at every width
+  (98 at 4 concurrent in-process, 141–145 at 8). The serving layer stopped
+  being a tax on the raw loop: the paged pool plus the fused decode kernel is
+  now the fastest attention path on this machine, and the barebone loop
+  cannot use it (no paged pool; the kernel is block-addressed by design).
+  The static-ceiling rows in the table above described the earlier session's
+  machine state; treat them as history, not as the current ceiling.
 - The win grows with batch width because the composed attention GPU time does
   (batch 4 → batch 8 doubles it while the per-step CPU floor stays): +25% solo,
   +42% at 4, +40% at 8, +55% over HTTP at 4. At HTTP @4 the metal solo step
