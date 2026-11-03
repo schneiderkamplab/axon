@@ -66,6 +66,11 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size  # v1: 1
         self.model = model
         self.device = torch.device(config.device)
+        if config.kv_kernel == "metal" and self.device.type != "mps":
+            raise ValueError(
+                f"kv_kernel=metal requires device mps; got {config.device!r} "
+                "(the Metal decode kernel is Apple-silicon only)"
+            )
         self.sampler = Sampler()
         self.allocate_kv_cache()
 
@@ -104,6 +109,13 @@ class ModelRunner:
                 # module per layer.
                 module.k_cache = self.kv_cache[0]
                 module.v_cache = self.kv_cache[1]
+                # Same post-instantiation binding for the decode-kernel choice:
+                # the generated artifact leaves PagedAttention at the "torch"
+                # default; the server's kv_kernel config opts into the Metal
+                # decode kernel here (the runner already raised if metal was
+                # requested off-mps; per-call shape/dtype rules raise loudly
+                # inside metal_decode_paged_sdpa).
+                module.accelerator = self.config.kv_kernel
                 bound += 1
         if bound == 0:
             raise ValueError(

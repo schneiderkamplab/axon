@@ -53,6 +53,13 @@ class Config:
     # ceiling macOS actually enforces (~78% of RAM here); 0.6 of it keeps a
     # shared machine comfortable, raise it (e.g. 0.9) on a dedicated box.
     pool_memory_fraction: float = 0.6
+    # Decode-attention kernel for the paged pool (fleet addition): "torch"
+    # runs the composed gather+mask+SDPA path; "metal" runs the fused Metal
+    # decode kernel (synapse/axon/codegen2_torch/paged_attention.py,
+    # torch.mps.compile_shader) — mps device, bfloat16/float32 pools, and a
+    # power-of-two kvcache_block_size only, all raised loudly. Prefill keeps
+    # the composed varlen path either way.
+    kv_kernel: str = "torch"
     # Prefill masking mode of the served artifact (fleet addition, not in
     # upstream nano-vllm): True for causal decoders, False for PrefixLM
     # artifacts (bidirectional attention over the prompt region). Set by
@@ -61,6 +68,9 @@ class Config:
 
     def __post_init__(self):
         assert self.kvcache_block_size % 256 == 0
+        assert self.kv_kernel in ("torch", "metal"), (
+            f"kv_kernel must be 'torch' or 'metal', got {self.kv_kernel!r}"
+        )
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = ModelConfigView(self.model_config)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)

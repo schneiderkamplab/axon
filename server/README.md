@@ -72,6 +72,86 @@ per-sequence tok/s; aggregates below multiply the batch back in.
   context as device tensors — `bool()`/`int()` on their elements bypass
   `.item()`-style instrumentation, so only aten-level profiling exposed it.
 
+**Absolute numbers are session-bound**: the machine's clock/thermal state
+shifts every row by tens of percent between sessions (the composed fleet @8
+measured 137 tok/s in the session that produced the table above and 99–102 in
+the kernel session below). Only back-to-back, same-session comparisons are
+evidence; the rows still hold as a same-session snapshot of the three paths.
+
+## Metal KV-cache decode kernel (`--kv-kernel metal`)
+
+Opt-in fleet flag that replaces the composed decode-attention chain (block-table
+gather → context mask → SDPA, ~6 GPU launches per layer per step over data the
+GPU already holds) with ONE fused Metal kernel per layer per step: a
+flash-style online softmax over the block-addressed pool, one simdgroup (32
+lanes) per (sequence, query head), each lane owning `head_dim/32` output dims.
+The library is compiled lazily per (dtype, head geometry, block size) via
+`torch.mps.compile_shader` (torch ≥ 2.11, Apple silicon) and dispatches on
+torch's own MPS stream, so ordering against the surrounding torch ops is
+automatic.
+
+```bash
+python -m server --axon synapse/models/qwen3/generic-qwen3.axon \
+    --checkpoint models/qwen3 --engine fleet --device mps --dtype bfloat16 \
+    --port 8123 --max-concurrency 4 --kv-kernel metal
+```
+
+Back-to-back on the qwen3 0.6B-class checkpoint (one session, two runs per
+cell, bfloat16, greedy, decode to 56 total length; isolated rows are sustained
+per-call rates at batch 8 against the same pool):
+
+| measurement                              | composed (`torch`)            | metal kernel                  |
+|------------------------------------------|------------------------------:|------------------------------:|
+| decode attention, ctx 56, batch 8         | 526 µs/call                   | 24–26 µs/call (~20×)          |
+| decode attention, ctx 512, batch 8        | 2268 µs/call                  | 213 µs/call (~10×)            |
+| in-process solo (8 reqs × 32 tok, serial) | 5768 ms; attention 429 µs/call| 4308 ms; attention 20 µs/call |
+| in-process, 4 concurrent                  | 69 tok/s                      | 98 tok/s                      |
+| in-process, 8 concurrent                  | 99–102 tok/s (78–81 ms/step)  | 141–145 tok/s (55–57 ms/step) |
+| HTTP, 1 stream                            | 23–25 tok/s                   | 29–30 tok/s                   |
+| HTTP, 4 concurrent                        | 57–58 tok/s                   | 87–95 tok/s                   |
+
+- The win grows with batch width because the composed attention GPU time does
+  (batch 4 → batch 8 doubles it while the per-step CPU floor stays): +25% solo,
+  +42% at 4, +40% at 8, +55% over HTTP at 4. At HTTP @4 the metal solo step
+  (33–34 ms) sits near the barebone static-1 floor (29.5 ms in the earlier
+  session) — the serving layer plus decode attention now cost almost nothing.
+- Contract: decode only — prefill keeps the composed varlen path (a varlen
+  Metal kernel is deferred phase 2; this is a documented scope limit, not a
+  fallback). Requires mps device, bfloat16 or float32 pool, a power-of-two
+  `kvcache_block_size`, and `head_dim` divisible by 64; every unsupported
+  configuration raises loudly (`ValueError`/`RuntimeError`), nothing falls
+  back silently. The `metal` choice is validated at config parse, at runner
+  construction (device check), and per call (shapes/dtypes/contiguity).
+- Token parity vs the composed path on the real model (bf16, greedy, 32
+  tokens, 8 prompts): 3/8 streams identical; the 5 divergences all start at
+  token ≥ 20 — bf16 argmax flips from fp32 accumulation-order differences,
+  the same class as the composed path's own flips against the fp32 CPU
+  oracle (recorded: 1 of 4 prompts). Early tokens match everywhere; on the
+  probed prompt the metal stream tracked the fp32 shim for 10 tokens while
+  the composed stream degenerated into a repetition loop — the kernel is not
+  systematically worse, bf16 greedy generation is simply chaotic past the
+  first handful of tokens.
+- `torch.mps.compile_shader` facts the implementation depends on (see
+  `synapse/axon/codegen2_torch/paged_attention.py`, `_metal_decode_source`):
+  arguments bind **positionally** against the MSL parameter order — the
+  output buffer must be passed in its declared position, and passing it
+  first when the MSL lists it later silently writes into the wrong buffer
+  (the kernel "succeeds" and the output stays untouched); `threads=` is
+  total threads (dispatchThreads semantics) and `group_size=` the threadgroup
+  shape; scalars bind by value; int64 tensors bind to `device const int64_t*`.
+- torch compiles MSL **without** the optimizer passes MLX applies: runtime-
+  bound loops over per-thread arrays spill to threadgroup-local memory,
+  runtime div/mod emit real (emulated) udiv, and precise `exp` is slow. The
+  generated kernel therefore bakes all geometry as compile-time `#define`s,
+  emits manually unrolled per-lane code (no register arrays), uses
+  `fast::exp`, and addresses blocks with shift/mask — which is also why
+  block sizes must be powers of two. bf16 rows load/store as 4-byte uint
+  pairs unpacked with `as_type<float>(bits << 16)`; the fp32 variant uses
+  plain float loads/stores from the same generator.
+- Isolated per-call numbers need sustained repetitions (3×300 calls): one-shot
+  timings are clock-ramp artifacts with a ~3× spread. Enqueue cost is ~8.5 µs
+  per call, so 28 layers add ~0.24 ms of CPU per step — the win is GPU time.
+
 Reproduce the barebone rows (the runner maps a declared checkpoint id to
 `<repo-root>/models/<id>`; this checkout's layout puts `models/` one level
 above the package, hence the pragma rewrite into a log-local copy):

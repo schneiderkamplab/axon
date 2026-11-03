@@ -45,6 +45,7 @@ __all__ = [
     "store_kvcache_paged",
     "varlen_paged_sdpa",
     "decode_paged_sdpa",
+    "metal_decode_paged_sdpa",
 ]
 
 _NEG_INF = float("-inf")
@@ -313,6 +314,293 @@ def decode_paged_sdpa(
     return out.squeeze(2).reshape(batch, num_heads * head_dim)
 
 
+# --------------------------------------------------------------------------
+# Metal decode kernel (opt-in accelerator, mps only).
+#
+# The composed path above pays, per layer per decode step, a KV gather through
+# the block tables, a mask build, dtype alignment, and an SDPA call — separate
+# launches over data the GPU already holds. The kernel below does the whole
+# decode attention step in ONE launch that reads the pool directly: a
+# flash-style online softmax with one simdgroup (32 lanes) per (sequence,
+# query head), each lane owning head_dim/32 output dims.
+#
+# Geometry (head counts, head_dim, block_size) is baked into the source and
+# the library is compiled lazily per geometry via torch.mps.compile_shader
+# (torch >= 2.11, Apple silicon); kernels dispatch on torch's own MPS stream,
+# so ordering against surrounding torch ops is automatic. Dispatch failures
+# and unsupported shapes raise — nothing falls back silently.
+# --------------------------------------------------------------------------
+
+_METAL_LIBRARIES: dict[tuple[str, int, int, int, int], Any] = {}
+
+
+def _metal_decode_source(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    block_size: int,
+    suffix: str,
+) -> str:
+    """Generate the (fully unrolled) Metal source for one pool geometry.
+
+    Everything is compile-time: head counts, head_dim, and the block-size
+    shift/mask are baked in, because torch.mps.compile_shader does not run
+    the optimizer passes that would strength-reduce runtime divisions or
+    unroll the per-lane register arrays. ``scale`` stays a runtime scalar.
+    """
+    dpl = head_dim // 32          # dims per lane
+    pairs = dpl // 2              # 4-byte bf16 pairs per lane
+    log2 = block_size.bit_length() - 1
+    assert head_dim % 64 == 0 and 1 <= pairs <= 4
+    bf16 = suffix == "bfloat"
+    acc_decls = [f"    float acc{i} = 0.0f;" for i in range(dpl)]
+
+    if bf16:
+        # bf16: load/store 4-byte uints, each carrying two bf16 halves that
+        # unpack to floats via bit shifts (as_type is a free reinterpret).
+        q_loads = [f"    const uint qb{i} = qvec[{i}];" for i in range(pairs)]
+        q_unpack = [
+            f"    const float qv{i} = "
+            + (f"as_type<float>(qb{i // 2} << 16)" if i % 2 == 0
+               else f"as_type<float>(qb{i // 2} & 0xffff0000u)") + ";"
+            for i in range(dpl)
+        ]
+        part_terms = [
+            f"qv{i} * "
+            + (f"as_type<float>(kb{i // 2} << 16)" if i % 2 == 0
+               else f"as_type<float>(kb{i // 2} & 0xffff0000u)")
+            for i in range(dpl)
+        ]
+        k_loads = [f"        const uint kb{i} = kvec[{i}];" for i in range(pairs)]
+        v_loads = [f"        const uint vb{i} = vvec[{i}];" for i in range(pairs)]
+        acc_updates = [
+            f"        acc{i} = acc{i} * alpha + w * "
+            + (f"as_type<float>(vb{i // 2} << 16)" if i % 2 == 0
+               else f"as_type<float>(vb{i // 2} & 0xffff0000u)") + ";"
+            for i in range(dpl)
+        ]
+        store_terms = [
+            f"        uptr[{i}] = (as_type<uint>(acc{2 * i} * inv_l) >> 16) |"
+            f" (as_type<uint>(acc{2 * i + 1} * inv_l) & 0xffff0000u);"
+            for i in range(pairs)
+        ]
+        qvec_decl = "    const device uint* qvec = (const device uint*)(qrow + d0);"
+        kvec_decl = (
+            "        const device uint* kvec = (const device uint*)(k_pool + row * D + d0);\n"
+            "        const device uint* vvec = (const device uint*)(v_pool + row * D + d0);"
+        )
+        uptr_decl = "    device uint* uptr = (device uint*)(orow + d0);"
+    else:
+        # float32: plain element loads and stores (no bit packing).
+        q_loads = []
+        q_unpack = [f"    const float qv{i} = qrow[d0 + {i}];" for i in range(dpl)]
+        part_terms = [f"qv{i} * krow[d0 + {i}]" for i in range(dpl)]
+        k_loads = []
+        v_loads = []
+        acc_updates = [
+            f"        acc{i} = acc{i} * alpha + w * vrow[d0 + {i}];"
+            for i in range(dpl)
+        ]
+        store_terms = [
+            f"        orow[d0 + {i}] = acc{i} * inv_l;" for i in range(dpl)
+        ]
+        qvec_decl = ""
+        kvec_decl = (
+            "        const device float* krow = k_pool + row * D;\n"
+            "        const device float* vrow = v_pool + row * D;"
+        )
+        uptr_decl = ""
+
+    def join(lines: list[str]) -> str:
+        return "\n".join(lines) if lines else "        ;"
+
+    return f"""#define HQ {num_heads}u
+#define HKV {num_kv_heads}u
+#define D {head_dim}u
+#define BLOCK_LOG {log2}u
+#define BLOCK_MASK {block_size - 1}u
+#define GQA_RATIO {num_heads // num_kv_heads}u
+#define DPL {dpl}u
+#include <metal_stdlib>
+using namespace metal;
+
+// Fused paged decode attention over the block-addressed pool.
+// q [B, HQ, D]; k/v pools [blocks, block_size, HKV, D];
+// block_tables [B, max_blocks] int64 (-1 padding never read: the loop runs
+// to each row's context_len); context_lens [B] int64; out [B, HQ, D].
+// Grid: (HQ * 32, B, 1) threads, (32, 1, 1) each — one simdgroup per
+// (sequence, query head), lane i owns output dims [i*DPL, (i+1)*DPL).
+kernel void paged_decode_attention_{suffix}(
+    device const {suffix}* q,
+    device const {suffix}* k_pool,
+    device const {suffix}* v_pool,
+    device const int64_t* block_tables,
+    device const int64_t* context_lens,
+    device {suffix}* out,
+    constant uint& max_blocks,
+    constant float& scale,
+    uint3 tig [[thread_position_in_grid]],
+    uint3 tpitg [[thread_position_in_threadgroup]])
+{{
+    const uint h = tig.x / 32u;
+    const uint b = tig.y;
+    const uint lane = tpitg.x;
+    const uint kvh = h / GQA_RATIO;
+    const uint d0 = lane * DPL;
+    const int ctx = (int)context_lens[b];
+    const device {suffix}* qrow = q + ((uint64_t)b * HQ + h) * D;
+    device {suffix}* orow = out + ((uint64_t)b * HQ + h) * D;
+{qvec_decl}
+{join(q_loads)}
+{join(q_unpack)}
+
+    float m = -INFINITY;
+    float l = 0.0f;
+{join(acc_decls)}
+
+    for (int p = 0; p < ctx; p++) {{
+        const uint blk = (uint)block_tables[b * max_blocks + ((uint)p >> BLOCK_LOG)];
+        const uint off = (uint)p & BLOCK_MASK;
+        const uint64_t row = ((uint64_t)blk * (1u << BLOCK_LOG) + off) * HKV + kvh;
+{kvec_decl}
+{join(k_loads)}
+{join(v_loads)}
+        const float part = {' + '.join(part_terms)};
+        const float s = simd_sum(part) * scale;
+        const float m_new = max(m, s);
+        const float alpha = fast::exp(m - m_new);
+        const float w = fast::exp(s - m_new);
+        l = l * alpha + w;
+{join(acc_updates)}
+        m = m_new;
+    }}
+
+    const float inv_l = 1.0f / l;
+{uptr_decl}
+{join(store_terms)}
+}}
+"""
+
+
+def _metal_decode_library(
+    dtype: torch.dtype,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    block_size: int,
+) -> Any:
+    """Compile (once per geometry) and return the Metal kernel library."""
+    suffix = "bfloat" if dtype == torch.bfloat16 else "float"
+    key = (suffix, num_heads, num_kv_heads, head_dim, block_size)
+    lib = _METAL_LIBRARIES.get(key)
+    if lib is None:
+        compile_shader = getattr(torch.mps, "compile_shader", None)
+        if compile_shader is None:
+            raise RuntimeError(
+                "kv_kernel=metal needs torch.mps.compile_shader (torch >= 2.11 "
+                f"on Apple silicon); torch {torch.__version__} does not expose it"
+            )
+        source = _metal_decode_source(num_heads, num_kv_heads, head_dim, block_size, suffix)
+        try:
+            lib = compile_shader(source)
+        except Exception as exc:
+            raise RuntimeError(
+                f"compiling the Metal paged-decode kernel failed: {exc}"
+            ) from exc
+        _METAL_LIBRARIES[key] = lib
+    return lib
+
+
+def metal_decode_paged_sdpa(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    scale: float | None = None,
+    context_lens: torch.Tensor | None = None,
+    block_tables: torch.Tensor | None = None,
+    context_lens_max: int | None = None,
+) -> torch.Tensor:
+    """Decode attention over the pool as ONE fused Metal kernel launch.
+
+    Same contract as :func:`decode_paged_sdpa` (``q`` ``[B, num_heads,
+    head_dim]``, merged ``[B, num_heads * head_dim]`` result, block-addressed
+    pool) but executed by the opt-in Metal kernel instead of the composed
+    gather+mask+SDPA chain. Loud raises, no fallbacks: non-mps devices,
+    unsupported dtypes, non-power-of-two block sizes, and compile failures
+    all raise.
+
+    Supported pool dtypes: bfloat16 and float32. ``head_dim`` must be a
+    multiple of 64 (the generated kernel unrolls head_dim/32 dims per lane
+    in bf16 pairs); ``kvcache_block_size`` must be a power of two (the
+    block/offset addressing compiles to shift/mask).
+    """
+    if q.device.type != "mps":
+        raise ValueError(
+            "metal_decode_paged_sdpa requires mps tensors; got q on "
+            f"{q.device.type} (kv_kernel=metal is mps-only)"
+        )
+    dtype = k_cache.dtype
+    if dtype not in (torch.bfloat16, torch.float32):
+        raise ValueError(
+            "metal_decode_paged_sdpa supports bfloat16/float32 pools; got "
+            f"{dtype} (use kv_kernel=torch for other cache dtypes)"
+        )
+    if q.dtype != dtype:
+        raise ValueError(
+            f"metal_decode_paged_sdpa expects q in the pool dtype {dtype}; got {q.dtype}"
+        )
+    if head_dim % 64 != 0 or head_dim // 32 > 8:
+        raise ValueError(
+            "metal_decode_paged_sdpa requires head_dim divisible by 64 and "
+            f"head_dim/32 <= 8; got {head_dim} (use kv_kernel=torch)"
+        )
+    block_size = k_cache.shape[1]
+    if block_size & (block_size - 1):
+        raise ValueError(
+            "metal_decode_paged_sdpa requires a power-of-two kvcache_block_size; "
+            f"got {block_size} (use kv_kernel=torch)"
+        )
+    if block_tables is None or context_lens is None:
+        raise ValueError(
+            "metal_decode_paged_sdpa requires block_tables and context_lens: "
+            "the pool is block-addressed, so history must be gathered through "
+            "the same tables the store used"
+        )
+    if block_tables.dtype != torch.int64 or context_lens.dtype != torch.int64:
+        raise ValueError(
+            "metal_decode_paged_sdpa expects int64 block_tables/context_lens "
+            f"(the engine's metadata contract); got {block_tables.dtype}/"
+            f"{context_lens.dtype}"
+        )
+    for name, tensor in (
+        ("q", q), ("k_cache", k_cache), ("v_cache", v_cache),
+        ("block_tables", block_tables), ("context_lens", context_lens),
+    ):
+        if not tensor.is_contiguous():
+            raise ValueError(f"metal_decode_paged_sdpa requires contiguous {name}")
+    batch = q.shape[0]
+    max_blocks = block_tables.shape[1]
+    if context_lens_max is not None:
+        needed = -(-int(context_lens_max) // block_size)
+        if max_blocks < needed:
+            raise ValueError(
+                f"block_tables width {max_blocks} cannot cover context_lens_max "
+                f"{int(context_lens_max)} at block_size {block_size}"
+            )
+    out = torch.empty((batch, num_heads, head_dim), dtype=dtype, device=q.device)
+    lib = _metal_decode_library(dtype, num_heads, num_kv_heads, head_dim, block_size)
+    getattr(lib, f"paged_decode_attention_{'bfloat' if dtype == torch.bfloat16 else 'float'}")(
+        q, k_cache, v_cache, block_tables, context_lens, out,
+        int(max_blocks), float(scale if scale is not None else 1.0 / (head_dim**0.5)),
+        threads=(num_heads * 32, batch, 1), group_size=(32, 1, 1),
+    )
+    return out.reshape(batch, num_heads * head_dim)
+
+
 def paged_attention(
     q: torch.Tensor,
     key: torch.Tensor,
@@ -326,6 +614,7 @@ def paged_attention(
     scale: float | None = None,
     context: Any | None = None,
     causal: bool = True,
+    accelerator: str = "torch",
 ) -> torch.Tensor:
     """One attention step against the engine-owned pool.
 
@@ -335,6 +624,12 @@ def paged_attention(
     head_dim]`` / ``[N, H_kv, head_dim]``); the result is merged
     ``[N, num_heads * head_dim]``. ``causal`` selects the prefill masking
     mode (see :func:`varlen_paged_sdpa`); decode is mask-free either way.
+
+    ``accelerator`` selects the decode kernel: ``"torch"`` (default) runs the
+    composed gather+mask+SDPA path; ``"metal"`` runs the fused Metal kernel
+    (:func:`metal_decode_paged_sdpa`, mps-only, loud raises when
+    unavailable). Prefill always runs the composed varlen path — the Metal
+    kernel is decode-only.
 
     With ``block_tables`` in the context this is paged addressing; the tables
     are required — the pool is block-addressed on both the store and the read
@@ -361,7 +656,16 @@ def paged_attention(
             cu_seqlens_q_host=context.cu_seqlens_q_host,
             cu_seqlens_k_host=context.cu_seqlens_k_host,
         )
-    return decode_paged_sdpa(
+    if accelerator == "metal":
+        decode = metal_decode_paged_sdpa
+    elif accelerator == "torch":
+        decode = decode_paged_sdpa
+    else:
+        raise ValueError(
+            f"unknown paged-attention accelerator {accelerator!r} "
+            "(expected 'torch' or 'metal')"
+        )
+    return decode(
         q,
         k_cache,
         v_cache,
@@ -398,11 +702,17 @@ class PagedAttention(torch.nn.Module):
         head_dim: int,
         scale: float | None = None,
         causal: bool = True,
+        accelerator: str = "torch",
     ) -> None:
         super().__init__()
         if num_heads % num_kv_heads != 0:
             raise ValueError(
                 f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+            )
+        if accelerator not in ("torch", "metal"):
+            raise ValueError(
+                f"unknown PagedAttention accelerator {accelerator!r} "
+                "(expected 'torch' or 'metal')"
             )
         self.num_heads = int(num_heads)
         self.num_kv_heads = int(num_kv_heads)
@@ -412,6 +722,11 @@ class PagedAttention(torch.nn.Module):
         # builtin (causal_mask_for_input vs bidirectional_mask_for_input);
         # never inferred at runtime.
         self.causal = bool(causal)
+        # Decode kernel choice: "torch" (composed gather+mask+SDPA) or
+        # "metal" (fused Metal kernel, mps-only). The generated artifact
+        # leaves this at the default; the engine binds it post-instantiation
+        # from the server's kv_kernel config, like the pool views below.
+        self.accelerator = accelerator
         # Engine-owned pool views; None until the runner binds them.
         self.k_cache: torch.Tensor | None = None
         self.v_cache: torch.Tensor | None = None
@@ -424,7 +739,8 @@ class PagedAttention(torch.nn.Module):
     def extra_repr(self) -> str:
         return (
             f"num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, "
-            f"head_dim={self.head_dim}, causal={self.causal}"
+            f"head_dim={self.head_dim}, causal={self.causal}, "
+            f"accelerator={self.accelerator}"
         )
 
     def forward(
@@ -466,6 +782,7 @@ class PagedAttention(torch.nn.Module):
             head_dim=self.head_dim,
             scale=self.scale,
             causal=self.causal,
+            accelerator=self.accelerator,
         )
         # [B*S, H*D] merged -> [B, H, S, D] (inverse of merge_heads' permute).
         return out.reshape(batch, seq_len, num_heads, head_dim).transpose(1, 2)

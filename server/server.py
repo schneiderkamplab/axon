@@ -278,6 +278,7 @@ def _fleet_session(
     max_num_seqs: int | None = None,
     num_kvcache_blocks: int | None = None,
     pool_memory_fraction: float | None = None,
+    kv_kernel: str | None = None,
 ) -> "FleetSession":
     """Build the continuous-batching engine over a serving-profile artifact."""
     from .engine import Session as _Session
@@ -314,6 +315,8 @@ def _fleet_session(
         sizing["num_kvcache_blocks"] = num_kvcache_blocks
     if pool_memory_fraction is not None:
         sizing["pool_memory_fraction"] = pool_memory_fraction
+    if kv_kernel is not None:
+        sizing["kv_kernel"] = kv_kernel
     return FleetSession(
         model, model_config=model_config, tokenizer=tokenizer, device=target_device, **sizing
     )
@@ -334,6 +337,7 @@ def serve(
     max_num_seqs: int | None = None,
     num_kvcache_blocks: int | None = None,
     pool_memory_fraction: float | None = None,
+    kv_kernel: str | None = None,
 ) -> None:
     """Load the model and block serving requests (Ctrl+C to stop).
 
@@ -344,9 +348,10 @@ def serve(
     fleet engine's torch model (default cpu); the session engine selects its
     backend — and with it the device — implicitly, so an explicit device
     there is rejected rather than silently ignored. ``max_model_len`` /
-    ``max_num_seqs`` / ``num_kvcache_blocks`` / ``pool_memory_fraction`` are
-    fleet-only; left unset the pool sizes itself from the device's
-    recommended memory minus the resident weights.
+    ``max_num_seqs`` / ``num_kvcache_blocks`` / ``pool_memory_fraction`` /
+    ``kv_kernel`` are fleet-only; left unset the pool sizes itself from the
+    device's recommended memory minus the resident weights and decode runs
+    the composed torch attention path.
     """
     if engine == "fleet":
         session: _AnySession = _fleet_session(
@@ -358,6 +363,7 @@ def serve(
             max_num_seqs=max_num_seqs,
             num_kvcache_blocks=num_kvcache_blocks,
             pool_memory_fraction=pool_memory_fraction,
+            kv_kernel=kv_kernel,
         )
     elif engine == "session":
         if device is not None:
@@ -368,11 +374,12 @@ def serve(
         fleet_only = (
             max_model_len is not None or max_num_seqs is not None
             or num_kvcache_blocks is not None or pool_memory_fraction is not None
+            or kv_kernel is not None
         )
         if fleet_only:
             raise ValueError(
                 "--max-model-len / --max-num-seqs / --num-kvcache-blocks / "
-                "--pool-memory-fraction apply to the fleet engine; the session "
+                "--pool-memory-fraction / --kv-kernel apply to the fleet engine; the session "
                 "engine keeps a per-request cache and has no pool"
             )
         session = Session.from_axon(
@@ -422,6 +429,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-num-seqs", type=int, default=None, help="fleet: maximum concurrent sequences in the engine (default 512)")
     parser.add_argument("--num-kvcache-blocks", type=int, default=None, help="fleet: KV pool blocks (default: sized from device memory minus weights)")
     parser.add_argument("--pool-memory-fraction", type=float, default=None, help="fleet: fraction of the device's recommended memory for weights + KV pool (default 0.6)")
+    parser.add_argument("--kv-kernel", choices=["torch", "metal"], default=None, help="fleet: decode-attention kernel over the paged pool (default torch; metal = fused Metal kernel, mps + bf16/f32 pools + power-of-two block size)")
     parser.add_argument("--no-warm-compile", action="store_true")
     args = parser.parse_args(argv)
     serve(
@@ -438,6 +446,7 @@ def main(argv: list[str] | None = None) -> None:
         max_num_seqs=args.max_num_seqs,
         num_kvcache_blocks=args.num_kvcache_blocks,
         pool_memory_fraction=args.pool_memory_fraction,
+        kv_kernel=args.kv_kernel,
     )
 
 
