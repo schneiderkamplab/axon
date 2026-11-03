@@ -54,7 +54,11 @@ per-sequence tok/s; aggregates below multiply the batch back in.
   four streams that connected independently finish at 88 tok/s aggregate over
   HTTP (93 in-process) — 2.5× the server's own solo rate. The solo rate
   itself (35) matches the barebone solo loop (33): the paged serving layer
-  costs nothing measurable per step solo.
+  costs nothing measurable per step solo. Because per-step cost grows slowly
+  with batch width (41.5 → 56.7 ms from 4 to 8 rows), the aggregate keeps
+  climbing: 137 tok/s in-process at 8 concurrent (~130 over HTTP) — past the
+  static batch-4 ceiling. Per-user decode rate is the shared step time:
+  35 solo, 22 at four users, 17 at eight.
 - The HTTP layer costs ~6% (88 over HTTP vs 93 in-process); the rest of the
   gap to the static ceiling is per-step engine work: at batch 4 the fleet's
   step is ~42 ms versus the static path's 34 ms (1.2×) — the paged kernel
