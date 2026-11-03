@@ -174,7 +174,10 @@ class ModelRunner:
     def prepare_block_tables(self, seqs: list[Sequence]) -> torch.Tensor:
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
-        return self._to_device(block_tables, torch.int32)
+        # int64: the paged kernels index through these every layer; a narrower
+        # dtype would make each layer's .to(torch.long) a real conversion
+        # (a tiny kernel launch per layer, 28 per step).
+        return self._to_device(block_tables, torch.int64)
 
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids: list[int] = []
@@ -218,9 +221,17 @@ class ModelRunner:
         block_tables = self.prepare_block_tables(seqs)
         input_ids = self._to_device(input_ids, torch.int64)
         positions = self._to_device(positions, torch.int64)
-        cu_seqlens_q = self._to_device(cu_seqlens_q, torch.int32)
-        cu_seqlens_k = self._to_device(cu_seqlens_k, torch.int32)
-        slot_mapping = self._to_device(slot_mapping, torch.int32)
+        # Host lists must be captured BEFORE the names are rebound to device
+        # tensors below: the context's *_host fields are the kernel's fast
+        # path, and a device tensor smuggled through them would sync the
+        # pipeline once per layer (bool()/int() on tensor elements bypass
+        # .item()-style instrumentation, so this bug hid from the sync
+        # counters until a profiler with aten-level visibility ran).
+        cu_seqlens_q_host = cu_seqlens_q
+        cu_seqlens_k_host = cu_seqlens_k
+        cu_seqlens_q = self._to_device(cu_seqlens_q, torch.int64)
+        cu_seqlens_k = self._to_device(cu_seqlens_k, torch.int64)
+        slot_mapping = self._to_device(slot_mapping, torch.int64)
         # PrefixLM artifacts carry the per-sequence prompt boundary so the
         # paged kernel builds the two-region mask (prompt rows bidirectional,
         # generated rows causal). Positions are absolute, and a preemption
@@ -235,7 +246,7 @@ class ModelRunner:
             # The cu arrays existed as Python lists a moment ago; carry them so
             # the paged kernel does not re-extract scalars per layer (each
             # extraction is a full MPS/CUDA pipeline sync).
-            cu_seqlens_q_host=cu_seqlens_q, cu_seqlens_k_host=cu_seqlens_k,
+            cu_seqlens_q_host=cu_seqlens_q_host, cu_seqlens_k_host=cu_seqlens_k_host,
         )
         return input_ids, positions, sample_rows
 
@@ -254,8 +265,10 @@ class ModelRunner:
         max_context_lens = max(context_lens) if context_lens else 0
         input_ids = self._to_device(input_ids, torch.int64)
         positions = self._to_device(positions, torch.int64)
-        slot_mapping = self._to_device(slot_mapping, torch.int32)
-        context_lens = self._to_device(context_lens, torch.int32)
+        # int64 metadata: the decode kernel casts context_lens/slot_mapping to
+        # long every layer; int64 up front makes those no-ops.
+        slot_mapping = self._to_device(slot_mapping, torch.int64)
+        context_lens = self._to_device(context_lens, torch.int64)
         block_tables = self.prepare_block_tables(seqs)
         set_context(
             False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables,
@@ -265,13 +278,27 @@ class ModelRunner:
         )
         return input_ids, positions
 
-    def prepare_sample(self, seqs: list[Sequence]) -> dict[str, torch.Tensor]:
+    def prepare_sample(self, seqs: list[Sequence]) -> dict[str, torch.Tensor | bool]:
         # Sentinel convention (sampler-side): top_k <= 0 and top_p outside
         # (0, 1) disable the filter, matching the Session sampler's None.
+        # The host-side decisions ride along as bools: the sampler otherwise
+        # ends every step with up to three device-side all() checks, each a
+        # full pipeline sync ahead of the unavoidable token readback. The
+        # top_k test is deliberately conservative (only k <= 0 counts as
+        # disabled host-side); a k >= vocab row simply falls back to the
+        # device-side check — correct, one sync, and no silently skipped
+        # filtering.
+        temperatures = [seq.temperature for seq in seqs]
+        top_ks = [seq.top_k or 0 for seq in seqs]
+        top_ps = [seq.top_p if seq.top_p is not None else 1.0 for seq in seqs]
         return {
-            "temperatures": self._to_device([seq.temperature for seq in seqs], torch.float32),
-            "top_ks": self._to_device([seq.top_k or 0 for seq in seqs], torch.int64),
-            "top_ps": self._to_device([seq.top_p if seq.top_p is not None else 1.0 for seq in seqs], torch.float32),
+            "temperatures": self._to_device(temperatures, torch.float32),
+            "top_ks": self._to_device(top_ks, torch.int64),
+            "top_ps": self._to_device(top_ps, torch.float32),
+            "all_greedy": all(temperature <= 0.0 for temperature in temperatures),
+            "any_greedy": any(temperature <= 0.0 for temperature in temperatures),
+            "all_topk_disabled": all(top_k <= 0 for top_k in top_ks),
+            "all_topp_disabled": all(top_p >= 1.0 for top_p in top_ps),
         }
 
     # ── forward ─────────────────────────────────────────────────────────────

@@ -155,6 +155,19 @@ def varlen_paged_sdpa(
     cu_k = cu_seqlens_k.to(device=device, dtype=torch.long)
     # Host-side boundaries from the engine's context (see Context):
     # recomputing them here would sync the pipeline once per layer call.
+    if cu_seqlens_q_host is not None or cu_seqlens_k_host is not None:
+        for name, value in (
+            ("cu_seqlens_q_host", cu_seqlens_q_host),
+            ("cu_seqlens_k_host", cu_seqlens_k_host),
+        ):
+            if value is not None and isinstance(value, torch.Tensor):
+                raise TypeError(
+                    f"{name} must be host-side Python ints, got {type(value).__name__}: "
+                    "a device tensor in a *_host field silently degrades the fast "
+                    "path into per-layer pipeline syncs (bool()/int() on its "
+                    "elements), which is the exact failure this field exists to "
+                    "prevent"
+                )
     if cu_seqlens_q_host is not None and cu_seqlens_k_host is not None:
         num_seqs = len(cu_seqlens_q_host) - 1
         n = cu_seqlens_q_host[-1]

@@ -41,8 +41,8 @@ per-sequence tok/s; aggregates below multiply the batch back in.
 | barebone `generate()`, 1 sequence        | 29.5          | 33              |
 | barebone `generate()`, static batch 2    | 31.7          | 63              |
 | barebone `generate()`, static batch 4    | 34.1          | 117             |
-| **fleet engine over HTTP, 1 stream**     | 32.6          | **31**          |
-| **fleet engine over HTTP, 4 concurrent** | ~54           | **74**          |
+| **fleet engine over HTTP, 1 stream**     | 28.3          | **35**          |
+| **fleet engine over HTTP, 4 concurrent** | ~42 in-process| **88**          |
 
 - If every client arrives at once and you statically batch them, the barebone
   loop is the ceiling: per-step cost is nearly flat in batch width on MPS
@@ -51,14 +51,22 @@ per-sequence tok/s; aggregates below multiply the batch back in.
   starts, KV memory grows with the longest sequence in the batch, and request
   5 waits for the whole batch to drain.
 - The online server turns asynchronous arrivals into the same kind of batch:
-  four streams that connected independently finish at 74 tok/s aggregate —
-  2.4× the server's own solo rate. The solo rate itself (31) matches the
-  barebone solo loop (33) to within ~5%: that margin is what the paged
-  serving layer costs per step.
-- Remaining gap: at batch 4 the fleet's step is ~54 ms versus the static
-  path's 34 ms (1.6×) — paged-attention gather plus engine bookkeeping
-  versus one fused SDPA call over a contiguous cache. Closing that gap is
-  worth up to the 117 tok/s static ceiling.
+  four streams that connected independently finish at 88 tok/s aggregate over
+  HTTP (93 in-process) — 2.5× the server's own solo rate. The solo rate
+  itself (35) matches the barebone solo loop (33): the paged serving layer
+  costs nothing measurable per step solo.
+- The HTTP layer costs ~6% (88 over HTTP vs 93 in-process); the rest of the
+  gap to the static ceiling is per-step engine work: at batch 4 the fleet's
+  step is ~42 ms versus the static path's 34 ms (1.2×) — the paged kernel
+  rebuilds layer-invariant state (the decode mask, position range, metadata
+  casts) once per layer instead of once per step, and aligns rope-promoted
+  q/k to the pool dtype. hoisting those to per-step work is the remaining
+  lever, worth up to the 117 tok/s static ceiling.
+- Step-end syncs are engineered down to exactly one (the sampled token's
+  readback). An earlier build additionally synced once per layer during
+  prefill because the "host-side" cu_seqlens were smuggled through the
+  context as device tensors — `bool()`/`int()` on their elements bypass
+  `.item()`-style instrumentation, so only aten-level profiling exposed it.
 
 Reproduce the barebone rows (the runner maps a declared checkpoint id to
 `<repo-root>/models/<id>`; this checkout's layout puts `models/` one level

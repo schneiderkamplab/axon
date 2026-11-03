@@ -20,11 +20,28 @@ class Sampler(nn.Module):
         temperatures: torch.Tensor,
         top_ks: torch.Tensor | None = None,
         top_ps: torch.Tensor | None = None,
+        *,
+        all_greedy: bool | None = None,
+        any_greedy: bool | None = None,
+        all_topk_disabled: bool | None = None,
+        all_topp_disabled: bool | None = None,
     ) -> torch.Tensor:
+        """Sample one token per row.
+
+        The ``all_*``/``any_*`` flags are the host-side decisions the runner
+        already knows from the request params. Passing them skips the
+        device-side ``bool(tensor.all())`` checks — each of those is a full
+        MPS/CUDA pipeline sync, and at step end they would serialize after
+        the logits and before the token readback. ``None`` falls back to the
+        device-side check for direct callers; results are identical either
+        way, only the sync count differs.
+        """
         logits = logits.float()
-        greedy = temperatures <= 0.0
-        if bool(greedy.all()):
+        if all_greedy is None:
+            all_greedy = bool((temperatures <= 0.0).all())
+        if all_greedy:
             return logits.argmax(dim=-1)
+        greedy = temperatures <= 0.0
 
         # Scale by temperature for the sampled rows; greedy rows are clamped
         # to 1 here and overridden with the exact argmax below (dividing by
@@ -32,25 +49,32 @@ class Sampler(nn.Module):
         safe_t = temperatures.clamp_min(1e-10).unsqueeze(dim=1)
         logits = logits.div_(safe_t)
         if top_ks is not None:
-            logits = _apply_top_k(logits, top_ks)
+            logits = _apply_top_k(logits, top_ks, all_disabled=all_topk_disabled)
         if top_ps is not None:
-            logits = _apply_top_p(logits, top_ps)
+            logits = _apply_top_p(logits, top_ps, all_disabled=all_topp_disabled)
         probs = torch.softmax(logits, dim=-1)
         sampled = probs.div_(torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)).argmax(dim=-1)
-        if bool(greedy.any()):
+        if any_greedy is None:
+            any_greedy = bool(greedy.any())
+        if any_greedy:
             sampled = torch.where(greedy, logits.argmax(dim=-1), sampled)
         return sampled
 
 
-def _apply_top_k(logits: torch.Tensor, top_ks: torch.Tensor) -> torch.Tensor:
+def _apply_top_k(
+    logits: torch.Tensor, top_ks: torch.Tensor, *, all_disabled: bool | None = None
+) -> torch.Tensor:
     """Per-row top-k: keep the k largest logits, mask the rest to -inf.
 
     Rows with ``top_k <= 0`` (or >= vocab) are untouched, matching the
     Session sampler's ``top_k is None`` / ``top_k <= 0`` semantics.
+    ``all_disabled`` is the host-side shortcut (see :meth:`Sampler.forward`).
     """
     vocab = logits.shape[-1]
-    ks = torch.where(top_ks <= 0, torch.full_like(top_ks, vocab), top_ks).clamp_(max=vocab)
-    if bool((ks >= vocab).all()):
+    if all_disabled is None:
+        ks = torch.where(top_ks <= 0, torch.full_like(top_ks, vocab), top_ks).clamp_(max=vocab)
+        all_disabled = bool((ks >= vocab).all())
+    if all_disabled:
         return logits
     sorted_logits, sorted_indices = torch.sort(logits, dim=-1, descending=True)
     threshold = sorted_logits.gather(1, (ks - 1).unsqueeze(1))  # [B, 1]
@@ -59,14 +83,19 @@ def _apply_top_k(logits: torch.Tensor, top_ks: torch.Tensor) -> torch.Tensor:
     return logits.masked_fill(remove, float("-inf"))
 
 
-def _apply_top_p(logits: torch.Tensor, top_ps: torch.Tensor) -> torch.Tensor:
+def _apply_top_p(
+    logits: torch.Tensor, top_ps: torch.Tensor, *, all_disabled: bool | None = None
+) -> torch.Tensor:
     """Per-row nucleus: keep the smallest prefix of the softmax holding >= top_p.
 
     Rows with ``top_p <= 0`` keep only the top token; ``top_p >= 1`` keeps
-    everything (same boundaries as the Session sampler).
+    everything (same boundaries as the Session sampler). ``all_disabled``
+    is the host-side shortcut (see :meth:`Sampler.forward`).
     """
     vocab = logits.shape[-1]
-    if bool((top_ps >= 1.0).all()):
+    if all_disabled is None:
+        all_disabled = bool((top_ps >= 1.0).all())
+    if all_disabled:
         return logits
     sorted_logits, sorted_indices = torch.sort(logits, dim=-1, descending=True)
     cumulative = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
