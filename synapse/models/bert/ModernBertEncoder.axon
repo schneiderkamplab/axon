@@ -1,3 +1,4 @@
+{-# CHECKPOINTS ["answerdotai/ModernBERT-base", "jhu-clsp/ettin-encoder-17m", "jhu-clsp/ettin-encoder-32m", "jhu-clsp/ettin-encoder-68m", "jhu-clsp/ettin-encoder-150m", "jhu-clsp/ettin-encoder-400m", "jhu-clsp/ettin-encoder-1b"] #-}
 import Activations (gelu, gelu_pytorch_tanh)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (Mask, bidirectional_mask, mask_for_input)
