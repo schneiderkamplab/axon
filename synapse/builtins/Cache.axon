@@ -20,6 +20,7 @@ export (
   finish,
   finish_kv,
   update,
+  update_keep,
   update_kv,
 )
 
@@ -38,6 +39,20 @@ update past k v ?key_length=null = (past == null)
     k_all <- Tensor.concat k_past k dim=-2
     v_all <- Tensor.concat v_past v dim=-2
     return k_all, v_all, (k_all, v_all)
+
+-- update for a layer that never looks further back than `keep` past keys (a causal sliding
+-- window): the keys and values returned for attention are the same as update's, but the cache
+-- it returns holds only their last `keep` positions. keep=null is update.
+update_keep :: ?CacheLayer[B,H,P,C,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> ?Dim -> (Tensor[B,H,key_length,DH], Tensor[B,H,key_length,DH], ?CacheLayer[B,H,key_length,C,DH])
+update_keep past k v ?keep=null = (keep == null)
+  ? (update past k v)
+  : do
+    k_all, v_all, _ <- update past k v
+    n <- Tensor.size k_all dim=-2
+    start <- (n > keep) ? (n - keep) : 0
+    k_kept <- Tensor.slice k_all dim=-2 start=start end=n
+    v_kept <- Tensor.slice v_all dim=-2 start=start end=n
+    return k_all, v_all, (k_kept, v_kept)
 
 update_kv :: ?CacheLayerKV[B,H,P,C,DK,DV] -> Tensor[B,H,S,DK] -> Tensor[B,H,S,DV] -> ?Dim -> (Tensor[B,H,key_length,DK], Tensor[B,H,key_length,DV], ?CacheLayerKV[B,H,key_length,C,DK,DV])
 update_kv past k v ?key_length=null = (past == null)

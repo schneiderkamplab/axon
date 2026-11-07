@@ -96,6 +96,7 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "cumsum",
     "_mlx_sdpa",
     "_mlx_sdpa_banded",
+    "_mlx_sdpa_band",
     "_mlx_rope",
     "_mlx_rmsnorm_scaled",
     "_mlx_expert_swiglu_ffn",
@@ -240,7 +241,7 @@ def _inject_compiled_helpers(code: str) -> str:
 
 
 class _DirectMlxEmitter(_DirectTorchEmitter):
-    _MLX_CACHE_UPDATE_MODULES: frozenset[str] = frozenset({"Cache.update", "Cache.update_kv"})
+    _MLX_CACHE_UPDATE_MODULES: frozenset[str] = frozenset({"Cache.update", "Cache.update_kv", "Cache.update_keep"})
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -282,6 +283,13 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         )
 
     def _emit_module(self, lines: list[str], module: Any) -> None:
+        if module.name == "Cache.update_keep":
+            # A literal keep is folded into the module, whose body then slices by itself.
+            if any(value.name == "keep" for value in module.inputs):
+                self._emit_cache_update_keep_module(lines, module)
+            else:
+                super()._emit_module(lines, module)
+            return
         if module.name in self._MLX_CACHE_UPDATE_MODULES:
             self._emit_cache_update_module(lines, module)
             return
@@ -291,18 +299,9 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add = self._add
         method_name = self.method_names[module.name]
         add(lines, 4, f"def {method_name}(self, past=None, k=None, v=None, key_length=None):")
-        add(lines, 8, "_model_dtype = next(iter(self._flat_tensors.values())).dtype if self._flat_tensors else mx.bfloat16")
-        add(lines, 8, "if k.dtype != _model_dtype:")
-        add(lines, 12, "k = k.astype(_model_dtype)")
-        add(lines, 8, "if v.dtype != _model_dtype:")
-        add(lines, 12, "v = v.astype(_model_dtype)")
-        add(lines, 8, "if self._use_kv_cache and isinstance(past, _KVCache):")
-        add(lines, 12, "_keys, _values = past.update_and_fetch(k, v)")
-        add(lines, 12, "return ((_keys, _values, past),)")
-        add(lines, 8, "if self._use_kv_cache and past is None:")
-        add(lines, 12, "_kvc = _KVCache()")
-        add(lines, 12, "_keys, _values = _kvc.update_and_fetch(k, v)")
-        add(lines, 12, "return ((_keys, _values, _kvc),)")
+        self._emit_cache_update_cast(lines)
+        add(lines, 8, "if self._use_kv_cache:")
+        add(lines, 12, "return (_kv_cache_update(past, k, v),)")
         add(lines, 8, "if past is None:")
         add(lines, 12, "return ((k, v, (k, v)),)")
         add(lines, 8, "_k_past, _v_past = past")
@@ -310,6 +309,36 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "_v_all = self._concat(_v_past, v, dim=-2)")
         add(lines, 8, "return ((_k_all, _v_all, (_k_all, _v_all)),)")
         add(lines, 4, "")
+
+    def _emit_cache_update_keep_module(self, lines: list[str], module: Any) -> None:
+        """Cache.update_keep: with the stateful cache, a _KVCache (keep=None) or a _RollingKVCache
+        per layer; without it, the builtin's concat (and slice)."""
+        add = self._add
+        method_name = self.method_names[module.name]
+        add(lines, 4, f"def {method_name}(self, past=None, k=None, v=None, keep=None):")
+        self._emit_cache_update_cast(lines)
+        add(lines, 8, "if self._use_kv_cache:")
+        add(lines, 12, "if keep is None:")
+        add(lines, 16, "return (_kv_cache_update(past, k, v),)")
+        add(lines, 12, "return (_rolling_kv_cache_update(past, k, v, int(keep)),)")
+        add(lines, 8, "if past is None:")
+        add(lines, 12, "_k_all, _v_all = k, v")
+        add(lines, 8, "else:")
+        add(lines, 12, "_k_all = self._concat(past[0], k, dim=-2)")
+        add(lines, 12, "_v_all = self._concat(past[1], v, dim=-2)")
+        add(lines, 8, "if keep is None:")
+        add(lines, 12, "return ((_k_all, _v_all, (_k_all, _v_all)),)")
+        add(lines, 8, "_start = max(_k_all.shape[-2] - int(keep), 0)")
+        add(lines, 8, "return ((_k_all, _v_all, (_k_all[..., _start:, :], _v_all[..., _start:, :])),)")
+        add(lines, 4, "")
+
+    def _emit_cache_update_cast(self, lines: list[str]) -> None:
+        add = self._add
+        add(lines, 8, "_model_dtype = next(iter(self._flat_tensors.values())).dtype if self._flat_tensors else mx.bfloat16")
+        add(lines, 8, "if k.dtype != _model_dtype:")
+        add(lines, 12, "k = k.astype(_model_dtype)")
+        add(lines, 8, "if v.dtype != _model_dtype:")
+        add(lines, 12, "v = v.astype(_model_dtype)")
 
     def _detect_codegen_arch(self) -> dict[str, Any]:
         """Detect architecture features from graph IR at codegen time.
@@ -754,10 +783,6 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "object.__setattr__(self, '_flat_tensors', {})")
         add(lines, 8, "object.__setattr__(self, '_path_cache', {})")
         add(lines, 8, "object.__setattr__(self, '_param_cache', {})")
-        add(lines, 8, "object.__setattr__(self, '_rope_freqs', {})")
-        add(lines, 8, "object.__setattr__(self, '_rope_inv_freqs', {})")
-        add(lines, 8, "object.__setattr__(self, '_rope_cached_off', None)")
-        add(lines, 8, "object.__setattr__(self, '_rope_cached_sin', None)")
         add(lines, 8, "object.__setattr__(self, '_compiled_fn', None)")
         add(lines, 8, "object.__setattr__(self, '_ff', None)")
         add(lines, 8, "object.__setattr__(self, '_use_kv_cache', True)")
@@ -916,42 +941,12 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
         add(lines, 4, "")
+        # The tables are applied as given: no frequencies or positions are recovered from them
+        # and nothing is cached across calls, so tables of different thetas or offsets that
+        # share a head dim stay independent. One compiled kernel per rotation.
         add(lines, 4, "def _mlx_rope_apply(self, x, sin, cos, traditional=False):")
-        add(lines, 8, "dim = x.shape[-1]")
-        add(lines, 8, "half = dim // 2")
-        add(lines, 8, "if dim not in self._rope_freqs:")
-        add(lines, 12, "S = sin.shape[2]")
-        add(lines, 12, "if S > 1:")
-        add(lines, 16, "inv_freq = mx.arctan2(sin[0, 0, 1, :half], cos[0, 0, 1, :half])")
-        add(lines, 16, "self._rope_inv_freqs[dim] = inv_freq")
-        add(lines, 16, "self._rope_freqs[dim] = mx.where(inv_freq == 0, mx.inf, 1.0 / inv_freq)")
-        add(lines, 12, "else:")
-        add(lines, 16, "if traditional:")
-        add(lines, 20, "x_rs = x.reshape(*x.shape[:-1], half, 2)")
-        add(lines, 20, "x_even = x_rs[..., 0]")
-        add(lines, 20, "x_odd = x_rs[..., 1]")
-        add(lines, 20, "rotated = mx.concatenate([-x_odd[..., None], x_even[..., None]], axis=-1).reshape(*x.shape)")
-        add(lines, 16, "else:")
-        add(lines, 20, "x1 = x[..., :half]")
-        add(lines, 20, "x2 = x[..., half:]")
-        add(lines, 20, "rotated = mx.concatenate([-x2, x1], axis=-1)")
-        add(lines, 16, "return x * cos.astype(x.dtype) + rotated * sin.astype(x.dtype)")
-        add(lines, 8, "freqs = self._rope_freqs[dim]")
-        add(lines, 8, "inv_freq = self._rope_inv_freqs[dim]")
-        add(lines, 8, "S = sin.shape[2]")
-        add(lines, 8, "if S > 1:")
-        add(lines, 12, "return mx.fast.rope(x, dim, traditional=traditional, base=None, scale=1.0, offset=0, freqs=freqs)")
-        add(lines, 8, "else:")
-        add(lines, 12, "sid = id(sin)")
-        add(lines, 12, "if sid == self._rope_cached_sin and self._rope_cached_off is not None:")
-        add(lines, 16, "offset = self._rope_cached_off")
-        add(lines, 12, "else:")
-        add(lines, 16, "angles = mx.arctan2(sin[0, 0, 0, :half], cos[0, 0, 0, :half])")
-        add(lines, 16, "ratios = mx.where(inv_freq > 1e-10, angles / inv_freq, mx.array(0.0))")
-        add(lines, 16, "offset = mx.max(ratios).astype(mx.int32)")
-        add(lines, 16, "self._rope_cached_off = offset")
-        add(lines, 16, "self._rope_cached_sin = sid")
-        add(lines, 12, "return mx.fast.rope(x, dim, traditional=traditional, base=None, scale=1.0, offset=offset, freqs=freqs)")
+        add(lines, 8, "rotate = _rope_rotate_interleaved if traditional else _rope_rotate_half")
+        add(lines, 8, "return rotate(x, sin, cos)")
         add(lines, 4, "")
         add(lines, 4, "")
         self._emit_build_ff(lines)
@@ -1318,6 +1313,18 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "gate, up = mx.split(gate_up, 2, axis=-1)")
         add(lines, 8, "hidden = (mx.sigmoid(gate) * gate) * up")
         add(lines, 8, "return self._expert_linear(down_weight_path, hidden, expert_idx, bias=False, transpose=transpose, weight_leaf='')")
+        add(lines, 4, "")
+        add(lines, 4, "def _sdpa_band(self, q, k, v, padding_mask, window, causal):")
+        add(lines, 8, '"""Attention over a band keep mask, without the dense mask (see _band_mask, _sdpa_band_blocked)."""')
+        add(lines, 8, "Q, K = q.shape[2], k.shape[2]")
+        add(lines, 8, "if padding_mask is not None and padding_mask.shape[1] < K:")
+        add(lines, 12, """raise ValueError(f"padding mask of {padding_mask.shape[1]} entries for {K} keys")""")
+        add(lines, 8, "scale = 1.0 / (q.shape[-1] ** 0.5)")
+        add(lines, 8, "pad = None if padding_mask is None else padding_mask[:, padding_mask.shape[1] - K:].astype(mx.bool_)")
+        add(lines, 8, "if window is not None and Q == K and k.shape[1] == q.shape[1] and Q >= _BAND_BLOCKED_MIN_LENGTH and Q > 4 * int(window):")
+        add(lines, 12, "return _sdpa_band_blocked(q, k, v, pad, int(window), bool(causal), scale)")
+        add(lines, 8, "mask = _band_mask(Q, K, None if window is None else int(window), bool(causal), pad)")
+        add(lines, 8, "return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)")
         add(lines, 4, "")
         add(lines, 4, "def _sdpa_banded(self, q, k, v, band_idx, keep, scale, sinks):")
         add(lines, 8, "S = band_idx.shape[0]")
@@ -1711,6 +1718,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                     b_expr = f"self._optional_param(self._compose_path({args[0]}, {bias_leaf}))"
                 else:
                     b_expr = f"self._optional_param({bias_leaf})"
+                if bias != "True":
+                    # A runtime bias flag must gate the lookup: a false flag means no bias,
+                    # even if the state holds one.
+                    b_expr = f"({b_expr} if bool({bias}) else None)"
                 return f"self._linear_matmul({path_expr}, {args[1]}, bias={b_expr}, transpose=bool({transpose}))"
             return (
                 f"(lambda _w, _b: "
@@ -1763,6 +1774,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 f"{args[0]}, {args[1]}, {args[2]}, "
                 f"mask={args[3]}, scale={scale})"
             )
+        if primitive == "_mlx_sdpa_band":
+            if len(args) < 6:
+                raise ValueError("__mlx_sdpa_band expects q, k, v, padding_mask, window, causal")
+            return f"self._sdpa_band({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]})"
         if primitive == "_mlx_sdpa_banded":
             if len(args) < 7:
                 raise ValueError("__mlx_sdpa_banded expects q, k, v, band_idx, keep, scale, sink_logits")
@@ -2023,6 +2038,88 @@ def emit_model_code_from_graph_ir(
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",
+            "@mx.compile",
+            "def _rope_rotate_half(x, sin, cos):",
+            '    """Positions.rope_apply_factors (non-interleaved): x * cos + rotate_half(x) * sin."""',
+            "    half = x.shape[-1] // 2",
+            "    rotated = mx.concatenate([-x[..., half:], x[..., :half]], axis=-1)",
+            "    return (x * cos + rotated * sin).astype(x.dtype)",
+            "",
+            "@mx.compile",
+            "def _rope_rotate_interleaved(x, sin, cos):",
+            '    """Positions.rope_apply_factors (interleaved): each (even, odd) pair becomes (-odd, even)."""',
+            "    pairs = x.reshape(*x.shape[:-1], x.shape[-1] // 2, 2)",
+            "    rotated = mx.stack([-pairs[..., 1], pairs[..., 0]], axis=-1).reshape(x.shape)",
+            "    return (x * cos + rotated * sin).astype(x.dtype)",
+            "",
+            "import functools as _functools",
+            "import numpy as _np",
+            "",
+            "# Band attention: queries sit at the last Q of K key positions. Below this many",
+            "# queries the dense masked kernel is as fast as the blocked one.",
+            "_BAND_BLOCKED_MIN_LENGTH = 512",
+            "",
+            "def _band_mask(Q, K, window, causal, pad):",
+            '    """The band keep mask: None when it keeps every key, "causal" when it is exactly MLX\'s',
+            "    causal mask, else a boolean (B or 1, 1, Q, K) mask. Causal windows keep the `window` keys",
+            '    ending at the query, bidirectional ones keys within `window` of it."""',
+            "    need_causal = causal and Q > 1",
+            "    need_window = window is not None and (K > window if causal else K - 1 > window)",
+            "    if pad is None and not need_window:",
+            "        if not need_causal:",
+            "            return None",
+            "        if Q == K:",
+            "            return 'causal'",
+            "    keep = _band_keep(Q, K, window if need_window else None, causal, need_causal)",
+            "    return keep if pad is None else keep & pad[:, None, None, :]",
+            "",
+            "@_functools.lru_cache(maxsize=32)",
+            "def _band_keep(Q, K, window, causal, upper):",
+            '    """The (1, 1, Q, K) band without padding, a constant per shape built once (on the host):',
+            '    keys at or before the query when `upper`, within `window` of it (causal or bidirectional)."""',
+            "    rows = _np.arange(K - Q, K)[:, None]",
+            "    cols = _np.arange(K)[None, :]",
+            "    keep = _np.ones((Q, K), dtype=bool)",
+            "    if upper:",
+            "        keep &= cols <= rows",
+            "    if window is not None:",
+            "        keep &= (cols > rows - window) if causal else (_np.abs(rows - cols) <= window)",
+            "    return mx.array(keep[None, None])",
+            "",
+            "def _sdpa_band_blocked(q, k, v, pad, window, causal, scale):",
+            '    """Windowed self-attention (Q == K) in O(length * window): queries in blocks of `window`,',
+            "    each against the contiguous span of keys its rows can reach (a strided view of the padded",
+            "    keys), with the same band and padding mask inside the span as the dense mask. Equal to the",
+            '    dense masked attention up to summation order."""',
+            "    B, H, L, D = q.shape",
+            "    block = window",
+            "    n = -(-L // block)",
+            "    padded = n * block",
+            "    left = window - 1 if causal else window",
+            "    right = padded - L + (0 if causal else window)",
+            "    span = block + left + (0 if causal else window)",
+            "    total = left + L + right",
+            "    k_pos = mx.arange(n)[:, None] * block - left + mx.arange(span)[None, :]",
+            "    q_pos = mx.arange(n)[:, None] * block + mx.arange(block)[None, :]",
+            "    rel = k_pos[:, None, :] - q_pos[:, :, None]",
+            "    keep = ((rel <= 0) & (rel > -window)) if causal else (mx.abs(rel) <= window)",
+            "    keep = keep & ((k_pos >= 0) & (k_pos < L))[:, None, :]",
+            "    if pad is None:",
+            "        mask = keep[None]",
+            "    else:",
+            "        key_ok = mx.take(mx.pad(pad, [(0, 0), (left, right)]), (k_pos + left).reshape(-1), axis=1)",
+            "        mask = keep[None, None] & key_ok.reshape(B, 1, n, 1, span)",
+            "        mask = mx.broadcast_to(mask, (B, H, n, block, span)).reshape(B * H, n, block, span)",
+            "",
+            "    def windows(x):",
+            "        x = mx.pad(x, [(0, 0), (0, 0), (left, right), (0, 0)])",
+            "        d = x.shape[-1]",
+            "        return mx.as_strided(x, (B * H, n, span, d), (total * d, block * d, d, 1))",
+            "",
+            "    qb = mx.pad(q, [(0, 0), (0, 0), (0, padded - L), (0, 0)]).reshape(B * H, n, block, D)",
+            "    out = mx.fast.scaled_dot_product_attention(qb, windows(k), windows(v), scale=scale, mask=mask)",
+            "    return out.reshape(B, H, padded, out.shape[-1])[:, :, :L]",
+            "",
             "class _KVCache:",
             '    """Pre-allocated KV cache buffer — O(n) vs O(n²) for concatenate."""',
             "    step = 256",
@@ -2061,6 +2158,43 @@ def emit_model_code_from_graph_ir(
             "        if idx == 1: return self._v_view",
             "        raise IndexError(idx)",
             "",
+            "def _kv_cache_update(past, k, v):",
+            '    """Stateful Cache.update: append to the layer\'s _KVCache. A plain (k, v) pair (from a pass',
+            '    without the stateful cache, such as a compiled prefill) seeds a new buffer."""',
+            "    if not isinstance(past, _KVCache):",
+            "        seed, past = past, _KVCache()",
+            "        if seed is not None:",
+            "            past.update_and_fetch(seed[0], seed[1])",
+            "    keys, values = past.update_and_fetch(k, v)",
+            "    return keys, values, past",
+            "",
+            "def _rolling_kv_cache_update(past, k, v, keep):",
+            '    """Stateful Cache.update_keep: as _kv_cache_update, with a _RollingKVCache of `keep` keys."""',
+            "    if not isinstance(past, _RollingKVCache):",
+            "        seed, past = past, _RollingKVCache(keep)",
+            "        if seed is not None:",
+            "            past.update_and_fetch(seed[0], seed[1])",
+            "    keys, values = past.update_and_fetch(k, v)",
+            "    return keys, values, past",
+            "",
+            "class _RollingKVCache:",
+            '    """KV cache of a layer that attends at most `keep` keys back (Cache.update_keep)."""',
+            "    def __init__(self, keep):",
+            "        self.keep = keep",
+            "        self.keys = None",
+            "        self.values = None",
+            "    def update_and_fetch(self, keys, values):",
+            "        if self.keys is not None:",
+            "            keys = mx.concatenate([self.keys, keys], axis=2)",
+            "            values = mx.concatenate([self.values, values], axis=2)",
+            "        start = max(keys.shape[2] - self.keep, 0)",
+            "        self.keys, self.values = keys[:, :, start:], values[:, :, start:]",
+            "        return keys, values",
+            "    def __getitem__(self, idx):",
+            "        if idx == 0: return self.keys",
+            "        if idx == 1: return self.values",
+            "        raise IndexError(idx)",
+            "",
             "def _wrap_kv_cache(new_kv):",
             '    """Convert concatenate-based cache to _KVCache objects."""',
             "    if new_kv is None:",
@@ -2069,6 +2203,9 @@ def emit_model_code_from_graph_ir(
             "    for layer_cache in new_kv:",
             "        if layer_cache is None:",
             "            caches.append(None)",
+            "            continue",
+            "        if isinstance(layer_cache, _RollingKVCache):",
+            "            caches.append(layer_cache)",
             "            continue",
             "        k, v = layer_cache[0], layer_cache[1]",
             "        kvc = _KVCache()",
@@ -2086,6 +2223,8 @@ def emit_model_code_from_graph_ir(
             "            result.append(None)",
             "        elif isinstance(layer, _KVCache):",
             "            result.append((layer._k_view, layer._v_view))",
+            "        elif isinstance(layer, _RollingKVCache):",
+            "            result.append((layer.keys, layer.values))",
             "        else:",
             "            result.append(layer)",
             "    return result",
