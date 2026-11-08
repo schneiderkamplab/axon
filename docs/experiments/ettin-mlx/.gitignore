@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Reference outputs (regenerate with tools/make_reference.py) and benchmark output
+tests/data/
+bench_results/
+.pytest_cache/
