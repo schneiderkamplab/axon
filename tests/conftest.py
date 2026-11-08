@@ -381,6 +381,24 @@ def modernbert_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
 
 
 @pytest.fixture(scope="session")
+def pplx_pii_masking_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["pplx_pii_masking"],
+    )
+
+
+@pytest.fixture(scope="session")
+def pplx_embed_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["pplx_embed"],
+    )
+
+
+@pytest.fixture(scope="session")
 def t5_small_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
     return ensure_model_downloaded(
         repo_root=repo_root,
