@@ -31,6 +31,11 @@ def _spatial_conv2d(
 ):
     """x: [B,H,W,C]; weight: [O,C/groups,KH,KW]."""
     x = x.permute(0, 3, 1, 2)
+    if int(groups) != 1:
+        # Torch reads the permuted view as channels-last memory, and its CPU grouped
+        # convolution is far slower there than on contiguous NCHW (about 50x for a
+        # depthwise 3x3 on Apple Silicon). The copy costs less than it saves.
+        x = x.contiguous()
     top, bottom, left, right = int(pad_top), int(pad_bottom), int(pad_left), int(pad_right)
     padding = (top, left)
     if top != bottom or left != right:

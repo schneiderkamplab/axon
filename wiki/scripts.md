@@ -54,7 +54,7 @@ the harness additionally rewrites the `synapse.axon.codegen2_common` import to t
 ## PP-OCR conversion and MLX harness (`scripts/convert_ppocr_onnx.py`, `scripts/ppocr_mlx.py`)
 
 Owner: Axon contributors/agents. Last confirmed: 2026-11-10. Confidence: high for the
-mechanics on Linux (MLX CUDA); not yet run on Apple Silicon. Experiment, not a maintained
+mechanics on Linux (MLX CUDA) and on an M1 Pro (MLX Metal). Experiment, not a maintained
 inference product. Uses: `synapse/models/ppocr/generic-ppocr-{det,rec}.axon` through the
 standard compiler pipeline. Background and results: [CNN support and PP-OCR](vision-cnn.md).
 

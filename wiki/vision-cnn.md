@@ -1,9 +1,9 @@
 # CNN support and PP-OCR (experiment)
 
 Owner: Axon contributors/agents. Last confirmed: 2026-11-10. Confidence: high for
-numerical agreement (measured on Linux, PyTorch CPU and MLX 0.32.2 CUDA); **no Apple
-Silicon timing has been taken yet**, so the speed question this experiment exists to
-answer is still open. Status: experiment on branch `feat/cnn-ppocr`, not reviewed.
+numerical agreement (measured on Linux, PyTorch CPU and MLX 0.32.2 CUDA, and on an M1 Pro
+with MLX 0.32.2 Metal); medium for speed: timed on one M1 Pro only, see
+[Apple Silicon timing](#apple-silicon-timing-2026-11-10-m1-pro). Status: experiment on branch `feat/cnn-ppocr`, not reviewed.
 
 ## What exists
 
@@ -46,7 +46,8 @@ In the MLX runtime, opt-in through the emitted module global `_SPATIAL_DEPTHWISE
 (default 0 = off): depthwise convolutions with at most that many taps become a sum of
 shifted, per-channel scaled input slices. Purely elementwise, so it sidesteps a slow
 grouped-convolution path where one exists and fuses under `mx.compile`; slower where the
-grouped convolution is good. Not decided for Apple Silicon.
+grouped convolution is good. On the M1 Pro it never wins: uncompiled it is 35-70% slower,
+compiled it is within 3% (3x3) or 17% slower (7x7, detector), so the default stays off.
 
 In `scripts/ppocr_mlx.py`: `mx.compile` per input shape (variant `compiled`), detector
 normalization on the device from uint8 pixels, recognizer argmax on the device, and
@@ -123,11 +124,56 @@ about Apple Silicon: detector 1x736x960 about 17 ms vs 70-80 ms, recognizer 6x48
 3.6-6.9 ms vs about 22 ms across two runs. Copying the recognizer's full probability tensor to NumPy cost more than the
 network (41 ms for 16x60x18710), so the harness takes the argmax on the device.
 
+## Apple Silicon timing (2026-11-10, M1 Pro)
+
+M1 Pro, 32 GB, macOS 27.0.1, AC power, Python 3.13.9, MLX 0.32.2 (Metal), ONNX Runtime
+1.30.0, PyTorch 2.14.0. Run directory `log/ppocr-mlx-m1pro-20261110/` (`bench.json`,
+`tuned.json`, `ocr-*.json`, `bench-torch.json`). Median ms per call, float32, random
+inputs; MLX and ONNX Runtime rows from `scripts/ppocr_mlx.py bench` (15 samples), Torch
+rows from an ad hoc script over the same generated-code path as the tests (10 samples).
+
+| Workload | Axon MLX `compiled` | Axon MLX `base` | ONNX Runtime CPU | ONNX Runtime CoreML | Axon Torch MPS | Axon Torch CPU |
+|---|---|---|---|---|---|---|
+| det 1x736x960 | 22.3 | 24.3 | 100.7 | 135.7 | 34.4 | 172.9 |
+| det 1x960x960 | 28.3 | 30.8 | 127.7 | 174.0 | 43.2 | 214.1 |
+| rec 1x48x320 | 3.3 | 4.5 | 9.7 | 17.4 | 10.0 | 34.9 |
+| rec 6x48x320 | 10.2 | 10.9 | 57.9 | 79.5 | 19.1 | 72.3 |
+| rec 16x48x480 | 34.5 | 35.7 | 190.3 | 288.5 | 50.9 | 1476 (150 without NNPACK) |
+
+- **Axon MLX is 2.9x to 5.7x faster than ONNX Runtime CPU** (detector 4.5x, batched
+  recognizer 5.5x) and 1.5x to 3x faster than the generated Torch on MPS.
+- End-to-end OCR of the 6-line sample page (`ocr --repeat 5`, last run): 65.1 ms on MLX
+  (detector 23.7 ms, recognizer 37.1 ms) against 323.8 ms on ONNX Runtime CPU; identical
+  text and scores. float16 MLX: 43.6 ms, same text.
+- Parity on Metal: every variant within 4.7e-5 of ONNX Runtime, recognizer argmax
+  agreement 1.0; float16 within 4.4e-2 on the sample page.
+- `tune` keeps `compiled` for both networks. float16 is about 18% faster than float32.
+- The ONNX Runtime CoreML provider is slower than its CPU provider here: it splits the
+  graphs into 19 (detector) and 27 (recognizer) partitions. Default provider options only;
+  the MLProgram format and a native CoreML conversion were not tried.
+- The always-on MLX lowerings hold on Metal: routing pointwise convolutions through
+  `mx.conv2d` instead of a matmul is 5-14% slower; `mx.conv_transpose2d` instead of the
+  matmul form is 6% slower on the detector.
+- Depthwise convolutions, the risk named before this run, are not a problem on Metal.
+
+**Torch CPU fix (same day).** The Torch runtime handed `F.conv2d` a permuted view, which
+Torch reads as channels-last memory; its CPU grouped convolution is about 50x slower there
+than on contiguous NCHW (59 ms against 1.1 ms for one depthwise 3x3 at 184x240x96). The
+runtime now copies the input of grouped convolutions to contiguous NCHW: detector
+715 -> 173 ms, recognizer 6x48x320 385 -> 72 ms on CPU, unchanged on MPS. Fixed-by
+`synapse/axon/codegen2_torch/spatial2d.py`. Torch CPU stays slower than ONNX Runtime
+because of its 7x7 depthwise convolutions (about 37 ms each when contiguous).
+
+**PyTorch NNPACK cliff (host setting, not changed).** From batch 16 on, PyTorch's CPU
+convolution selects NNPACK, which is about 10x slower on this machine: recognizer
+16x48x480 takes 1415 ms, and 150 ms after `torch.backends.nnpack.set_flags(False)`.
+Lowering pointwise convolutions to `F.linear` avoids part of it (570 ms) but costs about 5%
+at smaller batches and on MPS, so it was not adopted.
+
 ## Open
 
-- Apple Silicon timing against ONNX Runtime CPU and CoreML (`scripts/ppocr_mlx.py bench`).
-  Depthwise convolutions dominate both backbones; their Metal performance in MLX is the
-  main risk to a speedup.
+- Timing on other Apple Silicon machines, and a CoreML baseline that is not partitioned
+  (MLProgram format or a native conversion).
 - `synapse axon-benchmark` and the matrix runner cannot run these files: they are not
   language models and the Hub repo holds ONNX only. The declared `CHECKPOINTS` pragma is
   there for the policy guard.

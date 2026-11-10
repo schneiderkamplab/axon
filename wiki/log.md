@@ -53,3 +53,23 @@ Not done: any Apple Silicon measurement. Uses [CNN support and PP-OCR](vision-cn
 [maintained scripts](scripts.md); validated-by `tests/test_vision_spatial2d.py`,
 `tests/test_ppocr_axon.py` and `log/ppocr-mlx-dev/` (`bench.json`). Confidence: high for
 agreement, none yet for Apple Silicon speed. Last confirmed: 2026-11-10.
+Superseded the same day for the "not done" part by the entry below.
+
+## 2026-11-10 — PP-OCR timed on Apple Silicon (M1 Pro)
+
+Ran `scripts/ppocr_mlx.py build`, `parity`, `bench`, `tune` and `ocr` on an M1 Pro (MLX
+0.32.2 Metal, ONNX Runtime 1.30.0), and timed the generated Torch on CPU and MPS.
+
+Observed: Axon MLX is 2.9x to 5.7x faster than ONNX Runtime CPU (detector 1x736x960 22.3
+against 100.7 ms; end-to-end sample page 65 against 324 ms, identical text). The ONNX
+Runtime CoreML provider is slower than CPU (partitioned graphs). `tune` keeps `compiled`;
+the shifted-sum depthwise lowering never wins on Metal. Generated Torch on CPU was 7x
+slower than ONNX Runtime, caused-by grouped convolutions on a permuted view; fixed-by a
+contiguous copy in `synapse/axon/codegen2_torch/spatial2d.py` (4-5x faster on CPU,
+unchanged on MPS). PyTorch's NNPACK path makes Torch CPU about 10x slower from batch 16
+on; that is a host setting and was left alone.
+
+Uses [CNN support and PP-OCR](vision-cnn.md); validated-by
+`log/ppocr-mlx-m1pro-20261110/` and the 28 tests in `tests/test_vision_spatial2d.py`,
+`tests/test_ppocr_axon.py` and `tests/test_agents_policy_guards.py`. Confidence: high for
+the recorded measurements; timing applies to this M1 Pro only. Last confirmed: 2026-11-10.
