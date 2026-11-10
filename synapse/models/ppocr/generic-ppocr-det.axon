@@ -1,0 +1,122 @@
+{-# CHECKPOINTS ["blackpen-sk/ppocrv6-small"] #-}
+{-# MAIN "ppocr_det" #-}
+
+-- PP-OCR text detector: image -> text probability map (DB head).
+--   pixel_values  [B,H,W,3]  channels-last, normalized; H and W multiples of 32
+--   output        [B,H,W,1]  per-pixel text probability
+-- Resizing, normalization and box extraction from the probability map are caller
+-- responsibilities. The checkpoint is produced by scripts/convert_ppocr_onnx.py, which
+-- folds batch normalisation into the convolutions.
+--
+-- The backbone has four stages at strides 4, 8, 16 and 32. Blocks are numbered through
+-- the whole backbone; block STAGE_ENDS[k] is the stride-2 block that opens stage k + 1.
+import Activations (gelu, relu, sigmoid)
+import Config
+import List
+import Tensor
+import Vision
+
+STEM_DIM <- Config.int @@stem_dim default=24
+STAGE_DIMS <- Config.list @@stage_dims default=[48, 96, 192, 384]
+STAGE_ENDS <- Config.list @@stage_ends default=[2, 5, 10, 13]
+C2 = List.index STAGE_DIMS 0
+C3 = List.index STAGE_DIMS 1
+C4 = List.index STAGE_DIMS 2
+C5 = List.index STAGE_DIMS 3
+BLOCK_SE <- Config.list @@block_se default=[]
+EXPAND_RATIO <- Config.int @@expand_ratio default=2
+SE_REDUCTION <- Config.int @@se_reduction default=4
+SE_SLOPE <- Config.float @@se_slope default=0.16666666666666666
+NECK_DIM <- Config.int @@neck_dim default=96
+NECK_SE_REDUCTION <- Config.int @@neck_se_reduction default=4
+NECK_SE_SLOPE <- Config.float @@neck_se_slope default=0.2
+SMOOTH_DIM <- Config.int @@smooth_dim default=24
+HEAD_DIM <- Config.int @@head_dim default=24
+
+-- Channel gate: global average -> reduce -> relu -> expand -> hard sigmoid.
+squeeze_excite :: Path -> Tensor[B,H,W,C] -> Int -> Float -> Tensor[B,1,1,C]
+squeeze_excite@path x reduction slope = do
+  c <- Tensor.size x 3
+  s <- Vision.global_avg_pool2d x
+  s <- Vision.conv2d@reduce s (c / reduction) 1 1 |> relu
+  s <- Vision.conv2d@expand s c 1 1
+  return Vision.hard_sigmoid s slope=slope
+
+-- Stem: two stride-2 convolutions around a 2x2 conv branch concatenated with a max pool.
+stem :: Tensor[B,H,W,3] -> Tensor[B,Ho,Wo,C2]
+stem x = do
+  x <- Vision.conv2d@conv1 x STEM_DIM 3 3 stride_h=2 stride_w=2 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 |> relu
+  a <- Vision.conv2d@conv2a x (STEM_DIM / 2) 2 2 pad_bottom=1 pad_right=1 |> relu
+  a <- Vision.conv2d@conv2b a STEM_DIM 2 2 pad_bottom=1 pad_right=1 |> relu
+  p <- Vision.max_pool2d x 2 2 pad_bottom=1 pad_right=1
+  x <- Tensor.concat p a dim=3
+  x <- Vision.conv2d@conv3 x STEM_DIM 3 3 stride_h=2 stride_w=2 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 |> relu
+  return Vision.conv2d@conv4 x C2 1 1 |> relu
+
+-- Depthwise 3x3 conv, optional channel gate, then a residual pointwise expand/project pair.
+block :: Tensor[B,H,W,C] -> Int -> Tensor[B,H,W,C]
+block x i = do
+  c <- Tensor.size x 3
+  y <- Vision.conv2d@dw x c 3 3 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 groups=c
+  y <- (List.index BLOCK_SE i) ? (y * (squeeze_excite@se y SE_REDUCTION SE_SLOPE)) : y
+  f <- Vision.conv2d@expand y (EXPAND_RATIO * c) 1 1 |> gelu |> Vision.conv2d@project c 1 1
+  return y + f
+
+blocks :: Tensor[B,H,W,C] -> Int -> Int -> Tensor[B,H,W,C]
+blocks x start end = do
+  x <- for@backbone.blocks i <- [start..end) carry (x) do
+    x <- block x i
+    yield x
+  return x
+
+-- The block that opens a stage: stride-2 depthwise conv, then expand/project to the new width.
+strided_block :: Tensor[B,H,W,C] -> Dim -> Tensor[B,Ho,Wo,dim]
+strided_block x dim = do
+  c <- Tensor.size x 3
+  y <- Vision.conv2d@dw x c 3 3 stride_h=2 stride_w=2 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 groups=c
+  return Vision.conv2d@expand y (EXPAND_RATIO * c) 1 1 |> gelu |> Vision.conv2d@project dim 1 1
+
+-- Pointwise projection with a residual channel gate.
+gated_project :: Path -> Tensor[B,H,W,C] -> Dim -> Tensor[B,H,W,dim]
+gated_project@path x dim = do
+  y <- Vision.conv2d@conv x dim 1 1 bias=false
+  return y + (y * (squeeze_excite@se y NECK_SE_REDUCTION NECK_SE_SLOPE))
+
+smooth :: Path -> Tensor[B,H,W,NECK_DIM] -> Tensor[B,H,W,SMOOTH_DIM]
+smooth@path x = do
+  y <- Vision.conv2d@dw x NECK_DIM 7 7 pad_top=3 pad_bottom=3 pad_left=3 pad_right=3 groups=NECK_DIM
+  return gated_project@path y SMOOTH_DIM
+
+ppocr_det :: Tensor[B,H,W,3] -> Tensor[B,Ho,Wo,1]
+ppocr_det pixel_values = do
+  e2 <- List.index STAGE_ENDS 0
+  e3 <- List.index STAGE_ENDS 1
+  e4 <- List.index STAGE_ENDS 2
+  e5 <- List.index STAGE_ENDS 3
+  x <- scope@backbone.stem do
+    return stem pixel_values
+  c2 <- blocks x 0 e2
+  c3 <- scope@'backbone.blocks.{e2}' do
+    return strided_block c2 C3
+  c3 <- blocks c3 (e2 + 1) e3
+  c4 <- scope@'backbone.blocks.{e3}' do
+    return strided_block c3 C4
+  c4 <- blocks c4 (e3 + 1) e4
+  c5 <- scope@'backbone.blocks.{e4}' do
+    return strided_block c4 C5
+  c5 <- blocks c5 (e4 + 1) e5
+  -- Top-down pyramid.
+  t5 <- gated_project@neck.lateral.3 c5 NECK_DIM
+  t4 <- (gated_project@neck.lateral.2 c4 NECK_DIM) + (Vision.upsample_nearest2d_like t5 c4)
+  t3 <- (gated_project@neck.lateral.1 c3 NECK_DIM) + (Vision.upsample_nearest2d_like t4 c3)
+  t2 <- (gated_project@neck.lateral.0 c2 NECK_DIM) + (Vision.upsample_nearest2d_like t3 c2)
+  p5 <- smooth@neck.smooth.3 t5 |> Vision.upsample_nearest2d_like c2
+  p4 <- smooth@neck.smooth.2 t4 |> Vision.upsample_nearest2d_like c2
+  p3 <- smooth@neck.smooth.1 t3 |> Vision.upsample_nearest2d_like c2
+  p2 <- smooth@neck.smooth.0 t2
+  fused <- Tensor.concat (Tensor.concat (Tensor.concat p5 p4 dim=3) p3 dim=3) p2 dim=3
+  -- DB head: a 3x3 conv and two stride-2 transposed convs back to the input resolution.
+  y <- Vision.conv2d@head.conv fused HEAD_DIM 3 3 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 |> relu
+  y <- Vision.conv_transpose2d@head.up1 y HEAD_DIM 2 2 stride_h=2 stride_w=2 |> relu
+  y <- Vision.conv_transpose2d@head.up2 y 1 2 2 stride_h=2 stride_w=2
+  return sigmoid y
