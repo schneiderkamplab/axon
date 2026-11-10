@@ -15055,6 +15055,36 @@ def _promote_total_pure_zero_arg_modules_to_globals(
     return promoted
 
 
+def _call_dim_subst_captures_formal_dim(
+    callee: GraphModule,
+    actuals: tuple[GraphOperand, ...],
+    dim_subst: Mapping[str, DimToken],
+) -> bool:
+    """Whether a callee dimension symbol would be read as a caller symbol of the same name.
+
+    Callee and caller symbols share one namespace in a call substitution, so a formal
+    ``H`` whose actual is an expression over the caller's ``H`` (``H / 2``) has no
+    binding: it would be a cycle. Moving the callee body into the caller then turns
+    every use of the callee's ``H`` into the caller's ``H``, which is a different size.
+    """
+
+    for formal, actual in zip(callee.inputs, actuals, strict=False):
+        formal_dims = _type_dims(formal.type_expr)
+        actual_dims = _type_dims(graph_operand_type(actual))
+        if formal_dims is None or actual_dims is None or len(formal_dims) != len(actual_dims):
+            continue
+        for formal_dim, actual_dim in zip(formal_dims, actual_dims, strict=True):
+            if (
+                isinstance(formal_dim, str)
+                and _is_plain_dim_symbol(formal_dim)
+                and formal_dim not in dim_subst
+                and actual_dim != formal_dim
+                and formal_dim in dim_token_names(actual_dim)
+            ):
+                return True
+    return False
+
+
 def _inline_call_substitution_is_closed(
     callee: GraphModule,
     actuals: tuple[GraphOperand, ...],
@@ -15064,6 +15094,8 @@ def _inline_call_substitution_is_closed(
         for formal, actual in zip(callee.inputs, actuals, strict=True)
     }
     dim_subst = _call_dim_subst(callee, actuals)
+    if _call_dim_subst_captures_formal_dim(callee, actuals, dim_subst):
+        return False
     allowed_refs: set[str] = set()
     for actual in actuals:
         _operand_refs(actual, allowed_refs)

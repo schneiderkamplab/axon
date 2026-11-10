@@ -460,19 +460,20 @@ LAMBDA_ARROW.3: "->"
 PIPE_OP.3: "|>"
 MONAD_BIND.3: ">>="
 RANGE_DOTS.3: ".."
-IMPORT.3: "import"
-EXPORT.3: "export"
-TYPE_KW.3: "type"
-FOR.3: "for"
-STEP.3: "step"
-DO.3: "do"
-SCOPE_KW.3: "scope"
-RETURN.3: "return"
-CARRY.3: "carry"
-YIELD.3: "yield"
-TRUE.3: "true"
-FALSE.3: "false"
-NULL.3: "null"
+// A keyword ends at a word boundary, so a name may start with one (downsample, format).
+IMPORT.3: /import(?![A-Za-z0-9_])/
+EXPORT.3: /export(?![A-Za-z0-9_])/
+TYPE_KW.3: /type(?![A-Za-z0-9_])/
+FOR.3: /for(?![A-Za-z0-9_])/
+STEP.3: /step(?![A-Za-z0-9_])/
+DO.3: /do(?![A-Za-z0-9_])/
+SCOPE_KW.3: /scope(?![A-Za-z0-9_])/
+RETURN.3: /return(?![A-Za-z0-9_])/
+CARRY.3: /carry(?![A-Za-z0-9_])/
+YIELD.3: /yield(?![A-Za-z0-9_])/
+TRUE.3: /true(?![A-Za-z0-9_])/
+FALSE.3: /false(?![A-Za-z0-9_])/
+NULL.3: /null(?![A-Za-z0-9_])/
 
 LPAR: "("
 RPAR: ")"
