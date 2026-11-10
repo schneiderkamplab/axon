@@ -33,3 +33,23 @@ Uses [Timestral MLX comparison](timestral-mlx-comparison.md) and
 (`summary.json`, `comparison.csv`, `samples.csv`, per-worker JSON and logs) and the three
 `tests/test_timestral_bench_*.py` files. Confidence: high for the recorded measurements;
 timing applies to the recorded M1 Pro and conditions only. Last confirmed: 2026-10-27.
+
+## 2026-11-10 — CNN primitives and PP-OCRv6 small through Axon (experiment)
+
+Added six channels-last 2D primitives, the `Vision` builtins, Torch and MLX lowerings, the
+PP-OCR detector and recognizer model files, an ONNX-to-checkpoint converter and an MLX
+harness, on branch `feat/cnn-ppocr`. Goal: find out whether Axon-generated MLX makes
+`blackpen-sk/ppocrv6-small` faster on Apple Silicon than ONNX Runtime.
+
+Observed: generated Torch and MLX agree with ONNX Runtime to 1e-5 or better on both models
+and give identical end-to-end OCR text on a rendered page. Two compiler findings recorded on
+the topic page: loop carries are typed shape-invariant, and `inline_safe` corrupted
+`Tensor.size` on spatial dims (worked around, not fixed). Pre-existing on untouched `main`
+in this environment and unrelated: 16 failures in `tests/test_axon_graph_ir.py`,
+`tests/test_codegen2_mlx_sdpa_band.py` and `tests/test_pplx_embed_support.py` (tinygrad
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, MLX CUDA numerics), and the per-model roundtrip sweeps.
+
+Not done: any Apple Silicon measurement. Uses [CNN support and PP-OCR](vision-cnn.md) and
+[maintained scripts](scripts.md); validated-by `tests/test_vision_spatial2d.py`,
+`tests/test_ppocr_axon.py` and `log/ppocr-mlx-dev/` (`bench.json`). Confidence: high for
+agreement, none yet for Apple Silicon speed. Last confirmed: 2026-11-10.
