@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -7,8 +8,14 @@ from typing import Any
 
 from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional, TypeTensor
 from ..codegen2_common import normalize_primitive_op
-from ..codegen2_torch.core import _DirectTorchEmitter, graph_main_output_names
+from ..codegen2_torch.core import (
+    _DirectTorchEmitter,
+    graph_main_output_names,
+    graph_uses_primitives,
+)
+from ..codegen2_torch.spatial2d import SPATIAL2D_PRIMITIVES
 from ..graph_ir import GraphProgram, graph_operand_type, validate_graph_program
+from .spatial2d import SPATIAL2D_SOURCE_FUNCTIONS
 
 SHARED_COMMON_PRIMITIVES: frozenset[str] = frozenset({
     "params_param",
@@ -94,6 +101,12 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "activations_gegelu",
     "activations_xielu",
     "cumsum",
+    "conv2d",
+    "conv_transpose2d",
+    "max_pool2d",
+    "avg_pool2d",
+    "global_avg_pool2d",
+    "upsample_nearest2d_like",
     "_mlx_sdpa",
     "_mlx_sdpa_banded",
     "_mlx_sdpa_band",
@@ -1879,6 +1892,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             if len(args) >= 4:
                 return f"self._mlx_rope_apply({args[0]}, {args[2]}, {args[3]}, traditional=bool({args[1]}))"
             return f"mx.fast.rope({args[0]}, dims={args[0]}.shape[-1], traditional=bool({args[1]}))"
+        if primitive in SPATIAL2D_PRIMITIVES:
+            return f"_spatial_{primitive}({', '.join(args)})"
         if primitive == "params_has_root":
             return f"any(k == {args[0]} or k.startswith(str({args[0]}) + '.') for k in self._flat_tensors)"
         if primitive.startswith("config_") or primitive in {"params_param"}:
@@ -2049,6 +2064,17 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         return False
 
 
+def _spatial2d_source_lines(graph: GraphProgram) -> list[str]:
+    if not graph_uses_primitives(graph, SPATIAL2D_PRIMITIVES):
+        return []
+    return [
+        "_SPATIAL_WEIGHTS = {}",
+        "_SPATIAL_DEPTHWISE_SHIFT_TAPS = 0",
+        "",
+        *(inspect.getsource(function) for function in SPATIAL2D_SOURCE_FUNCTIONS),
+    ]
+
+
 def emit_model_code_from_graph_ir(
     graph: GraphProgram,
     *,
@@ -2086,6 +2112,7 @@ def emit_model_code_from_graph_ir(
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",
+            *_spatial2d_source_lines(graph),
             "@mx.compile",
             "def _rope_rotate_half(x, sin, cos):",
             '    """Positions.rope_apply_factors (non-interleaved): x * cos + rotate_half(x) * sin."""',
