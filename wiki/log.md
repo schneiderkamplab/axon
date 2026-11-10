@@ -73,3 +73,25 @@ Uses [CNN support and PP-OCR](vision-cnn.md); validated-by
 `log/ppocr-mlx-m1pro-20261110/` and the 28 tests in `tests/test_vision_spatial2d.py`,
 `tests/test_ppocr_axon.py` and `tests/test_agents_policy_guards.py`. Confidence: high for
 the recorded measurements; timing applies to this M1 Pro only. Last confirmed: 2026-11-10.
+
+## 2026-11-10 — PP-OCR: compiler fixes, and MLX against ONNX Runtime CPU with memory
+
+Fixed two of the compiler findings from the PP-OCR work: keyword terminals now end at a
+word boundary (`downsample`, `format`, `nullable` parse), and a call whose dim
+substitution would read a callee symbol as a caller symbol of the same name is no longer
+inlined. Not fixed: loop carries typed as shape-invariant (needs a typing decision) and
+call results typed with callee names (types only). Added `scripts/ppocr_mlx.py compare`.
+
+Observed on the M1 Pro: MLX is 3.0x to 5.8x faster than ONNX Runtime CPU and peaks at 1.2x
+to 2.2x its process memory with MLX defaults. The weights are 30 MB; the peak is
+caused-by Metal command buffers holding intermediate results and by the unbounded MLX
+buffer cache. With `--ops-per-buffer 1 --cache-mb 64` MLX is 2.5x to 5.2x faster at 0.6x to
+1.2x the memory; float16 is 2.6x to 6.2x faster at 0.5x to 1.1x. Importing
+`synapse.axon.codegen2_common` through the package cost 300 MB per MLX process (PyTorch);
+the harness now loads a copy written by `build`.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
+validated-by `log/ppocr-mlx-m1pro-20261110-b/`, `tests/test_axon_cnn_compiler_regressions.py`
+and the passing `tests/test_axon_graph_ir.py`, `tests/test_synapse_axon_parser_roundtrip.py`
+and `tests/test_synapse_axon_optimize.py`. Confidence: high for the recorded measurements on
+this M1 Pro; the best MLX memory settings are machine-specific. Last confirmed: 2026-11-10.

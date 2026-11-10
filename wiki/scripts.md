@@ -66,6 +66,7 @@ Run from the repository root with `.venv/bin/python`. Artifacts go under `log/<r
 | `python scripts/ppocr_mlx.py build --run log/<id> [--onnx-dir DIR \| --repo ID]` | Fetch (default `blackpen-sk/ppocrv6-small`, needs Hub access) or reuse the ONNX files, convert, and emit the optimized MLX modules | ONNX files and dictionary | `det/`, `rec/`, `ppocr_det_mlx.py`, `ppocr_rec_mlx.py`, `build.json` |
 | `... parity --run log/<id> [--dtype float32\|float16] [--tolerance 1e-3]` | Generated MLX vs ONNX Runtime CPU on seven random inputs; exits non-zero above the tolerance | Build output; needs `onnxruntime` | stdout |
 | `... bench --run log/<id> [--providers CPUExecutionProvider,CoreMLExecutionProvider] [--samples 15] [--warmup 3]` | Median and minimum milliseconds per forward for five fixed workloads; ONNX rows only for installed providers | Build output | `bench.json`, stdout table |
+| `... compare --run log/<id> [--backends mlx,mlx-float16,onnx-cpu] [--samples 20] [--image <file>]` | Speed and peak process memory of MLX against ONNX Runtime CPU on the five `bench` workloads and the full pipeline on one page; one fresh process per backend and workload | Build output; `sample.png` in the run or `--image` for the page row | `compare.json` (`compare-cache<N>-ops<N>.json` with the options below), table on stdout |
 | `... ocr --run log/<id> --image <file> [--backend mlx\|onnx] [--repeat N] [--json out.json]` | Full pipeline with PaddleOCR-default pre/post-processing in NumPy/OpenCV; prints lines and per-stage timings | Build output; needs `opencv-python-headless` | stdout, optional JSON with text, scores, boxes, timings |
 
 MLX variants (`--variants` for `parity`/`bench`, `--variant` for `ocr`, default `auto`):
@@ -75,6 +76,13 @@ log/<id> [--rounds 3] [--samples 10]` times them for float32 and float16 and wri
 `tuned.json` (per-network float32 choice), which `ocr --variant auto` reads. Inside a
 published kit `--run` defaults to the script's directory, and `parity` checks the detector
 on the kit's `sample.png`.
+
+Every command except `build` accepts `--cache-mb N` (limit of the MLX buffer cache) and
+`--ops-per-buffer N` (sets `MLX_MAX_OPS_PER_BUFFER` before MLX starts); both lower peak
+memory for some speed. `build` also writes `axon_codegen2_common.py`, which the harness
+loads in place of the `synapse` package so that MLX processes do not import PyTorch. Peak
+memory is the macOS physical footprint (`proc_pid_rusage`); elsewhere only the peak
+resident set size is reported.
 
 `bench` times what the pipeline consumes: the detector map as NumPy, and the recognizer's
 best class and probability per column (taken on the device for MLX). On CUDA builds of MLX

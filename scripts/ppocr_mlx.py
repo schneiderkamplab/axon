@@ -8,6 +8,7 @@ Experiment harness for ``synapse/models/ppocr``. Run from the repository root.
     python scripts/ppocr_mlx.py ocr    --run log/ppocr-mlx --image page.png [--backend mlx|onnx]
 
     python scripts/ppocr_mlx.py tune   --run log/ppocr-mlx
+    python scripts/ppocr_mlx.py compare --run log/ppocr-mlx [--image page.png]
 
 ``parity`` and ``bench`` cover the MLX variants listed in ``MlxBackend``. ``tune`` times
 them on this machine and saves the fastest per network; ``ocr`` then uses that choice.
@@ -15,6 +16,10 @@ them on this machine and saves the fastest per network; ``ocr`` then uses that c
 ``build`` needs ``onnx``; ``parity`` and the ONNX rows of ``bench`` need ``onnxruntime``;
 ``ocr`` needs ``opencv-python-headless``. Image pre- and post-processing follow PaddleOCR's
 defaults and stay in NumPy/OpenCV; only the two networks run on MLX.
+
+``compare`` reports speed and memory of MLX against ONNX Runtime on the CPU. It runs each
+backend and workload in a process of its own, because a peak memory figure covers the
+whole life of a process.
 
 ``bench`` times what the pipeline consumes: the detector's probability map as a NumPy
 array, and the recognizer's best class and probability per column (taken on the device
@@ -26,8 +31,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -40,11 +47,14 @@ MODEL_DIR = REPO_ROOT / "synapse" / "models" / "ppocr"
 ONNX_FILES = {"det": "pp-ocrv6_small_det.onnx", "rec": "pp-ocrv6_small_rec.onnx"}
 DICT_FILE = "ppocrv6_dict.txt"
 DEFAULT_REPO = "blackpen-sk/ppocrv6-small"
+COMMON_FILE = "axon_codegen2_common.py"
+COMMON_SOURCE = REPO_ROOT / "synapse" / "axon" / "codegen2_common" / "core.py"
 
 DET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 DET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 REC_HEIGHT = 48
 REC_BASE_WIDTH = 320
+_MB = 1024 * 1024
 
 
 # --------------------------------------------------------------------------- build
@@ -98,6 +108,7 @@ def cmd_build(args: argparse.Namespace) -> None:
         code = _emit_mlx(MODEL_DIR / f"generic-ppocr-{kind}.axon", f"PpocrMlx{kind.title()}")
         (run / f"ppocr_{kind}_mlx.py").write_text(code)
         print(f"{run / f'ppocr_{kind}_mlx.py'}: {len(code.splitlines())} lines")
+    shutil.copyfile(COMMON_SOURCE, run / COMMON_FILE)
     (run / "build.json").write_text(json.dumps({"onnx_dir": str(onnx_dir.resolve())}, indent=2))
 
 
@@ -117,19 +128,22 @@ def _dictionary(run: Path) -> Path:
 
 
 def _use_vendored_common(run: Path) -> None:
-    """Let the generated modules import their helper module without the synapse package."""
+    """Let the generated modules import their helper module without the synapse package.
+
+    The helper needs only the standard library, but importing it as part of ``synapse``
+    also imports PyTorch and the compiler: about 350 MB and a second of start-up that
+    inference does not use. The copy that ``build`` writes next to the modules is loaded
+    under the helper's name instead, unless ``synapse`` is already imported.
+    """
     import importlib.util
     import types
 
     name = "synapse.axon.codegen2_common"
-    vendored = run / "axon_codegen2_common.py"
-    if name in sys.modules or not vendored.exists():
+    vendored = run / COMMON_FILE
+    if not vendored.exists():
+        vendored = COMMON_SOURCE
+    if name in sys.modules or "synapse" in sys.modules or not vendored.exists():
         return
-    try:
-        if importlib.util.find_spec(name) is not None:
-            return
-    except (ImportError, ValueError):
-        pass
     for package in ("synapse", "synapse.axon"):
         sys.modules.setdefault(package, types.ModuleType(package)).__path__ = []
     spec = importlib.util.spec_from_file_location(name, vendored)
@@ -154,13 +168,20 @@ class MlxBackend:
       shift49   the same for every depthwise convolution up to 7x7 (the detector neck)
 
     ``variant`` is one name for both networks, ``auto`` (the choice ``tune`` saved, else
-    ``compiled``), or a mapping from ``det``/``rec`` to a name.
+    ``compiled``), or a mapping from ``det``/``rec`` to a name. ``cache_mb`` limits the
+    buffer cache of MLX for the whole process.
     """
 
-    def __init__(self, run: Path, dtype: str = "float32", variant: Any = "base") -> None:
+    def __init__(
+        self, run: Path, dtype: str = "float32", variant: Any = "base", cache_mb: int | None = None
+    ) -> None:
         import mlx.core as mx
 
         _use_vendored_common(run)
+        if cache_mb is not None:
+            # MLX keeps freed buffers for reuse, without a limit by default. On these
+            # networks that cache is many times the weights; a limit trades speed for it.
+            mx.set_cache_limit(cache_mb * _MB)
         if variant == "auto":
             tuned = run / TUNED_FILE
             variant = json.loads(tuned.read_text())["variants"] if tuned.exists() else "compiled"
@@ -330,15 +351,19 @@ def _time(fn: Any, warmup: int, samples: int) -> tuple[float, float]:
     return statistics.median(times), min(times)
 
 
-def cmd_bench(args: argparse.Namespace) -> None:
+def _workloads() -> list[tuple[str, str, np.ndarray]]:
     rng = np.random.default_rng(0)
-    workloads = [
+    return [
         ("det 1x736x960", "det", rng.standard_normal((1, 736, 960, 3)).astype(np.float32)),
         ("det 1x960x960", "det", rng.standard_normal((1, 960, 960, 3)).astype(np.float32)),
         ("rec 1x48x320", "rec", rng.standard_normal((1, REC_HEIGHT, 320, 3)).astype(np.float32)),
         ("rec 6x48x320", "rec", rng.standard_normal((6, REC_HEIGHT, 320, 3)).astype(np.float32)),
         ("rec 16x48x480", "rec", rng.standard_normal((16, REC_HEIGHT, 480, 3)).astype(np.float32)),
     ]
+
+
+def cmd_bench(args: argparse.Namespace) -> None:
+    workloads = _workloads()
     backends: list[Any] = [MlxBackend(args.run, args.dtype, v) for v in args.variants.split(",")]
     try:
         import onnxruntime as ort
@@ -407,6 +432,151 @@ def cmd_tune(args: argparse.Namespace) -> None:
         chosen[kind] = "compiled" if keep_default else fastest
     (args.run / TUNED_FILE).write_text(json.dumps({"variants": chosen, "fastest_ms": best_ms}, indent=2))
     print(f"float32 choice: {chosen}; saved to {args.run / TUNED_FILE}")
+
+
+# ------------------------------------------------------------------------- compare
+
+COMPARE_BACKENDS = ("mlx", "mlx-float16", "onnx-cpu")
+OCR_WORKLOAD = "ocr page"
+
+
+def _memory_mb() -> dict[str, float]:
+    """Memory of this process in MB.
+
+    ``footprint`` is what macOS charges the process, including Metal buffers, which the
+    resident set size leaves out; ``peak_footprint`` is its maximum since the process
+    started. Both are missing on other systems, where only ``peak_rss`` is reported.
+    """
+    import resource
+
+    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    out = {"peak_rss": peak_rss / (_MB if sys.platform == "darwin" else 1024)}
+    if sys.platform != "darwin":
+        return out
+    import ctypes
+    import os
+
+    # struct rusage_info_v4: a 16-byte uuid, then 35 uint64 fields.
+    fields = (ctypes.c_uint64 * 37)()
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    if libproc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(fields)) != 0:
+        return out
+    out["footprint"] = fields[2 + 7] / _MB
+    out["peak_footprint"] = fields[2 + 28] / _MB
+    return out
+
+
+def _compare_worker(args: argparse.Namespace) -> None:
+    """Load one backend, run one workload, and print one JSON line."""
+    backend_name, workload = args.worker.split("|", 1)
+    record: dict[str, Any] = {"backend": backend_name, "workload": workload}
+    record["memory_start_mb"] = _memory_mb()
+    if backend_name == "onnx-cpu":
+        backend: Any = OnnxBackend(args.run)
+    else:
+        dtype = "float16" if backend_name.endswith("float16") else "float32"
+        backend = MlxBackend(args.run, dtype, "auto", args.cache_mb)
+    record["name"] = backend.name
+    record["memory_loaded_mb"] = _memory_mb()
+    if workload == OCR_WORKLOAD:
+        import cv2
+
+        image = cv2.imread(str(args.image))
+        characters = load_characters(_dictionary(args.run))
+
+        def call() -> Any:
+            return run_ocr(backend, image, characters, limit=960, batch_size=6, width_bucket=32)
+
+        record["lines"] = [line["text"] for line in call()["lines"]]
+    else:
+        kind, x = next((kind, x) for label, kind, x in _workloads() if label == workload)
+
+        def call() -> Any:
+            return backend.rec_best(x) if kind == "rec" else backend.run("det", x)
+
+    start = time.perf_counter()
+    call()
+    record["first_call_ms"] = (time.perf_counter() - start) * 1e3
+    record["median_ms"], record["min_ms"] = _time(call, args.warmup, args.samples)
+    record["memory_end_mb"] = _memory_mb()
+    if backend_name != "onnx-cpu":
+        mx = backend.mx
+        record["mlx_mb"] = {
+            "active": mx.get_active_memory() / _MB,
+            "cache": mx.get_cache_memory() / _MB,
+            "peak": mx.get_peak_memory() / _MB,
+        }
+    print("COMPARE " + json.dumps(record, ensure_ascii=False))
+
+
+def cmd_compare(args: argparse.Namespace) -> None:
+    """Speed and memory of MLX against ONNX Runtime on the CPU.
+
+    Each backend and workload runs in a fresh process, in interleaved order, so that a
+    peak memory figure belongs to one model on one input shape and nothing is shared.
+    """
+    if args.worker:
+        _compare_worker(args)
+        return
+    image = args.image or (args.run / "sample.png")
+    labels = [label for label, _, _ in _workloads()]
+    try:
+        import cv2  # noqa: F401
+
+        if image.exists():
+            labels.append(OCR_WORKLOAD)
+    except ImportError:
+        pass
+    backends = args.backends.split(",")
+    records = []
+    for label in labels:
+        for backend in backends:
+            command = [sys.executable, str(Path(__file__).resolve()), "compare", "--run", str(args.run)]
+            command += ["--worker", f"{backend}|{label}", "--image", str(image)]
+            command += ["--warmup", str(args.warmup), "--samples", str(args.samples)]
+            if args.cache_mb is not None:
+                command += ["--cache-mb", str(args.cache_mb)]
+            done = subprocess.run(command, capture_output=True, text=True, check=False)
+            lines = [line for line in done.stdout.splitlines() if line.startswith("COMPARE ")]
+            if done.returncode != 0 or not lines:
+                raise SystemExit(f"worker failed for {backend} on {label}:\n{done.stderr[-2000:]}")
+            records.append(json.loads(lines[-1][len("COMPARE ") :]))
+
+    def peak(record: dict[str, Any]) -> float:
+        memory = record["memory_end_mb"]
+        return memory.get("peak_footprint", memory["peak_rss"])
+
+    reference = "onnx-cpu" if "onnx-cpu" in backends else backends[-1]
+    print(f"median ms per call, and peak process memory in MB ({args.samples} samples, one process each)")
+    header = " ".join(f"{b + ' ms':>15s} {b + ' MB':>15s}" for b in backends)
+    print(f"{'workload':15s} {header}   vs {reference}")
+    for label in labels:
+        row = {r["backend"]: r for r in records if r["workload"] == label}
+        cells = " ".join(f"{row[b]['median_ms']:15.2f} {peak(row[b]):15.0f}" for b in backends)
+        ratios = ", ".join(
+            f"{b}: {row[reference]['median_ms'] / row[b]['median_ms']:.1f}x faster, "
+            f"{peak(row[b]) / peak(row[reference]):.2f}x memory"
+            for b in backends
+            if b != reference
+        )
+        print(f"{label:15s} {cells}   {ratios}")
+    texts = {tuple(r["lines"]) for r in records if "lines" in r}
+    if texts:
+        print("OCR text identical across backends" if len(texts) == 1 else "OCR text DIFFERS between backends")
+    tag = "".join(
+        f"-{name}{value}"
+        for name, value in (("cache", args.cache_mb), ("ops", args.ops_per_buffer))
+        if value is not None
+    )
+    out = args.run / f"compare{tag}.json"
+    summary = {
+        "samples": args.samples,
+        "mlx_cache_mb": args.cache_mb,
+        "mlx_ops_per_buffer": args.ops_per_buffer,
+        "records": records,
+    }
+    out.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"wrote {out}")
 
 
 # ----------------------------------------------------------------------------- OCR
@@ -574,7 +744,7 @@ def cmd_ocr(args: argparse.Namespace) -> None:
         raise SystemExit(f"cannot read image: {args.image}")
     characters = load_characters(_dictionary(args.run))
     if args.backend == "mlx":
-        backend = MlxBackend(args.run, args.dtype, args.variant)
+        backend = MlxBackend(args.run, args.dtype, args.variant, args.cache_mb)
     else:
         backend = OnnxBackend(args.run)
     for _ in range(args.repeat):
@@ -616,6 +786,13 @@ def main() -> None:
         sub.set_defaults(handler=handler)
         if name != "build":
             sub.add_argument("--dtype", default="float32", choices=["float32", "float16"])
+            sub.add_argument("--cache-mb", type=int, help="limit the MLX buffer cache to this many MB")
+            sub.add_argument(
+                "--ops-per-buffer",
+                type=int,
+                help="commit the Metal command buffer after this many MLX operations; a small "
+                "value frees intermediate results sooner and lowers peak memory",
+            )
         return sub
 
     build = add("build", cmd_build)
@@ -634,6 +811,16 @@ def main() -> None:
     tune.add_argument("--warmup", type=int, default=3)
     tune.add_argument("--samples", type=int, default=10)
     tune.add_argument("--rounds", type=int, default=3)
+    compare = add("compare", cmd_compare)
+    compare.add_argument(
+        "--backends",
+        default=",".join(COMPARE_BACKENDS),
+        help="comma-separated, from: " + ", ".join(COMPARE_BACKENDS),
+    )
+    compare.add_argument("--image", type=Path, help="page for the end-to-end row (default: sample.png in the run)")
+    compare.add_argument("--warmup", type=int, default=3)
+    compare.add_argument("--samples", type=int, default=20)
+    compare.add_argument("--worker", help=argparse.SUPPRESS)
     ocr = add("ocr", cmd_ocr)
     ocr.add_argument("--image", type=Path, required=True)
     ocr.add_argument("--backend", default="mlx", choices=["mlx", "onnx"])
@@ -644,6 +831,9 @@ def main() -> None:
     ocr.add_argument("--repeat", type=int, default=1, help="run this many times and report the last")
     ocr.add_argument("--json", type=Path, help="write lines, boxes and timings here")
     args = parser.parse_args()
+    if getattr(args, "ops_per_buffer", None) is not None:
+        # MLX reads this when it starts; it is imported later, and workers inherit it.
+        os.environ["MLX_MAX_OPS_PER_BUFFER"] = str(args.ops_per_buffer)
     args.handler(args)
 
 

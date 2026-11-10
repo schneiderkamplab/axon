@@ -86,21 +86,34 @@ Runtime and all variants agree with it to 1e-5.
   the shape of `x` compiles and runs on unoptimized Torch, but every downstream type is
   wrong and the graph optimizer miscompiles (it rewrote a size ratio to `H // H`). The
   PP-OCR files therefore loop only over shape-preserving blocks and write each strided
-  block explicitly.
-- **Inlining can corrupt `Tensor.size` on spatial dims.** `inline_safe` replaced
-  `size ref 1` in an inlined builtin with a caller symbol of the same name. With
-  `GraphOptimizeConfig(inline_safe=False)` the same graph was correct. Cause not isolated
-  (suspect: the inlined loop output keeps callee dim names). Worked around by making
-  global average pooling and reference-sized upsampling primitives, so nothing in
-  `Vision.axon` reads spatial sizes. Unfixed in the optimizer.
-- A dim parameter passed a *runtime* value (`c <- Tensor.size x 3`, then `conv2d x c ...`)
-  types the result with the callee's unsubstituted names. Harmless where the result only
-  meets tensors of the same origin; use named config dims (`C2 = List.index STAGE_DIMS 0`)
-  where the width must be tracked.
+  block explicitly. Not fixed. Smallest known case: a carry through
+  `Vision.max_pool2d x 2 2 stride_h=2 stride_w=2`, then a helper that reads
+  `Tensor.size` of the result; optimized Torch returns 4x6 where unoptimized returns 16x24.
+  The return check accepts any tensor of the same rank for a carry, so a fix is a typing
+  decision (reject the loop, or give changed dims fresh names after it) and needs review.
+- **Inlining could read a callee dim as a caller dim of the same name.** Fixed 2026-11-10.
+  Callee and caller dim symbols share one namespace in a call substitution. A formal `H`
+  whose actual size is an expression over the caller's `H` (`((H - 2) / 2) + 1` after a
+  pool) gets no binding, because the binding would be a cycle; inlining then turned the
+  callee's `H` into the caller's `H` and folded a size ratio to 0. Fixed-by
+  `_call_dim_subst_captures_formal_dim` in `synapse/axon/graph_ir/optimize.py`: such a
+  call is no longer inlined. Validated-by `tests/test_axon_cnn_compiler_regressions.py`.
+  Generated code is unchanged for 26 sampled language models; in the PP-OCR files 40
+  (detector) and 32 (recognizer) inline attempts are now refused, with no measurable
+  change in speed. Global average pooling and reference-sized upsampling stay primitives.
+- **Call results are typed with the callee's unsubstituted names.** Same cause, not fixed:
+  with the binding missing, `Vision.max_pool2d y` is typed like `y`'s producer, and a dim
+  parameter passed a *runtime* value (`c <- Tensor.size x 3`, then `conv2d x c ...`) keeps
+  the callee's names. The types are wrong but, after the fix above, no code is derived
+  from them across a call. A real fix gives callee symbols their own namespace at each
+  call. Use named config dims (`C2 = List.index STAGE_DIMS 0`) where a width must be tracked.
 - Kernel arguments must be declared `Dim` in a builtin signature for the type rule to see
   literal values; `Int` parameters reach it as bare names.
-- A top-level definition whose name starts with `do` (for example `downsample`) is lexed
-  as the `do` keyword and fails to parse.
+- **A name that starts with a keyword failed to parse.** Fixed 2026-11-10. The lexer cut
+  `downsample` into `do` and `wnsample`; `format`, `forward`, `typed`, `nullable` and
+  similar names failed in some positions too. Keyword terminals in
+  `synapse/axon/parse/grammar.py` now end at a word boundary. All 300 `.axon` files in the
+  repository parse to identical trees before and after.
 - Paths with a computed index need the quoted form on a scope:
   `scope@'backbone.blocks.{e2}' do`. `f@'...'` call sugar does not accept it.
 
@@ -169,6 +182,58 @@ convolution selects NNPACK, which is about 10x slower on this machine: recognize
 16x48x480 takes 1415 ms, and 150 ms after `torch.backends.nnpack.set_flags(False)`.
 Lowering pointwise convolutions to `F.linear` avoids part of it (570 ms) but costs about 5%
 at smaller batches and on MPS, so it was not adopted.
+
+## MLX against ONNX Runtime CPU: speed and memory (2026-11-10, M1 Pro)
+
+Same machine and versions as above, generated code rebuilt after the compiler fixes. Run
+directory `log/ppocr-mlx-m1pro-20261110-b/` (`compare.json`, `compare-cache64-ops1.json`).
+`scripts/ppocr_mlx.py compare`: 30 samples, float32 unless noted, one fresh process per
+backend and workload. Memory is the peak physical footprint of the process, which
+includes Metal buffers; the resident set size does not (it reads 160-190 MB for MLX).
+
+| Workload | MLX ms | MLX MB | MLX float16 ms | MLX float16 MB | ONNX CPU ms | ONNX CPU MB |
+|---|---|---|---|---|---|---|
+| det 1x736x960 | 22.3 | 639 | 18.5 | 471 | 96.6 | 337 |
+| det 1x960x960 | 28.6 | 784 | 23.2 | 556 | 123.2 | 398 |
+| rec 1x48x320 | 3.3 | 179 | 3.0 | 189 | 9.8 | 145 |
+| rec 6x48x320 | 10.3 | 321 | 8.7 | 273 | 58.3 | 196 |
+| rec 16x48x480 | 34.3 | 844 | 28.4 | 633 | 190.8 | 458 |
+| OCR of the sample page | 52.5 | 1133 | 43.3 | 782 | 306.6 | 528 |
+
+With MLX defaults, MLX is 3.0x to 5.8x faster and uses 1.2x to 2.2x the memory. The
+weights are 30 MB (15 MB in float16) and a loaded MLX process is 75 MB, less than a loaded
+ONNX Runtime process (82-92 MB). The rest has two causes, both settings of MLX and not of
+the generated code:
+
+- **Command buffers.** MLX commits its Metal command buffer after a fixed number of
+  operations, and intermediate results stay allocated until then. The peak inside one
+  detector call is 523 MB; with `MLX_MAX_OPS_PER_BUFFER` set to 8, 4, 2 and 1 it is 327,
+  279, 237 and 188 MB (recognizer 16x48x480: 728 MB down to 193 MB), for up to 6% more time.
+- **Buffer cache.** MLX keeps freed buffers for reuse without a limit. After a page with
+  several input shapes the cache holds 1 GB. `mx.set_cache_limit` bounds it; a limit below
+  the per-call peak costs time (0 MB: detector 22 -> 30 ms).
+
+`compare --ops-per-buffer 1 --cache-mb 64` (the harness sets both):
+
+| Workload | MLX ms | MLX MB | MLX float16 ms | MLX float16 MB | ONNX CPU ms | ONNX CPU MB |
+|---|---|---|---|---|---|---|
+| det 1x736x960 | 25.1 | 373 | 21.1 | 257 | 98.2 | 343 |
+| det 1x960x960 | 32.1 | 419 | 26.8 | 280 | 123.3 | 397 |
+| rec 1x48x320 | 4.0 | 164 | 3.7 | 163 | 9.8 | 146 |
+| rec 6x48x320 | 11.5 | 233 | 10.0 | 200 | 57.6 | 194 |
+| rec 16x48x480 | 38.0 | 367 | 32.7 | 332 | 188.2 | 452 |
+| OCR of the sample page | 58.7 | 321 | 48.8 | 283 | 304.8 | 527 |
+
+With these settings MLX is 2.5x to 5.2x faster at 0.6x to 1.2x the memory of ONNX Runtime
+(float16: 2.6x to 6.2x faster at 0.5x to 1.1x). The OCR text is identical in every run.
+The two options are not defaults of the harness: the best value depends on the machine.
+
+**Importing the helper module cost 300 MB.** A generated MLX module imports
+`synapse.axon.codegen2_common`, which needs only the standard library, but importing it
+through the package also imports PyTorch and the compiler: a loaded MLX process was 376 MB
+instead of 77 MB. `build` now writes `axon_codegen2_common.py` into the run directory and
+the harness loads it under the helper's name. Other hosts of generated MLX code pay this
+cost unless they do the same; the package `__init__` files are unchanged.
 
 ## Open
 
