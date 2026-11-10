@@ -21,6 +21,8 @@ def generate_core(source, *, backend="mlx", backend_intrinsics=None, optimize=Tr
     ``backend_intrinsics`` is the explicit opt-in selector for ``GraphOptimizeConfig``."""
     if backend == "torch":
         from synapse.axon.codegen2_torch import emit_model_code_from_graph_ir
+    elif backend == "jax":
+        from synapse.axon.codegen2_jax import emit_model_code_from_graph_ir
     else:
         from synapse.axon.codegen2_mlx import emit_model_code_from_graph_ir
 

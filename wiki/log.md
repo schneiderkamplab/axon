@@ -3,6 +3,38 @@
 Links under `log/` refer to local, Git-ignored evidence. Topic pages keep the checked-in
 results and limitations; raw run artifacts are not part of a PR.
 
+## 2026-11-10 — QTensor weight-only quantization for torch and jax backends
+
+Implemented design (b) (packed weights in device memory, unpack-in-kernel GEMV)
+for the torch and jax backends, mirroring the existing MLX support; MLX stays
+on its native `mx.quantized_matmul` path. Topic page: `quantized-checkpoints.md`
+(layout contract, per-backend lowering, JAX dead-end evidence, venv recipes).
+
+Surface: runtime load kwarg `quantization={'bits','group_size','kernel'?}` only
+— no new graph intrinsics, no compiler-layer changes. Canonical in-core layout:
+`<path>.int8` uint8 packed (`(rows,K)` q8, `(rows,K//2)` q4, byte j = value 2j
+low nibble + 2j+1 high nibble) + fp16 `<path>.scale`/`<path>.qbias`
+`(rows, K//group)`. MLX uint32 checkpoints are unpacked with explicit shifts at
+load (LSB-first value order confirmed against `mx.quantize`); W8A16 pairs are
+requantized straight to the packed layout.
+
+- torch: eager dequant matmul default; `kernel='triton'` opt-in runs the fused
+  1-D decode GEMV (autotuned, correctness-gated configs) — validated end-to-end
+  on RTX 2080 Ti through the generated core (`test_triton_decode_gemv_matches_eager`).
+- jax: pure-jnp group-partial-sum lowering, fully jittable; batched-bias einsum
+  fix (`'...a,ra->...r'`) found via the multi-group test shapes.
+- tests: `tests/test_codegen2_torch_quantized_checkpoint.py` (15 passed, 1
+  CUDA-gated skip path), `tests/test_codegen2_jax_quantized_checkpoint.py`
+  (12 passed), multi-group shapes (DIM=128; groups 64/32) to avoid the DIM=64
+  single-group blind spot; shared fixtures in `tests/quantized_fixture.py`.
+- jax test env: isolated `/tmp/opencode/jax-venv` now also carries CPU-only
+  torch (the `synapse` package imports torch unconditionally) + lark +
+  safetensors + transformers.
+- Probes archived under `log/`: fused Triton q8 278 GB/s / q4 180 GB/s vs JAX
+  pure-jnp 112–139 GB/s packed (2.5–3.2x gap lives below the abstraction);
+  JAX route eliminations (Pallas Ampere gate, jax-triton ptxas segfault,
+  libnvjitlink refusal) recorded so nobody re-walks them.
+
 ## 2026-10-27 — Timestral MLX comparison benchmark for the Axon paper
 
 Added `scripts/timestral_bench/`, a benchmark-only harness that restores the NumPy

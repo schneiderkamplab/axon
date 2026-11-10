@@ -265,6 +265,43 @@ synapse axon-codegen-dump model.axon model_torch.py --backend codegen2-torch --o
 
 ---
 
+## Quantized Checkpoints (torch / JAX / MLX)
+
+Generated cores load `mlx.nn.quantize`-style weight-only quantized checkpoints
+(4- or 8-bit, group sizes 32/64/128) without dequantizing them first. Pass the
+runtime kwarg `quantization={'bits': .., 'group_size': ..}` to the generated
+class; on load the checkpoint's uint32-packed weights are unpacked once into a
+canonical packed uint8 layout (plus fp16 per-group scales/biases) and never
+touched again:
+
+| Backend | Quantized GEMV lowering | Opt-in |
+|---|---|---|
+| MLX | native `mx.quantized_matmul` / `mx.dequantize` | `quantization=` |
+| PyTorch | eager dequant matmul (any shape) | `quantization=` |
+| PyTorch | fused Triton decode GEMV (1-D inputs) | `quantization={'kernel': 'triton'}` |
+| JAX | pure-jnp group-partial-sum (fully `jax.jit`-composable) | `quantization=` |
+
+Every path computes `y = x @ dequant(q) + bias` with per-group affine
+dequantization; there are no silent fallbacks — a quantized checkpoint loaded
+without `quantization=` raises, and so does `quantization=` on a state with no
+quantized weights. W8A16 export checkpoints (`.int8` + `.scale` pairs) are
+requantized to the packed layout on load when `quantization=` is given.
+
+```python
+import torch
+from model_torch import AxonCore
+
+core = AxonCore.from_state_dict(state_dict, quantization={"bits": 8, "group_size": 64})
+logits = core(input_ids)
+```
+
+Tests: `tests/test_codegen2_torch_quantized_checkpoint.py`,
+`tests/test_codegen2_jax_quantized_checkpoint.py`,
+`tests/test_codegen2_mlx_quantized_checkpoint.py` (shared fixture helpers in
+`tests/quantized_fixture.py`).
+
+---
+
 ## Testing & Benchmarking
 
 ```bash

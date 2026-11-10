@@ -5931,7 +5931,7 @@ def test_codegen2_triton_emits_gpt2_source() -> None:
     assert "def _axon_triton_rope_apply_kernel" in code
     assert "_axon_triton_rope_apply_kernel[grid]" in code
     assert "class TritonGPT2(nn.Module)" in code
-    assert "def load_state_dict(self, state_dict, strict=True):" in code
+    assert "def load_state_dict(self, state_dict, strict=True, quantization=None):" in code
     assert "def setup(self):" in code
     assert "def _forward(self, input_ids=None, **inputs):" in code
 
@@ -8268,7 +8268,7 @@ def test_codegen2_static_embedding_param_key_uses_graph_path_metadata_only() -> 
 
     code = emit_model_code_from_graph_ir(graph)
 
-    assert "y = F.embedding(x, self.state_dict_tensors['wte.weight'])" in code
+    assert "y = self._embedding('wte.weight', x)" in code
 
 
 def test_codegen2_templated_embedding_param_key_keeps_dynamic_path_resolution() -> None:
@@ -8304,7 +8304,7 @@ def test_codegen2_templated_embedding_param_key_keeps_dynamic_path_resolution() 
     code = emit_model_code_from_graph_ir(graph)
 
     assert "self.state_dict_tensors['h.{i}.weight']" not in code
-    assert "y = F.embedding(x, self._param(" in code
+    assert "y = self._embedding_path(" in code
     assert "_path_template_part(i)" in code
 
 
@@ -9221,7 +9221,7 @@ def test_codegen2_torch_generated_model_uses_shared_public_interface() -> None:
         _toy_program((GraphValue("input_ids", _tensor("B", "S")),), ("logits",))
     )
 
-    assert "def load_state_dict(self, state_dict, strict=True):" in code
+    assert "def load_state_dict(self, state_dict, strict=True, quantization=None):" in code
     assert "def setup(self):" in code
     assert "def _forward(self, input_ids=None, **inputs):" in code
     assert "def forward(self, input_ids=None, **inputs):" in code

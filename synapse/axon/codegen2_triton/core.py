@@ -759,7 +759,7 @@ def emit_model_code_from_graph_ir(
             "    _axon_triton_geglu_tanh_kernel = None",
             "    _axon_triton_grouped_mm_kernel = None",
             "    _axon_triton_linear_kernel = None",
-            "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters",
+            "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters, _torch_quantized_gemv_triton",
             "from synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",
             "    config_value as _common_config_value,",

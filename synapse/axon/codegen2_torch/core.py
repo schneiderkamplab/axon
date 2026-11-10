@@ -3528,7 +3528,7 @@ class _DirectTorchEmitter:
 
     def _emit_common(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def __init__(self, state_dict: dict[str, torch.Tensor], config: dict | None = None, param_devices=None):")
+        add(lines, 4, "def __init__(self, state_dict: dict[str, torch.Tensor], config: dict | None = None, param_devices=None, quantization=None):")
         add(lines, 8, "super().__init__()")
         add(lines, 8, "self.param_devices = self._normalize_param_devices(param_devices)")
         add(lines, 8, "self.state_dict_tensors = {}")
@@ -3537,7 +3537,7 @@ class _DirectTorchEmitter:
         if self.profile:
             add(lines, 8, "self._profile_cuda = True")
             add(lines, 8, "self._profile_records = {}")
-        add(lines, 8, "self.load_state_dict(state_dict)")
+        add(lines, 8, "self.load_state_dict(state_dict, quantization=quantization)")
         add(lines, 4, "")
         if self.profile:
             add(lines, 4, "def enable_profile(self, enabled=True, *, cuda=True, reset=True):")
@@ -3571,15 +3571,32 @@ class _DirectTorchEmitter:
             add(lines, 8, "return rows[: int(top_n)]")
             add(lines, 4, "")
         add(lines, 4, "@classmethod")
-        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None):")
-        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, param_devices=param_devices)")
+        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None, quantization=None):")
+        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, param_devices=param_devices, quantization=quantization)")
         add(lines, 4, "")
-        add(lines, 4, "def load_state_dict(self, state_dict, strict=True):")
+        add(lines, 4, "def load_state_dict(self, state_dict, strict=True, quantization=None):")
         add(lines, 8, "del strict")
-        add(lines, 8, "state_dict = self._filter_state_dict(state_dict)")
+        add(lines, 8, "self._quantized = False")
+        add(lines, 8, "self._quant_bits = 8")
+        add(lines, 8, "self._quant_group_size = 64")
+        add(lines, 8, "self._quant_kernel = 'eager'")
         add(lines, 8, "state = dict(state_dict)")
-        add(lines, 8, "self._materialize_int8_aliases(state)")
+        add(lines, 8, "bases = self._quantized_layout_bases(state)")
+        add(lines, 8, "if quantization is not None:")
+        add(lines, 12, "state = self._materialize_quantized(state, bases, quantization)")
+        add(lines, 12, "self._quantized = True")
+        add(lines, 8, "elif bases:")
+        add(lines, 12, "raise ValueError(f'{bases[0]} is an mlx.nn.quantize weight: pass quantization=')")
+        add(lines, 8, "else:")
+        add(lines, 12, "self._materialize_int8_aliases(state)")
+        add(lines, 8, "# The filter runs after quantized materialization: canonical packed keys")
+        add(lines, 8, "# ('<path>.int8'/'<path>.scale'/'<path>.qbias') share their prefix with the")
+        add(lines, 8, "# float weight path and survive it, while the on-disk mlx.nn.quantize keys")
+        add(lines, 8, "# ('<base>.scales'/'<base>.biases') are consumed before filtering.")
+        add(lines, 8, "state = self._filter_state_dict(state)")
         add(lines, 8, "_materialize_packed_parameters(state, self._PACKED_PARAMETER_SPECS)")
+        add(lines, 8, "if self._quantized and self._PACKED_PARAMETER_SPECS:")
+        add(lines, 12, "raise ValueError('quantized weights cannot be combined with packed parameters')")
         add(lines, 8, "self.state_dict_tensors = self._place_state_dict(state, self.param_devices)")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
@@ -3930,8 +3947,179 @@ class _DirectTorchEmitter:
         add(lines, 12, "return None, expert")
         add(lines, 8, "return _common_required_state_value(self.state_dict_tensors, resolved), expert")
         add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _quantized_layout_bases(state_dict):")
+        add(lines, 8, "# mlx.nn.quantize layout: a uint32 '<base>.weight' with '<base>.scales' and '<base>.biases'.")
+        add(lines, 8, "bases = (str(key)[: -len('.scales')] for key in state_dict if str(key).endswith('.scales'))")
+        add(lines, 8, "return [base for base in bases if 'uint32' in str(getattr(state_dict.get(f'{base}.weight'), 'dtype', ''))]")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _quantization_settings(quantization):")
+        add(lines, 8, "if not isinstance(quantization, dict) or 'bits' not in quantization or 'group_size' not in quantization:")
+        add(lines, 12, "raise ValueError(\"quantization must be a dict with 'bits' and 'group_size' (optional 'kernel')\")")
+        add(lines, 8, "bits = int(quantization['bits'])")
+        add(lines, 8, "group_size = int(quantization['group_size'])")
+        add(lines, 8, "kernel = str(quantization.get('kernel', 'eager'))")
+        add(lines, 8, "if bits not in (4, 8):")
+        add(lines, 12, "raise ValueError(f'unsupported quantization bits {bits}: expected 4 or 8')")
+        add(lines, 8, "if group_size not in (32, 64, 128):")
+        add(lines, 12, "raise ValueError(f'unsupported quantization group_size {group_size}: expected 32, 64 or 128')")
+        add(lines, 8, "if kernel not in ('eager', 'triton'):")
+        add(lines, 12, "raise ValueError(f\"unsupported quantization kernel {kernel!r}: expected 'eager' or 'triton'\")")
+        add(lines, 8, "if kernel == 'triton' and not torch.cuda.is_available():")
+        add(lines, 12, "raise RuntimeError(\"quantization kernel='triton' requires CUDA\")")
+        add(lines, 8, "return bits, group_size, kernel")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _pack_from_mlx_words(words, bits):")
+        add(lines, 8, "# mlx.nn.quantize packs values LSB-first into uint32 words.  The words are")
+        add(lines, 8, "# reinterpreted as int32 (uint32 bitwise ops are incomplete in torch) and")
+        add(lines, 8, "# unpacked with explicit shifts, so the byte order comes from arithmetic,")
+        add(lines, 8, "# not memory layout.  The resulting byte stream is the canonical packed")
+        add(lines, 8, "# layout: byte j holds value j (8-bit), or value 2j in its low nibble and")
+        add(lines, 8, "# value 2j + 1 in its high nibble (4-bit).")
+        add(lines, 8, "w = words if words.dtype == torch.int32 else words.view(torch.int32)")
+        add(lines, 8, "w = w.contiguous()")
+        add(lines, 8, "byte_stream = torch.stack([(w >> shift) & 0xFF for shift in (0, 8, 16, 24)], dim=-1)")
+        add(lines, 8, "return byte_stream.reshape(w.shape[0], -1).to(torch.uint8)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _materialize_int8_quantized(state_dict, bits, group_size):")
+        add(lines, 8, "# W8A16 export layout ('<path>.int8' int8 + '<path>.scale' fp32, symmetric")
+        add(lines, 8, "# per-output-channel absmax over dim 1): requantize to the canonical packed")
+        add(lines, 8, "# per-group affine layout instead of dequantizing to bf16, so the quantized")
+        add(lines, 8, "# kernels can run on these weights.  Returns the converted keys.")
+        add(lines, 8, "converted = []")
+        add(lines, 8, "for key in list(state_dict.keys()):")
+        add(lines, 12, "k = str(key)")
+        add(lines, 12, "if not k.endswith('.int8'):")
+        add(lines, 16, "continue")
+        add(lines, 12, "path = k[: -len('.int8')]")
+        add(lines, 12, "scale_key = f'{path}.scale'")
+        add(lines, 12, "if scale_key not in state_dict or torch.is_tensor(state_dict.get(path)):")
+        add(lines, 16, "continue")
+        add(lines, 12, "q = state_dict[key]")
+        add(lines, 12, "scale = state_dict[scale_key]")
+        add(lines, 12, "if q.ndim != 2:")
+        add(lines, 16, "raise ValueError(f'quantization supports 2-D W8A16 weights only: {k} has shape {tuple(q.shape)}')")
+        add(lines, 12, "w = q.float() * scale.float().unsqueeze(-1)")
+        add(lines, 12, "rows, dim = int(w.shape[0]), int(w.shape[1])")
+        add(lines, 12, "if dim % group_size:")
+        add(lines, 16, "raise ValueError(f'{k}: contraction dim {dim} is not divisible by quantization group_size {group_size}')")
+        add(lines, 12, "groups = w.reshape(rows, dim // group_size, group_size)")
+        add(lines, 12, "amin = groups.amin(dim=-1, keepdim=True)")
+        add(lines, 12, "amax = groups.amax(dim=-1, keepdim=True)")
+        add(lines, 12, "s = torch.clamp((amax - amin) / float((1 << bits) - 1), min=1e-12)")
+        add(lines, 12, "qg = torch.clamp(torch.round((groups - amin) / s), 0, (1 << bits) - 1).to(torch.int64).reshape(rows, dim)")
+        add(lines, 12, "if bits == 8:")
+        add(lines, 16, "packed = qg.to(torch.uint8)")
+        add(lines, 12, "else:")
+        add(lines, 16, "packed = (qg[:, 0::2] | (qg[:, 1::2] << 4)).to(torch.uint8)")
+        add(lines, 12, "state_dict[k] = packed")
+        add(lines, 12, "state_dict[scale_key] = s.reshape(rows, dim // group_size).to(torch.float16)")
+        add(lines, 12, "state_dict[f'{path}.qbias'] = amin.reshape(rows, dim // group_size).to(torch.float16)")
+        add(lines, 12, "converted.append(k)")
+        add(lines, 8, "return converted")
+        add(lines, 4, "")
+        add(lines, 4, "def _materialize_quantized(self, state_dict, bases, quantization):")
+        add(lines, 8, "# Moves the layout to the keys _quantized_matmul and _quantized_embedding read:")
+        add(lines, 8, "# '<path>.int8' canonical packed uint8 + '<path>.scale'/'<path>.qbias' fp16.")
+        add(lines, 8, "# Packing happens once here; the device tensors are never repacked again.")
+        add(lines, 8, "bits, group_size, kernel = self._quantization_settings(quantization)")
+        add(lines, 8, "self._quant_bits = bits")
+        add(lines, 8, "self._quant_group_size = group_size")
+        add(lines, 8, "self._quant_kernel = kernel")
+        add(lines, 8, "if not bases:")
+        add(lines, 12, "if not self._materialize_int8_quantized(state_dict, bits, group_size):")
+        add(lines, 16, "raise ValueError('quantization was given, but the state has no quantized weights')")
+        add(lines, 12, "return state_dict")
+        add(lines, 8, "for base in bases:")
+        add(lines, 12, "key = f'{base}.weight'")
+        add(lines, 12, "words = state_dict.pop(key)")
+        add(lines, 12, "scales = state_dict.pop(f'{base}.scales')")
+        add(lines, 12, "biases = state_dict.pop(f'{base}.biases')")
+        add(lines, 12, "values = int(words.shape[1]) * 32 // bits")
+        add(lines, 12, "groups = int(scales.shape[1])")
+        add(lines, 12, "if groups * group_size != values:")
+        add(lines, 16, "raise ValueError(f'{key} holds {values} values per row but scales imply {groups} groups of {group_size}')")
+        add(lines, 12, "state_dict[f'{key}.int8'] = self._pack_from_mlx_words(words, bits)")
+        add(lines, 12, "state_dict[f'{key}.scale'] = scales.to(torch.float16)")
+        add(lines, 12, "state_dict[f'{key}.qbias'] = biases.to(torch.float16)")
+        add(lines, 8, "return state_dict")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _dequantize_packed(q_weight, scales, biases, bits, group_size):")
+        add(lines, 8, "# Canonical packed uint8 layout -> float32 weights (per-group affine dequant).")
+        add(lines, 8, "rows = int(q_weight.shape[0])")
+        add(lines, 8, "q = q_weight.to(torch.int64)")
+        add(lines, 8, "if bits == 8:")
+        add(lines, 12, "q = q.reshape(rows, -1)")
+        add(lines, 8, "else:")
+        add(lines, 12, "q = torch.stack([q & 0xF, (q >> 4) & 0xF], dim=-1).reshape(rows, -1)")
+        add(lines, 8, "values = int(q.shape[1])")
+        add(lines, 8, "if values % group_size or values // group_size != int(scales.shape[1]):")
+        add(lines, 12, "raise ValueError(f'packed weight holds {values} values per row but scales imply {int(scales.shape[1])} groups of {group_size}')")
+        add(lines, 8, "qf = q.to(torch.float32).reshape(rows, values // group_size, group_size)")
+        add(lines, 8, "s = scales.to(torch.float32).unsqueeze(-1)")
+        add(lines, 8, "b = biases.to(torch.float32).unsqueeze(-1) if biases is not None else 0.0")
+        add(lines, 8, "return (qf * s + b).reshape(rows, values)")
+        add(lines, 4, "")
+        add(lines, 4, "def _quantized_matmul(self, path, x, bias=None, transpose=True):")
+        add(lines, 8, "# transpose=True: x @ w.T (weight stored (out, in)); transpose=False: x @ w.")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "int8_key = f'{key}.int8'")
+        add(lines, 8, "scale_key = f'{key}.scale'")
+        add(lines, 8, "qbias_key = f'{key}.qbias'")
+        add(lines, 8, "if int8_key not in self.state_dict_tensors or scale_key not in self.state_dict_tensors:")
+        add(lines, 12, "w = self._param(path)")
+        add(lines, 12, "if transpose:")
+        add(lines, 16, "w = w.transpose(-1, -2)")
+        add(lines, 12, "y = self._matmul(x, w)")
+        add(lines, 12, "return (y + bias) if bias is not None else y")
+        add(lines, 8, "q_weight = self.state_dict_tensors[int8_key]")
+        add(lines, 8, "scales = self.state_dict_tensors[scale_key]")
+        add(lines, 8, "biases = self.state_dict_tensors.get(qbias_key)")
+        add(lines, 8, "if x.ndim == 1 and transpose and self._quant_kernel == 'triton':")
+        add(lines, 12, "# Fused decode GEMV: packed bytes in device memory, unpack in registers.")
+        add(lines, 12, "return _torch_quantized_gemv_triton(q_weight, scales, biases, x, bits=self._quant_bits, group_size=self._quant_group_size)")
+        add(lines, 8, "w = self._dequantize_packed(q_weight, scales, biases, self._quant_bits, self._quant_group_size).to(x.dtype)")
+        add(lines, 8, "if transpose:")
+        add(lines, 12, "w = w.transpose(-1, -2)")
+        add(lines, 8, "y = self._matmul(x, w)")
+        add(lines, 8, "return (y + bias) if bias is not None else y")
+        add(lines, 4, "")
+        add(lines, 4, "def _quantized_embedding(self, key, ids):")
+        add(lines, 8, "tensors = self.state_dict_tensors")
+        add(lines, 8, "q_weight = tensors[f'{key}.int8']")
+        add(lines, 8, "ids = ids.to(q_weight.device)")
+        add(lines, 8, "flat_ids = ids.reshape(-1)")
+        add(lines, 8, "q = q_weight[flat_ids]")
+        add(lines, 8, "scales = tensors[f'{key}.scale'][flat_ids]")
+        add(lines, 8, "biases = tensors.get(f'{key}.qbias')")
+        add(lines, 8, "biases = None if biases is None else biases[flat_ids]")
+        add(lines, 8, "w = self._dequantize_packed(q, scales, biases, self._quant_bits, self._quant_group_size)")
+        add(lines, 8, "return w.reshape((*ids.shape, -1)).to(scales.dtype)")
+        add(lines, 4, "")
+        add(lines, 4, "def _embedding(self, key, ids):")
+        add(lines, 8, "tensors = self.state_dict_tensors")
+        add(lines, 8, "if f'{key}.int8' in tensors and f'{key}.scale' in tensors:")
+        add(lines, 12, "return self._quantized_embedding(key, ids)")
+        add(lines, 8, "weight = tensors[key]")
+        add(lines, 8, "return F.embedding(self._move_to(ids, weight.device), weight)")
+        add(lines, 4, "")
+        add(lines, 4, "def _embedding_path(self, base, ids):")
+        add(lines, 8, "return self._embedding(str(self._compose_path(base, 'weight')).lstrip('@'), ids)")
+        add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
-        add(lines, 8, "weight, expert = self._linear_param(self._compose_path(base, weight_leaf), expert)")
+        add(lines, 8, "weight_path = self._compose_path(base, weight_leaf)")
+        add(lines, 8, "key = str(weight_path).lstrip('@')")
+        add(lines, 8, "if expert is None and f'{key}.int8' in self.state_dict_tensors and f'{key}.scale' in self.state_dict_tensors:")
+        add(lines, 12, "# Quantized weight: x is moved to the packed weight's device and the")
+        add(lines, 12, "# matmul flips the transpose flag (stored (out, in) like the float path).")
+        add(lines, 12, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
+        add(lines, 12, "x = self._move_to(x, self.state_dict_tensors[f'{key}.int8'].device)")
+        add(lines, 12, "return self._quantized_matmul(weight_path, x, bias=bias_value, transpose=not transpose)")
+        add(lines, 8, "weight, expert = self._linear_param(weight_path, expert)")
         add(lines, 8, "if expert is not None:")
         add(lines, 12, "weight = weight[int(expert)]")
         add(lines, 8, "x = self._move_to(x, weight.device)")
@@ -5307,6 +5495,25 @@ class _DirectTorchEmitter:
             local=local,
             symbols_dict=symbols_dict,
         )
+        weight_key = self._static_param_key(
+            node.inputs[0],
+            node.inputs[6] if len(node.inputs) > 6 else "weight",
+        )
+        if weight_key is not None:
+            # Static weight key: route through self._linear so quantized
+            # checkpoints (packed '<key>.int8' + '<key>.scale') dispatch to the
+            # quantized matmul at runtime while float states keep the dense path.
+            weight_leaf_expr = args[6] if len(node.inputs) > 6 else "'weight'"
+            bias_leaf_expr = args[7] if len(node.inputs) > 7 else "'bias'"
+            linear_call = (
+                f"self._linear({args[0]}, {args[1]}, bias={bias_expr}, transpose={transpose_expr}, "
+                f"weight_leaf={weight_leaf_expr}, bias_leaf={bias_leaf_expr})"
+            )
+            if self.profile:
+                self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {linear_call})")
+            else:
+                self._add(lines, indent, f"{target} = {linear_call}")
+            return True
         bias_value = self._param_expr_for_path(
             node.inputs[0],
             node.inputs[7] if len(node.inputs) > 7 else "bias",
@@ -6196,13 +6403,10 @@ class _DirectTorchEmitter:
         if primitive == "embedding":
             static_weight_key = self._static_param_key(node.inputs[0], "weight")
             if static_weight_key is not None:
-                weight = f"self.state_dict_tensors[{static_weight_key!r}]"
-                x = f"self._move_to({args[1]}, {weight}.device)" if self.align_devices else args[1]
-                return f"F.embedding({x}, {weight})"
-            weight = self._param_expr_for_path(node.inputs[0], "weight", local=local, symbols_dict=symbols_dict)
-            if self.align_devices:
-                return f"(lambda _w: F.embedding(self._move_to({args[1]}, _w.device), _w))({weight})"
-            return f"F.embedding({args[1]}, {weight})"
+                return f"self._embedding({static_weight_key!r}, {args[1]})"
+            # Dynamic base path: resolve the weight key at runtime so quantized
+            # checkpoints dispatch to the packed-layout embedding.
+            return f"self._embedding_path({args[0]}, {args[1]})"
         if primitive == "linear":
             bias = bool_arg(3, "False")
             transpose = bool_arg(4, "False")
@@ -6597,6 +6801,123 @@ class _DirectTorchEmitter:
         return "f" + repr("".join(pieces))
 
 
+_TRITON_GEMV_CACHE: dict[int, Any] = {}
+
+
+def _build_triton_gemv_kernels(triton: Any, tl: Any) -> dict[int, Any]:
+    """Fused weight-only quantized GEMV kernels (design (b): packed bytes in device
+    memory, unpack in registers, per-group affine dequant, fp32 accumulate).
+
+    Configs and kernel bodies are the ones validated on RTX 2080 Ti (sm_75,
+    torch 2.8 + triton 3.4): q8 ~510 GB/s and q4 ~452 GB/s against a cuBLAS
+    dense GEMV at ~540 GB/s.  Weight layout: uint8 ``(rows, K)`` for 8-bit,
+    ``(rows, K // 2)`` for 4-bit (byte j = value 2j low nibble, 2j + 1 high nibble);
+    scales/biases ``(rows, K // group)``.
+    """
+    configs = [
+        triton.Config({"BLOCK_N": block_n, "BLOCK_K": block_k, "GROUP": 64}, num_warps=warps)
+        for block_n, block_k, warps in (
+            (8, 256, 4), (16, 256, 4), (16, 256, 8), (32, 256, 4),
+            (32, 256, 8), (64, 256, 8), (32, 512, 8), (16, 512, 4),
+        )
+    ]
+
+    def autotune(kernel):
+        return triton.autotune(configs=configs, key=["K", "GN"])(kernel)
+
+    @autotune
+    @triton.jit
+    def _qgemv8(x_ptr, w_ptr, s_ptr, b_ptr, y_ptr, K, GN,
+                BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP: tl.constexpr):
+        pid = tl.program_id(0)
+        offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        GROUPS: tl.constexpr = BLOCK_K // GROUP
+        acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            x = tl.load(x_ptr + k0 + offs_k)
+            x3 = tl.reshape(x, (GROUPS, GROUP)).to(tl.float32)
+            w = tl.load(w_ptr + offs_n[:, None] * K + k0 + offs_k[None, :])
+            w3 = tl.reshape(w, (BLOCK_N, GROUPS, GROUP)).to(tl.float32)
+            g = k0 // GROUP + tl.arange(0, GROUPS)
+            s = tl.load(s_ptr + offs_n[:, None] * GN + g[None, :]).to(tl.float32)
+            bb = tl.load(b_ptr + offs_n[:, None] * GN + g[None, :]).to(tl.float32)
+            wq = w3 * s[:, :, None] + bb[:, :, None]
+            acc += tl.sum(tl.sum(x3[None, :, :] * wq, axis=2), axis=1)
+        tl.store(y_ptr + offs_n, acc.to(y_ptr.dtype.element_ty))
+
+    @autotune
+    @triton.jit
+    def _qgemv4(x_ptr, w_ptr, s_ptr, b_ptr, y_ptr, K, GN,
+                BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP: tl.constexpr):
+        pid = tl.program_id(0)
+        offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+        GROUPS: tl.constexpr = BLOCK_K // GROUP
+        offs_b = tl.arange(0, BLOCK_K // 2)
+        acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            x = tl.load(x_ptr + k0 + tl.arange(0, BLOCK_K))
+            x3 = tl.reshape(x, (GROUPS, GROUP)).to(tl.float32)
+            wb = tl.load(w_ptr + offs_n[:, None] * (K // 2) + k0 // 2 + offs_b[None, :])
+            w32 = wb.to(tl.int32)
+            lo = (w32 & 0xF).to(tl.float32)
+            hi = ((w32 >> 4) & 0xF).to(tl.float32)
+            w3 = tl.reshape(tl.interleave(lo, hi), (BLOCK_N, GROUPS, GROUP))
+            g = k0 // GROUP + tl.arange(0, GROUPS)
+            s = tl.load(s_ptr + offs_n[:, None] * GN + g[None, :]).to(tl.float32)
+            bb = tl.load(b_ptr + offs_n[:, None] * GN + g[None, :]).to(tl.float32)
+            wq = w3 * s[:, :, None] + bb[:, :, None]
+            acc += tl.sum(tl.sum(x3[None, :, :] * wq, axis=2), axis=1)
+        tl.store(y_ptr + offs_n, acc.to(y_ptr.dtype.element_ty))
+
+    return {8: _qgemv8, 4: _qgemv4}
+
+
+def _torch_quantized_gemv_triton(q_weight, scales, biases, x, *, bits: int, group_size: int):
+    """Decode GEMV against packed quantized weights with the fused Triton kernel.
+
+    ``q_weight`` is the canonical packed uint8 layout (see ``_build_triton_gemv_kernels``).
+    Explicit opt-in via ``quantization={'bits': .., 'group_size': .., 'kernel': 'triton'}``;
+    raises loudly when triton/CUDA is unavailable instead of falling back silently.
+    """
+    if bits not in (4, 8):
+        raise ValueError(f"unsupported quantization bits {bits}: expected 4 or 8")
+    if x.device.type != "cuda" or not q_weight.is_cuda:
+        raise RuntimeError("quantization kernel='triton' requires CUDA tensors")
+    if x.ndim != 1:
+        raise RuntimeError(
+            "quantization kernel='triton' supports 1-D decode GEMV; "
+            "batched inputs use kernel='eager'"
+        )
+    try:
+        import triton
+    except ImportError as error:  # pragma: no cover - environment dependent
+        raise RuntimeError("quantization kernel='triton' requires the triton package") from error
+    kernels = _TRITON_GEMV_CACHE.get(bits)
+    if kernels is None:
+        import triton.language as tl
+
+        kernels = _build_triton_gemv_kernels(triton, tl)
+        _TRITON_GEMV_CACHE[bits] = kernels
+    q = q_weight.contiguous()
+    s = scales.contiguous()
+    b = biases if biases is not None else torch.zeros_like(s)
+    b = b.contiguous()
+    rows, byte_columns = q.shape
+    values = byte_columns * 8 // bits
+    if values % group_size or values // group_size != s.shape[1]:
+        raise ValueError(
+            f"packed weight holds {values} values per row but scales imply "
+            f"{s.shape[1]} groups of {group_size}"
+        )
+    y = torch.empty((rows,), dtype=x.dtype, device=x.device)
+    kernel = kernels[bits]
+    kernel[(lambda meta: (triton.cdiv(rows, meta["BLOCK_N"]),))](
+        x.contiguous(), q, s, b, y, values, s.shape[1],
+    )
+    return y
+
+
 def emit_model_code_from_graph_ir(
     program: GraphProgram,
     *,
@@ -6625,7 +6946,7 @@ def emit_model_code_from_graph_ir(
             "import torch",
             "from torch import nn",
             "from torch.nn import functional as F",
-            "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters",
+            "from synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters, _torch_quantized_gemv_triton",
             "from synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",
             "    config_value as _common_config_value,",
