@@ -35,6 +35,26 @@ requantized straight to the packed layout.
   JAX route eliminations (Pallas Ampere gate, jax-triton ptxas segfault,
   libnvjitlink refusal) recorded so nobody re-walks them.
 
+## 2026-11-10 — QTensor end-to-end sanity: Qwen2.5-0.5B (follow-up)
+
+Ran real-model batch-1 decode on Qwen2.5-0.5B (weights via
+`ensure_model_downloaded`, cores from `synapse/models/qwen2/Qwen2.5-0.5B.axon`,
+8-bit/group-64, greedy 64 tokens, RTX 2080 Ti). Result: quantized is
+**slower** end to end despite winning the per-GEMV microbenchmarks — torch
+0.49× (22 vs 46 tok/s), jax 0.83× (107 vs 130 tok/s); memory 988→525 MB.
+Cause: 0.5B decode is launch/overhead-bound (dense effective ~45 GB/s, far
+below bandwidth), and torch Triton GEMV carries ~35–45 µs fixed per-call
+overhead vs the ~17 µs cuBLAS floor across 168 small calls/token. Crossover
+≈ 8 M params per matrix. Full numbers + regime analysis in
+`quantized-checkpoints.md` ("End-to-end reality check").
+
+The e2e run also exposed a real dispatch gap: torch loop-inlined dynamic-key
+linears bypassed quantized dispatch (inline `F.linear(self._param(...))`).
+Fixed `_emit_linear_node` to route dynamic keys through `self._linear` (same
+runtime-key dispatch the static path uses); torch quantized suite still 15
+passed / 1 CUDA-gated skip. Do not transfer these ratios to MLX — its native
+kernel has different dispatch overhead.
+
 ## 2026-10-27 — Timestral MLX comparison benchmark for the Axon paper
 
 Added `scripts/timestral_bench/`, a benchmark-only harness that restores the NumPy

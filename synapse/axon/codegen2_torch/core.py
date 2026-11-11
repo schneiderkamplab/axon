@@ -5489,12 +5489,6 @@ class _DirectTorchEmitter:
         ) if len(node.inputs) > 4 else "False"
         bias_literal = self._literal_bool_arg(node.inputs[3]) if len(node.inputs) > 3 else False
         transpose_literal = self._literal_bool_arg(node.inputs[4]) if len(node.inputs) > 4 else False
-        weight = self._param_expr_for_path(
-            node.inputs[0],
-            node.inputs[6] if len(node.inputs) > 6 else "weight",
-            local=local,
-            symbols_dict=symbols_dict,
-        )
         weight_key = self._static_param_key(
             node.inputs[0],
             node.inputs[6] if len(node.inputs) > 6 else "weight",
@@ -5514,48 +5508,20 @@ class _DirectTorchEmitter:
             else:
                 self._add(lines, indent, f"{target} = {linear_call}")
             return True
-        bias_value = self._param_expr_for_path(
-            node.inputs[0],
-            node.inputs[7] if len(node.inputs) > 7 else "bias",
-            optional=True,
-            local=local,
-            symbols_dict=symbols_dict,
+        # Dynamic weight key (e.g. a loop-carried '<base>.{i}' path): route
+        # through self._linear as well, so quantized checkpoints dispatch at
+        # runtime here too. _linear resolves the key exactly like _param and
+        # keeps the dense F.linear path for float states.
+        weight_leaf_expr = args[6] if len(node.inputs) > 6 else "'weight'"
+        bias_leaf_expr = args[7] if len(node.inputs) > 7 else "'bias'"
+        linear_call = (
+            f"self._linear({args[0]}, {args[1]}, bias={bias_expr}, transpose={transpose_expr}, "
+            f"weight_leaf={weight_leaf_expr}, bias_leaf={bias_leaf_expr})"
         )
-        weight_name = f"{target}__weight"
-        bias_name = f"{target}__bias"
-        x_name = f"{target}__x"
-        self._add(lines, indent, f"{weight_name} = {weight}")
-        if bias_literal is False:
-            bias_arg = "None"
-        else:
-            self._emit_optional_param_bind(
-                lines,
-                target=bias_name,
-                value_expr=bias_value,
-                flag_expr=bias_expr,
-                flag_literal=bias_literal,
-                indent=indent,
-            )
-            if self.align_devices:
-                self._add(lines, indent, f"{bias_name} = self._move_to({bias_name}, {weight_name}.device) if {bias_name} is not None else None")
-            bias_arg = bias_name
-        if self.align_devices:
-            self._add(lines, indent, f"{x_name} = self._move_to({args[1]}, {weight_name}.device)")
-        else:
-            self._add(lines, indent, f"{x_name} = {args[1]}")
-        if transpose_literal is True:
-            if bias_literal is False:
-                op_expr = f"F.linear({x_name}, {weight_name}.t())"
-            else:
-                op_expr = f"F.linear({x_name}, {weight_name}.t(), {bias_arg})"
-        elif transpose_literal is False:
-            op_expr = f"F.linear({x_name}, {weight_name}, {bias_arg})"
-        else:
-            op_expr = f"(F.linear({x_name}, {weight_name}.t(), {bias_arg}) if {transpose_expr} else F.linear({x_name}, {weight_name}, {bias_arg}))"
         if self.profile:
-            self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {op_expr})")
+            self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {linear_call})")
         else:
-            self._add(lines, indent, f"{target} = {op_expr}")
+            self._add(lines, indent, f"{target} = {linear_call}")
         return True
 
     def _emit_layernorm_node(

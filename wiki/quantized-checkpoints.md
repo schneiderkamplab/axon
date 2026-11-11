@@ -114,6 +114,45 @@ do not re-walk them:
 - Shared fixtures: `tests/quantized_fixture.py` (numpy packer for both the
   canonical layout and the MLX uint32 on-disk layout).
 
+## End-to-end reality check: Qwen2.5-0.5B (2026-11-10)
+
+`confidence: high` for the recorded hardware (RTX 2080 Ti, batch-1 decode,
+8-bit/group-64). Speedup conclusions are latency-regime claims, not kernel
+quality claims.
+
+Measured with `bench_qwen_e2e.py`-style drivers driving the generated cores
+(`generate()` greedy loop, 64 new tokens, median of 3; prompt "The meaning of
+life is"). Outputs token-identical to dense in all runs.
+
+| Run | dense | q8 | ratio | weights on device |
+|---|---|---|---|---|
+| torch (Triton fused) | 45.7 tok/s | 22.3 tok/s | **0.49×** | 988 MB → 525 MB (−47%) |
+| jax (`enable_jit`) | 129.5 tok/s | 107.4 tok/s | **0.83×** | same checkpoint |
+
+Why quantized loses at 0.5B despite winning the per-GEMV microbenchmarks:
+batch-1 decode at this scale is **overhead-bound, not bandwidth-bound** —
+dense streams 988 MB/token at an effective ~45 GB/s, far below the card's
+bandwidth, so shrinking weight bytes buys nothing. The quantized paths add
+per-call cost: torch Triton GEMV carries a fixed ~35–45 µs launch/dispatch
+overhead vs the ~17–20 µs cuBLAS launch floor (Qwen layer matrices are
+0.1–4.5 M params; ×168 quantized calls/token ⇒ ~2× slower), and the JAX
+group-partial einsum adds dequant compute that XLA cannot fold away.
+
+Crossover rule of thumb on this class of GPU: the fused GEMV wins need
+matrices of roughly ≥ 8 M params (4096×4096 breakeven; 11008×4096 ⇒ ~1.8×).
+Small-layer models (0.5B-class) and batch-1 are the wrong regime for the
+triton kernel; expect the memory saving to be the only win there. MLX native
+`quantized_matmul` has C++ dispatch and different overhead structure — do not
+transfer these ratios to the MLX machine.
+
+This e2e test also exposed and fixed a dispatch gap: torch loop-inlined
+(dynamic-key) linears emitted inline `F.linear(self._param(...))` and bypassed
+quantized dispatch entirely (static-key linears and embeddings already routed
+through `_linear`/`_embedding_path`). Fix: `_emit_linear_node` now routes
+dynamic keys through `self._linear` too — the quantized tok/s numbers above
+are only reachable with that fix. JAX had no gap (`linear` primitive emits
+`_linear_matmul` with runtime paths unconditionally).
+
 ## Known limits (v1)
 
 - Packed parameters (gate/up concat) + `quantization=` → loud `ValueError`;
