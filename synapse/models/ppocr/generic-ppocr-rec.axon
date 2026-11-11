@@ -1,0 +1,130 @@
+{-# CHECKPOINTS ["blackpen-sk/ppocrv6-small"] #-}
+{-# MAIN "ppocr_rec" #-}
+
+-- PP-OCR text recognizer: text-line crop -> per-column character probabilities (CTC).
+--   pixel_values  [B,48,W,3]    channels-last, normalized; the height is fixed at 48
+--   output        [B,W / 8,V]   probabilities over the dictionary; index 0 is the CTC blank
+-- Cropping, resizing, normalization and CTC decoding are caller responsibilities. The
+-- checkpoint is produced by scripts/convert_ppocr_onnx.py, which folds batch normalisation
+-- into the convolutions.
+--
+-- The backbone has three stages; only the height is reduced after the stem, so the width
+-- keeps one column per 8 input pixels. Blocks are numbered through the whole backbone;
+-- block STAGE_ENDS[k] is the strided block that opens stage k + 1.
+import Activations (gelu, relu, silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Config
+import List
+import Masking (bidirectional_mask)
+import NN
+import Tensor
+import Vision
+
+STEM_DIM <- Config.int @@stem_dim default=48
+STAGE_DIMS <- Config.list @@stage_dims default=[96, 192, 384]
+STAGE_ENDS <- Config.list @@stage_ends default=[3, 10, 13]
+C2 = List.index STAGE_DIMS 0
+C3 = List.index STAGE_DIMS 1
+C4 = List.index STAGE_DIMS 2
+BLOCK_SE <- Config.list @@block_se default=[]
+EXPAND_RATIO <- Config.int @@expand_ratio default=2
+SE_REDUCTION <- Config.int @@se_reduction default=4
+SE_SLOPE <- Config.float @@se_slope default=0.16666666666666666
+NECK_DIM <- Config.int @@neck_dim default=120
+NUM_LAYERS <- Config.int @@num_layers default=2
+NUM_HEADS <- Config.int @@num_heads default=8
+MLP_DIM <- Config.int @@mlp_dim default=240
+NORM_EPS <- Config.float @@norm_eps default=1e-05
+FINAL_NORM_EPS <- Config.float @@final_norm_eps default=1e-06
+VOCAB_SIZE <- Config.int @@vocab_size default=18710
+
+-- Channel gate: global average -> reduce -> relu -> expand -> hard sigmoid.
+squeeze_excite :: Path -> Tensor[B,H,W,C] -> Int -> Float -> Tensor[B,1,1,C]
+squeeze_excite@path x reduction slope = do
+  c <- Tensor.size x 3
+  s <- Vision.global_avg_pool2d x
+  s <- Vision.conv2d@reduce s (c / reduction) 1 1 |> relu
+  s <- Vision.conv2d@expand s c 1 1
+  return Vision.hard_sigmoid s slope=slope
+
+-- Stem: two stride-2 convolutions around a 2x2 conv branch concatenated with a max pool.
+stem :: Tensor[B,H,W,3] -> Tensor[B,Ho,Wo,C2]
+stem x = do
+  x <- Vision.conv2d@conv1 x STEM_DIM 3 3 stride_h=2 stride_w=2 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 |> relu
+  a <- Vision.conv2d@conv2a x (STEM_DIM / 2) 2 2 pad_bottom=1 pad_right=1 |> relu
+  a <- Vision.conv2d@conv2b a STEM_DIM 2 2 pad_bottom=1 pad_right=1 |> relu
+  p <- Vision.max_pool2d x 2 2 pad_bottom=1 pad_right=1
+  x <- Tensor.concat p a dim=3
+  x <- Vision.conv2d@conv3 x STEM_DIM 3 3 stride_h=2 stride_w=2 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 |> relu
+  return Vision.conv2d@conv4 x C2 1 1 |> relu
+
+-- Depthwise 3x3 conv, optional channel gate, then a residual pointwise expand/project pair.
+block :: Tensor[B,H,W,C] -> Int -> Tensor[B,H,W,C]
+block x i = do
+  c <- Tensor.size x 3
+  y <- Vision.conv2d@dw x c 3 3 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 groups=c
+  y <- (List.index BLOCK_SE i) ? (y * (squeeze_excite@se y SE_REDUCTION SE_SLOPE)) : y
+  f <- Vision.conv2d@expand y (EXPAND_RATIO * c) 1 1 |> gelu |> Vision.conv2d@project c 1 1
+  return y + f
+
+blocks :: Tensor[B,H,W,C] -> Int -> Int -> Tensor[B,H,W,C]
+blocks x start end = do
+  x <- for@backbone.blocks i <- [start..end) carry (x) do
+    x <- block x i
+    yield x
+  return x
+
+-- The block that opens a stage: depthwise conv that halves the height, then
+-- expand/project to the new width.
+strided_block :: Tensor[B,H,W,C] -> Dim -> Tensor[B,Ho,W,dim]
+strided_block x dim = do
+  c <- Tensor.size x 3
+  y <- Vision.conv2d@dw x c 3 3 stride_h=2 pad_top=1 pad_bottom=1 pad_left=1 pad_right=1 groups=c
+  return Vision.conv2d@expand y (EXPAND_RATIO * c) 1 1 |> gelu |> Vision.conv2d@project dim 1 1
+
+-- Pre-norm transformer layer with a fused query/key/value projection.
+encoder_layer :: Tensor[B,S,NECK_DIM] -> Tensor[B,S,NECK_DIM]
+encoder_layer x = do
+  xn <- NN.layernorm@norm1 x eps=NORM_EPS
+  a <- scope@attn do
+    qkv <- NN.linear@qkv xn dim=(3 * NECK_DIM) bias=true
+    q, k, v <- Tensor.chunk qkv parts=3
+    q <- reshape_heads q NUM_HEADS
+    k <- reshape_heads k NUM_HEADS
+    v <- reshape_heads v NUM_HEADS
+    att <- attention q k v (bidirectional_mask q k)
+    return merge_heads att |> NN.linear@proj dim=NECK_DIM bias=true
+  x <- x + a
+  xn <- NN.layernorm@norm2 x eps=NORM_EPS
+  m <- scope@mlp do
+    return NN.linear@fc1 xn dim=MLP_DIM bias=true |> silu |> NN.linear@fc2 dim=NECK_DIM bias=true
+  return x + m
+
+ppocr_rec :: Tensor[B,H,W,3] -> Tensor[B,S,VOCAB_SIZE]
+ppocr_rec pixel_values = do
+  e2 <- List.index STAGE_ENDS 0
+  e3 <- List.index STAGE_ENDS 1
+  e4 <- List.index STAGE_ENDS 2
+  x <- scope@backbone.stem do
+    return stem pixel_values
+  x <- blocks x 0 e2
+  x <- scope@'backbone.blocks.{e2}' do
+    return strided_block x C3
+  x <- blocks x (e2 + 1) e3
+  x <- scope@'backbone.blocks.{e3}' do
+    return strided_block x C4
+  x <- blocks x (e3 + 1) e4
+  -- Neck: pool the remaining height away, then a pointwise shortcut next to a local
+  -- (1x7 depthwise) and global (transformer) branch.
+  x <- Vision.avg_pool2d x 3 2 stride_h=3 stride_w=2
+  shortcut <- Vision.conv2d@neck.shortcut x NECK_DIM 1 1 |> silu
+  y <- Vision.conv2d@neck.reduce x NECK_DIM 1 1 |> silu
+  y <- y + (Vision.conv2d@neck.local y NECK_DIM 1 7 pad_left=3 pad_right=3 groups=NECK_DIM |> silu)
+  seq <- (Tensor.reshape y shape=[B, -1, NECK_DIM]) :: Tensor[B,S,NECK_DIM]
+  seq <- for@encoder.layers i <- [0..NUM_LAYERS) carry (seq) do
+    seq <- encoder_layer seq
+    yield seq
+  seq <- NN.layernorm@encoder.norm seq eps=FINAL_NORM_EPS
+  seq <- seq + ((Tensor.reshape shortcut shape=[B, -1, NECK_DIM]) :: Tensor[B,S,NECK_DIM])
+  logits <- NN.linear@head.fc seq dim=VOCAB_SIZE bias=true
+  return Tensor.softmax logits dim=-1

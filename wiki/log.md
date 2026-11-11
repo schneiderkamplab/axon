@@ -33,3 +33,118 @@ Uses [Timestral MLX comparison](timestral-mlx-comparison.md) and
 (`summary.json`, `comparison.csv`, `samples.csv`, per-worker JSON and logs) and the three
 `tests/test_timestral_bench_*.py` files. Confidence: high for the recorded measurements;
 timing applies to the recorded M1 Pro and conditions only. Last confirmed: 2026-10-27.
+
+## 2026-11-10 — CNN primitives and PP-OCRv6 small through Axon (experiment)
+
+Added six channels-last 2D primitives, the `Vision` builtins, Torch and MLX lowerings, the
+PP-OCR detector and recognizer model files, an ONNX-to-checkpoint converter and an MLX
+harness, on branch `feat/cnn-ppocr`. Goal: find out whether Axon-generated MLX makes
+`blackpen-sk/ppocrv6-small` faster on Apple Silicon than ONNX Runtime.
+
+Observed: generated Torch and MLX agree with ONNX Runtime to 1e-5 or better on both models
+and give identical end-to-end OCR text on a rendered page. Two compiler findings recorded on
+the topic page: loop carries are typed shape-invariant, and `inline_safe` corrupted
+`Tensor.size` on spatial dims (worked around, not fixed). Pre-existing on untouched `main`
+in this environment and unrelated: 16 failures in `tests/test_axon_graph_ir.py`,
+`tests/test_codegen2_mlx_sdpa_band.py` and `tests/test_pplx_embed_support.py` (tinygrad
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, MLX CUDA numerics), and the per-model roundtrip sweeps.
+
+Not done: any Apple Silicon measurement. Uses [CNN support and PP-OCR](vision-cnn.md) and
+[maintained scripts](scripts.md). Validated-by `tests/test_vision_spatial2d.py`,
+`tests/test_ppocr_axon.py` and `log/ppocr-mlx-dev/` (`bench.json`). Confidence: high for
+agreement, none yet for Apple Silicon speed. Last confirmed: 2026-11-10.
+Superseded the same day for the "not done" part by the entry below.
+
+## 2026-11-10 — PP-OCR timed on Apple Silicon (M1 Pro)
+
+Ran `scripts/ppocr_mlx.py build`, `parity`, `bench`, `tune` and `ocr` on an M1 Pro (MLX
+0.32.2 Metal, ONNX Runtime 1.30.0), and timed the generated Torch on CPU and MPS.
+
+Observed: Axon MLX is 2.9x to 5.7x faster than ONNX Runtime CPU (detector 1x736x960 22.3
+against 100.7 ms. End-to-end sample page 65 against 324 ms, identical text). The ONNX
+Runtime CoreML provider is slower than CPU (partitioned graphs). `tune` keeps `compiled`.
+The shifted-sum depthwise lowering never wins on Metal. Generated Torch on CPU was 7x
+slower than ONNX Runtime, caused-by grouped convolutions on a permuted view. Fixed-by a
+contiguous copy in `synapse/axon/codegen2_torch/spatial2d.py` (4-5x faster on CPU,
+unchanged on MPS). PyTorch's NNPACK path makes Torch CPU about 10x slower from batch 16
+on. That is a host setting and was left alone.
+
+Uses [CNN support and PP-OCR](vision-cnn.md). Validated-by
+`log/ppocr-mlx-m1pro-20261110/` and the 28 tests in `tests/test_vision_spatial2d.py`,
+`tests/test_ppocr_axon.py` and `tests/test_agents_policy_guards.py`. Confidence: high for
+the recorded measurements. Timing applies to this M1 Pro only. Last confirmed: 2026-11-10.
+
+## 2026-11-10 — PP-OCR: compiler fixes, and MLX against ONNX Runtime CPU with memory
+
+Fixed two of the compiler findings from the PP-OCR work: keyword terminals now end at a
+word boundary (`downsample`, `format`, `nullable` parse), and a call whose dim
+substitution would read a callee symbol as a caller symbol of the same name is no longer
+inlined. Not fixed: loop carries typed as shape-invariant (needs a typing decision) and
+call results typed with callee names (types only). Added `scripts/ppocr_mlx.py compare`.
+
+Observed on the M1 Pro: MLX is 3.0x to 5.8x faster than ONNX Runtime CPU and peaks at 1.2x
+to 2.2x its process memory with MLX defaults. The weights are 30 MB. The peak is
+caused-by Metal command buffers holding intermediate results and by the unbounded MLX
+buffer cache. With `--ops-per-buffer 1 --cache-mb 64` MLX is 2.5x to 5.2x faster at 0.6x to
+1.2x the memory. Float16 is 2.6x to 6.2x faster at 0.5x to 1.1x. Importing
+`synapse.axon.codegen2_common` through the package cost 300 MB per MLX process (PyTorch).
+The harness now loads a copy written by `build`.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md).
+Validated-by `log/ppocr-mlx-m1pro-20261110-b/`, `tests/test_axon_cnn_compiler_regressions.py`
+and the passing `tests/test_axon_graph_ir.py`, `tests/test_synapse_axon_parser_roundtrip.py`
+and `tests/test_synapse_axon_optimize.py`. Confidence: high for the recorded measurements on
+this M1 Pro. The best MLX memory settings are machine-specific. Last confirmed: 2026-11-10.
+
+## 2026-11-11 — PP-OCR on real pages: MLX 6x faster than ONNX Runtime CPU, cache limit needed
+
+Ran the full pipeline over 19 real page images (959 text lines, internal test set) with the
+new `scripts/ppocr_mlx.py pages`.
+
+Observed: steady pass 4.66 s on Axon MLX float32 against 27.77 s on ONNX Runtime CPU (6.0x),
+all 959 lines identical, peak memory 1052 against 1024 MB. Float16 3.95 s (7.0x), 865 MB, 8
+lines differ. The recognizer is 88% of MLX time. Pipeline overhead is under 4%. With MLX's
+unbounded buffer cache the same run reached 24 GB and took up to 52 s per pass, caused-by 55
+distinct batch shapes. Fixed-by a default cache limit of 256 MB and 2 operations per Metal
+command buffer in the harness. Supersedes the 2026-11-10 statement that these options are
+not harness defaults.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md).
+Validated-by `log/ppocr-pages-m1pro-20261111/` (`pages.json`). Confidence: high for this
+machine and page set. 19 pages from one source. Last confirmed: 2026-11-11.
+
+## 2026-11-11 — PP-OCR: generated MLX against the hand-written `mlx4ocr`
+
+Added the reference backend `mlx4ocr` to `scripts/ppocr_mlx.py`. It runs the hand-written
+MLX networks of `mlx4ocr` 0.1.2 in the pipeline of the harness, so only the network code
+differs from the generated backend.
+
+Observed on the 19 real pages, six alternating rounds, 18 passes for each backend: Axon MLX
+4.97 s per pass (median), `mlx4ocr` networks 5.34 s, ONNX Runtime CPU 28.47 s. The generated
+code is 5% to 11% faster than the hand-written port in each round, with the same peak
+memory and the same text on all 959 lines. On fixed shapes it is 7% to 13% faster. Network
+outputs agree to 6.3e-6 or better. `mlx4ocr` returns NaN in float16. Its own pipeline with
+its defaults takes 10.44 s per pass and peaks at 9153 MB, caused-by a full probability copy
+to NumPy and an unlimited MLX buffer cache.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
+validated-by `log/ppocr-vs-mlx4ocr-m1pro-20261111/`. Confidence: high for the direction on
+this machine; the size of the difference moves with desktop load. Last confirmed: 2026-11-11.
+
+## 2026-11-11 — PP-OCR: ONNX Runtime on the GPU (CoreML provider)
+
+Added the backends `onnx-coreml` and `onnx-coreml-gpu` to `scripts/ppocr_mlx.py`. They use
+the MLProgram format and one session per input shape.
+
+Observed: with a static shape the provider runs on the GPU and is fast. The detector takes
+16.1 ms against 24.3 ms on Axon MLX (1.5x faster). The recognizer is 12% to 29% slower than
+Axon MLX and uses 2x to 5x the memory. On the 19 real pages (57 input shapes) ONNX Runtime
+with CoreML takes 11.8 to 15.3 s per pass against 4.7 s on Axon MLX, after a first pass of
+75 to 321 s, with 18.9 GB of process memory and 5.1 GB of model cache. Two of four runs
+crashed inside ONNX Runtime. Supersedes the 2026-11-10 statement that the CoreML provider
+is slower than the CPU provider: that holds only for its default options.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
+validated-by `log/ppocr-vs-onnx-gpu-m1pro-20261111/`. Confidence: high for the fixed shapes,
+medium for the real pages (two valid CoreML runs, machine under memory pressure). Last
+confirmed: 2026-11-11.

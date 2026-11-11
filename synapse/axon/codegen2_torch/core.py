@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 import re
 from collections import Counter
@@ -66,6 +67,7 @@ from ..graph_ir.effects import (
 )
 from ..graph_ir.ownership import infer_graph_ownership
 from ..graph_ir.substitute import substitute_graph_node_dims, substitute_graph_operand_dims
+from .spatial2d import SPATIAL2D_PRIMITIVES, SPATIAL2D_RUNTIME, SPATIAL2D_SOURCE_FUNCTIONS
 
 
 def _graph_path_payload(path: GraphPath) -> dict[str, Any]:
@@ -2564,6 +2566,9 @@ class Codegen2GraphModel(nn.Module):
             out(y)
             return True
 
+        if primitive in SPATIAL2D_RUNTIME:
+            out(SPATIAL2D_RUNTIME[primitive](*args))
+            return True
         if primitive == "conv1d":
             if len(args) != 8:
                 raise ValueError("conv1d expects x, weight, bias, stride, padding_left, padding_right, dilation, groups")
@@ -6294,6 +6299,8 @@ class _DirectTorchEmitter:
             if cast_float == "False":
                 return y
             return f"({y_float} if {cast_float} else {y})"
+        if primitive in SPATIAL2D_PRIMITIVES:
+            return f"_spatial_{primitive}({', '.join(args)})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
         if primitive == "tensor_like":
@@ -6597,6 +6604,20 @@ class _DirectTorchEmitter:
         return "f" + repr("".join(pieces))
 
 
+def graph_uses_primitives(program: GraphProgram, primitives: frozenset[str]) -> bool:
+    return any(
+        _normalize_primitive_op(node.op.name) in primitives
+        for module in program.modules
+        for node in module.nodes
+    )
+
+
+def _spatial2d_source_lines(program: GraphProgram) -> list[str]:
+    if not graph_uses_primitives(program, SPATIAL2D_PRIMITIVES):
+        return []
+    return [inspect.getsource(function) for function in SPATIAL2D_SOURCE_FUNCTIONS]
+
+
 def emit_model_code_from_graph_ir(
     program: GraphProgram,
     *,
@@ -6638,6 +6659,7 @@ def emit_model_code_from_graph_ir(
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",
+            *_spatial2d_source_lines(program),
             body,
         ]
     )

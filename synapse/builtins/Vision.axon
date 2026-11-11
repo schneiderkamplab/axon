@@ -1,0 +1,50 @@
+import Params (param)
+import Math (clamp)
+import Tensor (repeat)
+export (
+  avg_pool2d,
+  conv2d,
+  conv_transpose2d,
+  global_avg_pool2d,
+  hard_sigmoid,
+  max_pool2d,
+  upsample_nearest2d,
+  upsample_nearest2d_like,
+)
+
+-- 2D layers are channels-last: Tensor[B,H,W,C]. Weights keep the checkpoint layout,
+-- Tensor[dim,C / groups,kernel_h,kernel_w] for a convolution and
+-- Tensor[C,dim,kernel_h,kernel_w] for a transposed convolution.
+conv2d :: Path -> Tensor[B,H,W,C] -> Dim -> Dim -> Dim -> ?Int -> ?Int -> ?Int -> ?Int -> ?Int -> ?Int -> ?Int -> ?Int -> ?Bool -> ?Path -> ?Path -> Tensor[B,Ho,Wo,dim]
+conv2d@path x dim kernel_h kernel_w ?stride_h=1 ?stride_w=1 ?pad_top=0 ?pad_bottom=0 ?pad_left=0 ?pad_right=0 ?dilation=1 ?groups=1 ?bias=true ?weight_path=@weight ?bias_path=@bias = do
+  w <- (param weight_path) :: Tensor[dim,I,kernel_h,kernel_w]
+  b <- bias ? ((param bias_path) :: Tensor[dim]) : null
+  return _conv2d x w b stride_h stride_w pad_top pad_bottom pad_left pad_right dilation groups
+
+conv_transpose2d :: Path -> Tensor[B,H,W,C] -> Dim -> Dim -> Dim -> ?Int -> ?Int -> ?Int -> ?Int -> ?Bool -> ?Path -> ?Path -> Tensor[B,Ho,Wo,dim]
+conv_transpose2d@path x dim kernel_h kernel_w ?stride_h=1 ?stride_w=1 ?pad_h=0 ?pad_w=0 ?bias=true ?weight_path=@weight ?bias_path=@bias = do
+  w <- (param weight_path) :: Tensor[C,dim,kernel_h,kernel_w]
+  b <- bias ? ((param bias_path) :: Tensor[dim]) : null
+  return _conv_transpose2d x w b stride_h stride_w pad_h pad_w
+
+max_pool2d :: Tensor[B,H,W,C] -> Int -> Int -> ?Int -> ?Int -> ?Int -> ?Int -> ?Int -> ?Int -> Tensor[B,Ho,Wo,C]
+max_pool2d x kernel_h kernel_w ?stride_h=1 ?stride_w=1 ?pad_top=0 ?pad_bottom=0 ?pad_left=0 ?pad_right=0 = _max_pool2d x kernel_h kernel_w stride_h stride_w pad_top pad_bottom pad_left pad_right
+
+avg_pool2d :: Tensor[B,H,W,C] -> Int -> Int -> ?Int -> ?Int -> Tensor[B,Ho,Wo,C]
+avg_pool2d x kernel_h kernel_w ?stride_h=1 ?stride_w=1 = _avg_pool2d x kernel_h kernel_w stride_h stride_w
+
+-- Mean over the spatial axes, kept as Tensor[B,1,1,C] so it broadcasts back over the map.
+global_avg_pool2d :: Tensor[B,H,W,C] -> Tensor[B,1,1,C]
+global_avg_pool2d x = _global_avg_pool2d x
+
+-- Nearest-neighbour upsampling by an integer factor per axis.
+upsample_nearest2d :: Tensor[B,H,W,C] -> Int -> Int -> Tensor[B,Ho,Wo,C]
+upsample_nearest2d x scale_h scale_w = repeat (repeat x scale_h dim=1) scale_w dim=2
+
+-- Nearest-neighbour upsampling to the spatial size of ref, which must be an integer
+-- multiple of the size of x.
+upsample_nearest2d_like :: Tensor[B,H,W,C] -> Tensor[B,Ho,Wo,D] -> Tensor[B,Ho,Wo,C]
+upsample_nearest2d_like x ref = _upsample_nearest2d_like x ref
+
+hard_sigmoid :: Tensor[..S] -> ?Float -> ?Float -> Tensor[..S]
+hard_sigmoid x ?slope=0.16666666666666666 ?offset=0.5 = clamp ((x * slope) + offset) min=0.0 max=1.0
