@@ -220,11 +220,24 @@ class MlxBackend:
             models[kind] = namespace[f"PpocrMlx{kind.title()}"].from_state_dict(
                 weights, model_config=config
             )
+        self._wrap(
+            {kind: (lambda x, m=models[kind]: m.forward(pixel_values=x)) for kind in models},
+            compiled,
+        )
+
+    def _wrap(self, networks: dict[str, Any], compiled: dict[str, bool]) -> None:
+        """Build the functions the pipeline calls from one callable per network.
+
+        A network maps a channels-last input in ``self.dtype`` to its output. Detector
+        normalization and the recognizer's argmax run on the device, for every MLX backend
+        in the same way.
+        """
+        mx = self.mx
         scale = mx.array(1.0 / (255.0 * DET_STD)).astype(self.dtype)
         offset = mx.array(-DET_MEAN / DET_STD).astype(self.dtype)
 
         def forward(kind: str) -> Any:
-            return lambda x: models[kind].forward(pixel_values=x.astype(self.dtype)).astype(mx.float32)
+            return lambda x: networks[kind](x.astype(self.dtype)).astype(mx.float32)
 
         def det_pixels(pixels: Any) -> Any:
             return forward("det")(pixels.astype(self.dtype) * scale + offset)
@@ -263,6 +276,48 @@ class MlxBackend:
 
     def rec_best(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return self.rec_collect(self.rec_submit(x))
+
+
+class Mlx4ocrBackend(MlxBackend):
+    """The hand-written MLX port of PP-OCRv6 from the ``mlx4ocr`` package, as a reference.
+
+    Only the two networks come from the package. Normalization, batching, the argmax on
+    the device and the memory settings are those of ``MlxBackend``, so a difference in time
+    is a difference between generated and hand-written network code. Both networks are
+    compiled with ``mx.compile``, which is the default of the package.
+
+    The package loads the official PaddlePaddle safetensors. Two 1x1 convolutions in the
+    neck of the official small recognizer are wrong. The package repairs them from a
+    pickle file that it downloads, which this backend does not load: it takes the two
+    convolutions from the checkpoint of the run instead.
+
+    float32 only: with its weights cast to float16, the detector of the package returns
+    NaN on a real page.
+    """
+
+    def __init__(self, run: Path, cache_mb: int = DEFAULT_CACHE_MB) -> None:
+        import mlx.core as mx
+        from mlx4ocr.hub import download_model
+        from mlx4ocr.models.det.model import DetectionModel
+        from mlx4ocr.models.rec.model import RecognitionModel
+
+        if cache_mb >= 0:
+            mx.set_cache_limit(cache_mb * _MB)
+        self.mx = mx
+        self.name = "mlx4ocr:compiled"
+        self.dtype = mx.float32
+        cache = run / "mlx4ocr"
+        detector = DetectionModel.from_artifacts(download_model("small", "det", local_dir=cache / "det"))
+        recognizer = RecognitionModel.from_artifacts(
+            download_model("small", "rec", local_dir=cache / "rec"), weight_source="hub"
+        )
+        ours = mx.load(str(run / "rec" / "model.safetensors"))
+        neck = recognizer.encoder
+        for layer, name in ((neck.conv_reduce, "neck.reduce"), (neck.skip_conv, "neck.shortcut")):
+            layer.conv.weight = ours[f"{name}.weight"].transpose(0, 2, 3, 1)
+            layer.conv.bias = ours[f"{name}.bias"]
+        mx.eval(detector.parameters(), recognizer.parameters())
+        self._wrap({"det": detector, "rec": recognizer}, {"det": True, "rec": True})
 
 
 class OnnxBackend:
@@ -452,6 +507,8 @@ def cmd_tune(args: argparse.Namespace) -> None:
 # ------------------------------------------------------------------------- compare
 
 COMPARE_BACKENDS = ("mlx", "mlx-float16", "onnx-cpu")
+# Also accepted where the package is installed: the hand-written reference networks.
+REFERENCE_BACKENDS = ("mlx4ocr",)
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 OCR_WORKLOAD = "ocr page"
 
@@ -591,6 +648,8 @@ def cmd_compare(args: argparse.Namespace) -> None:
 def _make_backend(name: str, args: argparse.Namespace) -> Any:
     if name == "onnx-cpu":
         return OnnxBackend(args.run)
+    if name == "mlx4ocr":
+        return Mlx4ocrBackend(args.run, args.cache_mb)
     dtype = "float16" if name.endswith("float16") else "float32"
     return MlxBackend(args.run, dtype, "auto", args.cache_mb)
 
@@ -968,7 +1027,7 @@ def main() -> None:
     compare.add_argument(
         "--backends",
         default=",".join(COMPARE_BACKENDS),
-        help="comma-separated, from: " + ", ".join(COMPARE_BACKENDS),
+        help="comma-separated, from: " + ", ".join(COMPARE_BACKENDS + REFERENCE_BACKENDS),
     )
     compare.add_argument("--image", type=Path, help="page for the end-to-end row (default: sample.png in the run)")
     compare.add_argument("--warmup", type=int, default=3)
@@ -977,7 +1036,11 @@ def main() -> None:
     pages = add("pages", cmd_pages)
     pages.add_argument("--images", type=Path, required=True, help="directory of page images")
     pages.add_argument("--out", type=Path, required=True, help="directory for the results")
-    pages.add_argument("--backends", default="onnx-cpu,mlx,mlx-float16")
+    pages.add_argument(
+        "--backends",
+        default="onnx-cpu,mlx,mlx-float16",
+        help="comma-separated, from: " + ", ".join(COMPARE_BACKENDS + REFERENCE_BACKENDS),
+    )
     pages.add_argument("--passes", type=int, default=3)
     pages.add_argument("--limit", type=int, default=960, help="longest detector input side")
     pages.add_argument("--batch-size", type=int, default=6)

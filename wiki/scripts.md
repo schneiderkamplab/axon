@@ -86,6 +86,12 @@ loads in place of the `synapse` package so that MLX processes do not import PyTo
 memory is the macOS physical footprint (`proc_pid_rusage`). Elsewhere only the peak
 resident set size is reported.
 
+`compare` and `pages` also accept the backend `mlx4ocr` where that package is installed. It
+runs the hand-written networks of `mlx4ocr` in the same pipeline, as a reference for the
+generated code. It downloads the official PaddlePaddle safetensors to `mlx4ocr/` in the run
+directory. Install the package in a separate environment: it pins newer versions of NumPy
+and other packages than the project environment has.
+
 `bench` times what the pipeline consumes: the detector map as NumPy, and the recognizer's
 best class and probability per column (taken on the device for MLX). On CUDA builds of MLX
 set `MLX_ENABLE_TF32=0` for `parity`. Box unclipping grows the minimum-area rectangle

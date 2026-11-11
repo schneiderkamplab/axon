@@ -314,31 +314,54 @@ Scratch experiments. None is in the harness.
 
 `mlx4ocr` 0.1.2 (github.com/shuuul/mlx4ocr, MIT, pre-alpha) is a hand-written MLX port of
 PP-OCRv6. It builds the networks from `mlx.nn` layers, fuses batch normalisation and loads
-the official PaddlePaddle safetensors. Both implementations ran in one process on MLX
-0.32.2, with a 256 MB buffer cache and 2 operations per command buffer. Scratch scripts.
-Nothing from `mlx4ocr` is in the repository.
+the official PaddlePaddle safetensors. The harness backend `mlx4ocr` takes only the two
+networks from the package. Preprocessing, batching, the argmax on the device, `mx.compile`
+and the memory settings are the same as for the generated code, so a difference in time is
+a difference between generated and hand-written network code.
 
-Fastest call in ms, float32:
+Environment: one separate environment with MLX 0.32.2, ONNX Runtime 1.31.1, NumPy 2.5.4 and
+`mlx4ocr` 0.1.2. Every backend ran in a fresh process. Run directory
+`log/ppocr-vs-mlx4ocr-m1pro-20261111/`. The machine had desktop load, which moves a pass by
+up to 10%, so the real-page test alternated the order of the two MLX backends.
 
-| Workload | Axon | Axon compiled | mlx4ocr | mlx4ocr compiled | Largest output difference |
-|---|---|---|---|---|---|
-| det 1x736x960 | 26.6 | 23.7 | 29.6 | 25.8 | 5.1e-7 |
-| det, sample page 608x960 | 21.9 | 19.6 | 25.4 | 21.7 | 6.3e-6 |
-| rec 6x48x320 | 13.0 | 12.5 | 14.6 | 12.4 | 2.4e-6 |
-| rec 16x48x480 | 40.0 | 38.9 | 46.8 | 42.3 | 3.7e-6 |
-| rec 6x48x1600 | 49.9 | 47.2 | 56.7 | 51.5 | 5.4e-6 |
+Full OCR of the 19 real pages, float32, detector side limit 960:
 
-- The two implementations compute the same function. The recognizer argmax is identical.
-  This also confirms the ONNX conversion against the official weights.
-- Generated code is 0% to 10% faster with `mx.compile` and 11% to 15% faster without it.
-  The generated code has no cost against a hand-written port.
+| Backend | Passes | Fastest pass s | Median pass s | Detector s | Recognizer s | Peak MB | Lines equal to ONNX Runtime |
+|---|---|---|---|---|---|---|---|
+| ONNX Runtime CPU | 5 | 28.46 | 28.47 | 1.90 | 26.45 | 1025 | reference |
+| Axon MLX | 18 | 4.78 | 4.97 | 0.45 | 4.22 | 1032 to 1057 | 959 of 959 |
+| mlx4ocr networks | 18 | 5.25 | 5.34 | 0.48 | 4.66 | 1056 to 1063 | 959 of 959 |
+
+- The generated code is 5% to 11% faster than the hand-written port in each of six
+  alternating rounds, and 7.5% faster on the median pass. Peak memory is the same.
+- The two implementations give the same text as ONNX Runtime on all 959 lines.
+
+Fixed shapes, median ms per call and peak process memory, 30 samples (`compare`):
+
+| Workload | Axon MLX ms | MB | mlx4ocr ms | MB | ONNX CPU ms | MB |
+|---|---|---|---|---|---|---|
+| det 1x736x960 | 23.7 | 455 | 25.9 | 438 | 95.6 | 341 |
+| det 1x960x960 | 30.7 | 524 | 33.5 | 510 | 117.8 | 404 |
+| rec 1x48x320 | 3.9 | 168 | 4.1 | 185 | 9.8 | 144 |
+| rec 6x48x320 | 10.8 | 239 | 11.9 | 254 | 58.2 | 194 |
+| rec 16x48x480 | 37.3 | 509 | 42.1 | 570 | 189.7 | 459 |
+| OCR of the sample page | 57.0 | 532 | 62.5 | 573 | 301.6 | 531 |
+
+- The generated code is 7% to 13% faster on every shape. Network outputs agree to 6.3e-6
+  or better, and the recognizer argmax is identical. This also confirms the ONNX
+  conversion against the official weights.
+- A loaded Axon process is 76 MB and a loaded `mlx4ocr` process is 112 MB. The first call
+  of a shape is slower for the generated code (54 ms against 40 ms for the detector),
+  because the trace of the generated Python is longer.
+- **float16 does not work in `mlx4ocr`.** With its weights cast to float16 the detector
+  returns NaN on the sample page. The generated runtime accumulates global average pooling
+  in float32 to prevent this overflow. The backend is float32 only.
 - The official small recognizer safetensors have two wrong 1x1 convolutions in the neck.
   `mlx4ocr` repairs them from a pickle file that it downloads from a third-party bucket.
-  This test did not load that file. It took the two convolutions from our checkpoint.
+  The backend does not load that file. It takes the two convolutions from our checkpoint.
 
-Full pipelines on the 19 real pages, each with its own pre- and post-processing.
-`mlx4ocr` does not downscale these pages for the detector, so our pipeline ran with
-`--limit 2400` to match:
+`mlx4ocr` with its own pipeline and defaults, for reference. It does not downscale these
+pages for the detector, so our pipeline ran with `--limit 2400` to match:
 
 | Pipeline | First pass s | Steady pass s | Detector s | Recognizer s | Peak MB | Lines |
 |---|---|---|---|---|---|---|
@@ -346,14 +369,11 @@ Full pipelines on the 19 real pages, each with its own pre- and post-processing.
 | Axon MLX, our pipeline | 8.58 | 6.15 | 1.48 | 4.53 | 1593 | 945 |
 | mlx4ocr 0.1.2, its pipeline and defaults | 72.89 | 10.44 | 2.06 | 7.56 | 9153 | 942 |
 
-- Our pipeline is 1.7x faster than `mlx4ocr` in the steady state and uses 0.17x the
-  memory. The networks are within 10%, so the difference comes from the pipeline:
-  `mlx4ocr` copies the full 18,710-class probability tensor to NumPy for every batch and
-  does not limit the MLX buffer cache.
+- Its own pipeline is 1.7x slower than ours and uses 5.7x the memory. It copies the full
+  18,710-class probability tensor to NumPy for every batch and does not limit the MLX
+  buffer cache. Scratch script, one run.
 - The texts are similar but not equal: mean character similarity per page is 0.984. The
   two pipelines crop and filter text boxes differently.
-- At this detector resolution Axon MLX is 6.5x faster than ONNX Runtime CPU, with
-  identical text on all 945 lines.
 
 ## Open
 

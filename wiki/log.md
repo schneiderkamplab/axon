@@ -115,16 +115,18 @@ machine and page set. 19 pages from one source. Last confirmed: 2026-11-11.
 
 ## 2026-11-11 — PP-OCR: generated MLX against the hand-written `mlx4ocr`
 
-Compared the Axon-generated MLX networks with `mlx4ocr` 0.1.2, a hand-written MLX port of
-PP-OCRv6, in one process on MLX 0.32.2.
+Added the reference backend `mlx4ocr` to `scripts/ppocr_mlx.py`. It runs the hand-written
+MLX networks of `mlx4ocr` 0.1.2 in the pipeline of the harness, so only the network code
+differs from the generated backend.
 
-Observed: outputs agree to 6.3e-6 or better and the recognizer argmax is identical.
-Generated code is 0% to 10% faster with `mx.compile` and 11% to 15% faster without it. On the
-19 real pages at the same detector resolution, our pipeline takes 6.15 s per pass and peaks
-at 1593 MB. The `mlx4ocr` pipeline takes 10.44 s and peaks at 9153 MB, caused-by a full
-probability copy to NumPy and an unlimited MLX buffer cache.
+Observed on the 19 real pages, six alternating rounds, 18 passes for each backend: Axon MLX
+4.97 s per pass (median), `mlx4ocr` networks 5.34 s, ONNX Runtime CPU 28.47 s. The generated
+code is 5% to 11% faster than the hand-written port in each round, with the same peak
+memory and the same text on all 959 lines. On fixed shapes it is 7% to 13% faster. Network
+outputs agree to 6.3e-6 or better. `mlx4ocr` returns NaN in float16. Its own pipeline with
+its defaults takes 10.44 s per pass and peaks at 9153 MB, caused-by a full probability copy
+to NumPy and an unlimited MLX buffer cache.
 
-Uses [CNN support and PP-OCR](vision-cnn.md). Validated-by scratch scripts only; no
-artifact is in the repository. Confidence: high for the network comparison on this machine,
-medium for the pipeline comparison, because the two pipelines differ in pre- and
-post-processing. Last confirmed: 2026-11-11.
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
+validated-by `log/ppocr-vs-mlx4ocr-m1pro-20261111/`. Confidence: high for the direction on
+this machine; the size of the difference moves with desktop load. Last confirmed: 2026-11-11.
