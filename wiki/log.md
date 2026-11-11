@@ -112,3 +112,19 @@ not harness defaults.
 Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md).
 Validated-by `log/ppocr-pages-m1pro-20261111/` (`pages.json`). Confidence: high for this
 machine and page set. 19 pages from one source. Last confirmed: 2026-11-11.
+
+## 2026-11-11 — PP-OCR: generated MLX against the hand-written `mlx4ocr`
+
+Compared the Axon-generated MLX networks with `mlx4ocr` 0.1.2, a hand-written MLX port of
+PP-OCRv6, in one process on MLX 0.32.2.
+
+Observed: outputs agree to 6.3e-6 or better and the recognizer argmax is identical.
+Generated code is 0% to 10% faster with `mx.compile` and 11% to 15% faster without it. On the
+19 real pages at the same detector resolution, our pipeline takes 6.15 s per pass and peaks
+at 1593 MB. The `mlx4ocr` pipeline takes 10.44 s and peaks at 9153 MB, caused-by a full
+probability copy to NumPy and an unlimited MLX buffer cache.
+
+Uses [CNN support and PP-OCR](vision-cnn.md). Validated-by scratch scripts only; no
+artifact is in the repository. Confidence: high for the network comparison on this machine,
+medium for the pipeline comparison, because the two pipelines differ in pre- and
+post-processing. Last confirmed: 2026-11-11.

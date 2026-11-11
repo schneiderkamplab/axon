@@ -286,8 +286,8 @@ Scratch experiments. None is in the harness.
 
 - The pointwise matmuls run at 1.4 to 3.3 TFLOP/s, which is near the limit of this GPU.
   A flattened 2D matmul is not faster than the 4D form. The generated code has no
-  inefficiency to remove there, so a hand-written MLX recognizer is not expected to be
-  faster.
+  inefficiency to remove there. The comparison with a hand-written port in the next
+  section confirms this.
 - Recognizer time on the real pages, against float32 with the full head (4.6 to 4.7 s):
 
 | Change | Speed | Lines equal, of 959 |
@@ -309,6 +309,51 @@ Scratch experiments. None is in the harness.
   property of the network and applies to ONNX Runtime too.
 - Not tried: the Neural Engine through a CoreML conversion, and ONNX Runtime on the CPU in
   parallel with MLX (estimated 15% more throughput).
+
+## Against a hand-written MLX implementation (2026-11-11, M1 Pro)
+
+`mlx4ocr` 0.1.2 (github.com/shuuul/mlx4ocr, MIT, pre-alpha) is a hand-written MLX port of
+PP-OCRv6. It builds the networks from `mlx.nn` layers, fuses batch normalisation and loads
+the official PaddlePaddle safetensors. Both implementations ran in one process on MLX
+0.32.2, with a 256 MB buffer cache and 2 operations per command buffer. Scratch scripts.
+Nothing from `mlx4ocr` is in the repository.
+
+Fastest call in ms, float32:
+
+| Workload | Axon | Axon compiled | mlx4ocr | mlx4ocr compiled | Largest output difference |
+|---|---|---|---|---|---|
+| det 1x736x960 | 26.6 | 23.7 | 29.6 | 25.8 | 5.1e-7 |
+| det, sample page 608x960 | 21.9 | 19.6 | 25.4 | 21.7 | 6.3e-6 |
+| rec 6x48x320 | 13.0 | 12.5 | 14.6 | 12.4 | 2.4e-6 |
+| rec 16x48x480 | 40.0 | 38.9 | 46.8 | 42.3 | 3.7e-6 |
+| rec 6x48x1600 | 49.9 | 47.2 | 56.7 | 51.5 | 5.4e-6 |
+
+- The two implementations compute the same function. The recognizer argmax is identical.
+  This also confirms the ONNX conversion against the official weights.
+- Generated code is 0% to 10% faster with `mx.compile` and 11% to 15% faster without it.
+  The generated code has no cost against a hand-written port.
+- The official small recognizer safetensors have two wrong 1x1 convolutions in the neck.
+  `mlx4ocr` repairs them from a pickle file that it downloads from a third-party bucket.
+  This test did not load that file. It took the two convolutions from our checkpoint.
+
+Full pipelines on the 19 real pages, each with its own pre- and post-processing.
+`mlx4ocr` does not downscale these pages for the detector, so our pipeline ran with
+`--limit 2400` to match:
+
+| Pipeline | First pass s | Steady pass s | Detector s | Recognizer s | Peak MB | Lines |
+|---|---|---|---|---|---|---|
+| ONNX Runtime CPU, our pipeline | 56.90 | 39.72 | 7.11 | 32.43 | 2804 | 945 |
+| Axon MLX, our pipeline | 8.58 | 6.15 | 1.48 | 4.53 | 1593 | 945 |
+| mlx4ocr 0.1.2, its pipeline and defaults | 72.89 | 10.44 | 2.06 | 7.56 | 9153 | 942 |
+
+- Our pipeline is 1.7x faster than `mlx4ocr` in the steady state and uses 0.17x the
+  memory. The networks are within 10%, so the difference comes from the pipeline:
+  `mlx4ocr` copies the full 18,710-class probability tensor to NumPy for every batch and
+  does not limit the MLX buffer cache.
+- The texts are similar but not equal: mean character similarity per page is 0.984. The
+  two pipelines crop and filter text boxes differently.
+- At this detector resolution Axon MLX is 6.5x faster than ONNX Runtime CPU, with
+  identical text on all 945 lines.
 
 ## Open
 
