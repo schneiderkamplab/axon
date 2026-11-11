@@ -351,6 +351,60 @@ class OnnxBackend:
         return handle
 
 
+class OnnxCoremlBackend(OnnxBackend):
+    """ONNX Runtime with the CoreML provider on the GPU, one session per input shape.
+
+    The provider is fast only with a static input shape and the MLProgram format: with
+    the dynamic graphs it splits them into many partitions and is slower than the CPU.
+    This backend writes a copy of the graph with the shape fixed for every new input
+    shape and compiles a session for it. CoreML keeps the compiled models in
+    ``onnx-static/cache`` in the run directory, so only the first use of a shape is slow.
+    """
+
+    def __init__(self, run: Path, units: str = "ALL") -> None:
+        self.name = "onnxruntime:CoreML-" + units
+        self.units = units
+        self.source = _onnx_dir(run)
+        self.static = run / "onnx-static"
+        self.sessions: dict[tuple[str, tuple[int, ...]], Any] = {}
+
+    def _session(self, kind: str, shape: tuple[int, ...]) -> Any:
+        import onnx
+        import onnxruntime as ort
+        from onnxruntime.tools.onnx_model_utils import fix_output_shapes
+
+        key = (kind, shape)
+        if key not in self.sessions:
+            path = self.static / f"{kind}-{'x'.join(map(str, shape))}.onnx"
+            if not path.exists():
+                self.static.mkdir(parents=True, exist_ok=True)
+                model = onnx.load(str(self.source / ONNX_FILES[kind]))
+                dims = model.graph.input[0].type.tensor_type.shape.dim
+                for dim, value in zip(dims, shape, strict=True):
+                    dim.ClearField("dim_param")
+                    dim.dim_value = value
+                fix_output_shapes(model)
+                onnx.save(model, str(path))
+            cache = self.static / "cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            options = {
+                "ModelFormat": "MLProgram",
+                "MLComputeUnits": self.units,
+                "RequireStaticInputShapes": "1",
+                "ModelCacheDirectory": str(cache),
+            }
+            providers = [("CoreMLExecutionProvider", options), "CPUExecutionProvider"]
+            session_options = ort.SessionOptions()
+            session_options.log_severity_level = 3
+            self.sessions[key] = ort.InferenceSession(str(path), session_options, providers=providers)
+        return self.sessions[key]
+
+    def run(self, kind: str, x: np.ndarray) -> np.ndarray:
+        nchw = np.ascontiguousarray(x.transpose(0, 3, 1, 2))
+        out = self._session(kind, tuple(nchw.shape)).run(None, {"x": nchw})[0]
+        return out.transpose(0, 2, 3, 1) if kind == "det" else out
+
+
 # ---------------------------------------------------------------- parity and bench
 
 
@@ -506,7 +560,10 @@ def cmd_tune(args: argparse.Namespace) -> None:
 
 # ------------------------------------------------------------------------- compare
 
-COMPARE_BACKENDS = ("mlx", "mlx-float16", "onnx-cpu")
+# ONNX Runtime on the GPU: the CoreML provider, with all compute units or without the
+# Neural Engine.
+ONNX_COREML_UNITS = {"onnx-coreml": "ALL", "onnx-coreml-gpu": "CPUAndGPU"}
+COMPARE_BACKENDS = ("mlx", "mlx-float16", "onnx-cpu", *ONNX_COREML_UNITS)
 # Also accepted where the package is installed: the hand-written reference networks.
 REFERENCE_BACKENDS = ("mlx4ocr",)
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
@@ -568,7 +625,7 @@ def _compare_worker(args: argparse.Namespace) -> None:
     record["first_call_ms"] = (time.perf_counter() - start) * 1e3
     record["median_ms"], record["min_ms"] = _time(call, args.warmup, args.samples)
     record["memory_end_mb"] = _memory_mb()
-    if backend_name != "onnx-cpu":
+    if hasattr(backend, "mx"):
         mx = backend.mx
         record["mlx_mb"] = {
             "active": mx.get_active_memory() / _MB,
@@ -648,6 +705,8 @@ def cmd_compare(args: argparse.Namespace) -> None:
 def _make_backend(name: str, args: argparse.Namespace) -> Any:
     if name == "onnx-cpu":
         return OnnxBackend(args.run)
+    if name in ONNX_COREML_UNITS:
+        return OnnxCoremlBackend(args.run, ONNX_COREML_UNITS[name])
     if name == "mlx4ocr":
         return Mlx4ocrBackend(args.run, args.cache_mb)
     dtype = "float16" if name.endswith("float16") else "float32"
@@ -1026,7 +1085,7 @@ def main() -> None:
     compare = add("compare", cmd_compare)
     compare.add_argument(
         "--backends",
-        default=",".join(COMPARE_BACKENDS),
+        default="mlx,mlx-float16,onnx-cpu",
         help="comma-separated, from: " + ", ".join(COMPARE_BACKENDS + REFERENCE_BACKENDS),
     )
     compare.add_argument("--image", type=Path, help="page for the end-to-end row (default: sample.png in the run)")

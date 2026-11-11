@@ -161,9 +161,11 @@ rows from an ad hoc script over the same generated-code path as the tests (10 sa
 - Parity on Metal: every variant within 4.7e-5 of ONNX Runtime, recognizer argmax
   agreement 1.0. Float16 within 4.4e-2 on the sample page.
 - `tune` keeps `compiled` for both networks. float16 is about 18% faster than float32.
-- The ONNX Runtime CoreML provider is slower than its CPU provider here: it splits the
-  graphs into 19 (detector) and 27 (recognizer) partitions. Default provider options only.
-  The MLProgram format and a native CoreML conversion were not tried.
+- The ONNX Runtime CoreML provider is slower than its CPU provider with its default
+  options. It splits the dynamic graphs into 19 (detector) and 27 (recognizer) partitions.
+  Superseded 2026-11-11 for the provider in general: with a static input shape and the
+  MLProgram format it runs on the GPU and is fast. See
+  [ONNX Runtime on the GPU](#onnx-runtime-on-the-gpu-2026-11-11-m1-pro).
 - The always-on MLX lowerings hold on Metal: routing pointwise convolutions through
   `mx.conv2d` instead of a matmul is 5-14% slower. `mx.conv_transpose2d` instead of the
   matmul form is 6% slower on the detector.
@@ -307,7 +309,7 @@ Scratch experiments. None is in the harness.
   959 lines, with the same weights and precision: the network sees the zero padding next to
   a line. Read every "lines equal" figure against this 1 to 2% of unstable lines. This is a
   property of the network and applies to ONNX Runtime too.
-- Not tried: the Neural Engine through a CoreML conversion, and ONNX Runtime on the CPU in
+- Not tried: a native CoreML conversion for the Neural Engine, and ONNX Runtime on the CPU in
   parallel with MLX (estimated 15% more throughput).
 
 ## Against a hand-written MLX implementation (2026-11-11, M1 Pro)
@@ -375,10 +377,61 @@ pages for the detector, so our pipeline ran with `--limit 2400` to match:
 - The texts are similar but not equal: mean character similarity per page is 0.984. The
   two pipelines crop and filter text boxes differently.
 
+## ONNX Runtime on the GPU (2026-11-11, M1 Pro)
+
+All earlier tables compare MLX on the GPU with ONNX Runtime on the CPU. ONNX Runtime
+reaches the GPU on macOS through its CoreML provider. The harness backends `onnx-coreml`
+(all compute units) and `onnx-coreml-gpu` (no Neural Engine) use the MLProgram format and
+one session per input shape, because the provider is fast only with a static shape.
+ONNX Runtime 1.30.0, project environment, run directory
+`log/ppocr-vs-onnx-gpu-m1pro-20261111/`.
+
+Fixed shapes, median ms per call and peak process memory, 30 samples (`compare`):
+
+| Workload | Axon MLX | Axon MLX float16 | ONNX CoreML, all units | ONNX CoreML, GPU | ONNX CPU |
+|---|---|---|---|---|---|
+| det 1x736x960 | 24.3 ms, 455 MB | 19.6 ms, 313 MB | 16.1 ms, 498 MB | 16.1 ms, 446 MB | 109.0 ms, 349 MB |
+| det 1x960x960 | 30.9 ms, 523 MB | 35.1 ms, 362 MB | 19.8 ms, 575 MB | 19.9 ms, 502 MB | 124.0 ms, 400 MB |
+| rec 1x48x320 | 3.9 ms, 167 MB | 3.5 ms, 168 MB | 5.0 ms, 686 MB | 8.1 ms, 590 MB | 10.1 ms, 146 MB |
+| rec 6x48x320 | 10.7 ms, 239 MB | 9.6 ms, 212 MB | 12.6 ms, 761 MB | 13.2 ms, 765 MB | 59.4 ms, 195 MB |
+| rec 16x48x480 | 36.9 ms, 509 MB | 29.1 ms, 408 MB | 41.2 ms, 1100 MB | 42.6 ms, 1444 MB | 188.0 ms, 458 MB |
+| OCR of the sample page | 56.2 ms, 534 MB | 47.0 ms, 456 MB | 62.1 ms, 1165 MB | 65.0 ms, 1428 MB | 302.4 ms, 528 MB |
+
+- The float16 value for det 1x960x960 is from a disturbed run. It was 23.2 ms on 2026-11-10.
+- **The detector is 1.5x faster on ONNX Runtime with CoreML than on Axon MLX.** Outputs
+  agree with the CPU provider to 4.5e-6. This is the first baseline that is faster than
+  the generated MLX, and it shows that MLX leaves time in the detector. The cause is not
+  isolated.
+- The recognizer is 12% to 29% faster on Axon MLX, and uses 0.2x to 0.5x the memory. ONNX
+  Runtime returns the full 18,710-class tensor to the host.
+- The first call of a new shape takes 1 to 8 s on CoreML, because it compiles a model.
+- Only the GPU is fast. With `CPUAndNeuralEngine` the detector takes 127 ms and the
+  recognizer 46 ms (6x48x320). The NeuralNetwork format takes 137 ms for the detector.
+
+Full OCR of the 19 real pages, float32:
+
+| Backend | First pass s | Later passes s | Recognizer s | Peak MB | Lines equal |
+|---|---|---|---|---|---|
+| Axon MLX, 4 runs | 4.76 to 5.35 | 4.65 to 5.30 | 4.10 to 4.69 | 1049 to 1057 | 959 of 959 |
+| ONNX CoreML, all units, cold cache | 321.11 | 31.25, 15.26 | 14.35 | 18868 | 959 of 959 |
+| ONNX CoreML, all units, warm cache | 75.34 | 12.17, 11.82 | 11.03 | 18574 | 959 of 959 |
+| ONNX Runtime CPU | 31.13 | 28.46 | 26.45 | 1025 | reference |
+
+- On real pages Axon MLX is 2.5x to 3.3x faster than ONNX Runtime with CoreML and uses
+  0.06x the memory. The pages have 57 input shapes. CoreML needs a compiled model and a
+  session for each: 321 s for the first pass, 5.1 GB of model cache on disk, and 18.9 GB
+  of process memory, which made the machine swap.
+- Two of the four CoreML runs ended with `recursive_mutex lock failed` inside ONNX Runtime
+  and gave no result.
+- A pipeline that pads every line to a few fixed widths can make CoreML practical. That
+  changes the recognized text and was not tried.
+
 ## Open
 
-- Timing on other Apple Silicon machines, and a CoreML baseline that is not partitioned
-  (MLProgram format or a native conversion).
+- Why the detector is 1.5x faster on CoreML than on MLX. Candidates are the dense 3x3
+  convolutions, the 7x7 depthwise convolutions and the transposed convolutions.
+
+- Timing on other Apple Silicon machines.
 - `synapse axon-benchmark` and the matrix runner cannot run these files: they are not
   language models and the Hub repo holds ONNX only. The declared `CHECKPOINTS` pragma is
   there for the policy guard.

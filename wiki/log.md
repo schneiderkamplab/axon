@@ -130,3 +130,21 @@ to NumPy and an unlimited MLX buffer cache.
 Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
 validated-by `log/ppocr-vs-mlx4ocr-m1pro-20261111/`. Confidence: high for the direction on
 this machine; the size of the difference moves with desktop load. Last confirmed: 2026-11-11.
+
+## 2026-11-11 — PP-OCR: ONNX Runtime on the GPU (CoreML provider)
+
+Added the backends `onnx-coreml` and `onnx-coreml-gpu` to `scripts/ppocr_mlx.py`. They use
+the MLProgram format and one session per input shape.
+
+Observed: with a static shape the provider runs on the GPU and is fast. The detector takes
+16.1 ms against 24.3 ms on Axon MLX (1.5x faster). The recognizer is 12% to 29% slower than
+Axon MLX and uses 2x to 5x the memory. On the 19 real pages (57 input shapes) ONNX Runtime
+with CoreML takes 11.8 to 15.3 s per pass against 4.7 s on Axon MLX, after a first pass of
+75 to 321 s, with 18.9 GB of process memory and 5.1 GB of model cache. Two of four runs
+crashed inside ONNX Runtime. Supersedes the 2026-11-10 statement that the CoreML provider
+is slower than the CPU provider: that holds only for its default options.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
+validated-by `log/ppocr-vs-onnx-gpu-m1pro-20261111/`. Confidence: high for the fixed shapes,
+medium for the real pages (two valid CoreML runs, machine under memory pressure). Last
+confirmed: 2026-11-11.

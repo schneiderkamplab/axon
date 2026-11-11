@@ -86,6 +86,12 @@ loads in place of the `synapse` package so that MLX processes do not import PyTo
 memory is the macOS physical footprint (`proc_pid_rusage`). Elsewhere only the peak
 resident set size is reported.
 
+`compare` and `pages` accept the backends `onnx-coreml` and `onnx-coreml-gpu`: ONNX Runtime
+with the CoreML provider on the GPU, with and without the Neural Engine. They write one
+graph with a fixed shape and one compiled model for each input shape to `onnx-static/` in
+the run directory. On the 19 real pages that is 5 GB on disk and 19 GB of process memory.
+Delete `onnx-static/` after a run.
+
 `compare` and `pages` also accept the backend `mlx4ocr` where that package is installed. It
 runs the hand-written networks of `mlx4ocr` in the same pipeline, as a reference for the
 generated code. It downloads the official PaddlePaddle safetensors to `mlx4ocr/` in the run
