@@ -9,6 +9,7 @@ Experiment harness for ``synapse/models/ppocr``. Run from the repository root.
 
     python scripts/ppocr_mlx.py tune   --run log/ppocr-mlx
     python scripts/ppocr_mlx.py compare --run log/ppocr-mlx [--image page.png]
+    python scripts/ppocr_mlx.py pages  --run log/ppocr-mlx --images DIR --out log/<id>
 
 ``parity`` and ``bench`` cover the MLX variants listed in ``MlxBackend``. ``tune`` times
 them on this machine and saves the fastest per network; ``ocr`` then uses that choice.
@@ -20,6 +21,10 @@ defaults and stay in NumPy/OpenCV; only the two networks run on MLX.
 ``compare`` reports speed and memory of MLX against ONNX Runtime on the CPU. It runs each
 backend and workload in a process of its own, because a peak memory figure covers the
 whole life of a process.
+
+``pages`` runs the full pipeline over a directory of page images, once per backend in a
+process of its own, and reports time, peak memory and agreement of the text with ONNX
+Runtime. It is the measurement that matters: real lines are long and come in many widths.
 
 ``bench`` times what the pipeline consumes: the detector's probability map as a NumPy
 array, and the recognizer's best class and probability per column (taken on the device
@@ -55,6 +60,9 @@ DET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 REC_HEIGHT = 48
 REC_BASE_WIDTH = 320
 _MB = 1024 * 1024
+# Defaults for the two MLX settings that decide peak memory; see wiki/vision-cnn.md.
+DEFAULT_CACHE_MB = 256
+DEFAULT_OPS_PER_BUFFER = 2
 
 
 # --------------------------------------------------------------------------- build
@@ -173,14 +181,19 @@ class MlxBackend:
     """
 
     def __init__(
-        self, run: Path, dtype: str = "float32", variant: Any = "base", cache_mb: int | None = None
+        self,
+        run: Path,
+        dtype: str = "float32",
+        variant: Any = "base",
+        cache_mb: int = DEFAULT_CACHE_MB,
     ) -> None:
         import mlx.core as mx
 
         _use_vendored_common(run)
-        if cache_mb is not None:
-            # MLX keeps freed buffers for reuse, without a limit by default. On these
-            # networks that cache is many times the weights; a limit trades speed for it.
+        if cache_mb >= 0:
+            # MLX keeps freed buffers for reuse, without a limit by default. Text lines
+            # come in many widths, and every new shape adds buffers that are never
+            # reused: over 19 pages the cache grew to 24 GB and the machine swapped.
             mx.set_cache_limit(cache_mb * _MB)
         if variant == "auto":
             tuned = run / TUNED_FILE
@@ -321,7 +334,7 @@ def cmd_parity(args: argparse.Namespace) -> None:
     pixels_reference = onnx.det_pixels(pixels)
     worst = 0.0
     for variant in args.variants.split(","):
-        mlx = MlxBackend(args.run, args.dtype, variant)
+        mlx = MlxBackend(args.run, args.dtype, variant, args.cache_mb)
         for kind, xs in inputs.items():
             for x, want in zip(xs, reference[kind], strict=True):
                 got = mlx.run(kind, x)
@@ -364,7 +377,9 @@ def _workloads() -> list[tuple[str, str, np.ndarray]]:
 
 def cmd_bench(args: argparse.Namespace) -> None:
     workloads = _workloads()
-    backends: list[Any] = [MlxBackend(args.run, args.dtype, v) for v in args.variants.split(",")]
+    backends: list[Any] = [
+        MlxBackend(args.run, args.dtype, v, args.cache_mb) for v in args.variants.split(",")
+    ]
     try:
         import onnxruntime as ort
 
@@ -408,7 +423,7 @@ def cmd_tune(args: argparse.Namespace) -> None:
         "rec": rng.standard_normal((6, REC_HEIGHT, 640, 3)).astype(np.float32),
     }
     backends = {
-        (dtype, variant): MlxBackend(args.run, dtype, variant)
+        (dtype, variant): MlxBackend(args.run, dtype, variant, args.cache_mb)
         for dtype in ("float32", "float16")
         for variant in VARIANTS
     }
@@ -437,6 +452,7 @@ def cmd_tune(args: argparse.Namespace) -> None:
 # ------------------------------------------------------------------------- compare
 
 COMPARE_BACKENDS = ("mlx", "mlx-float16", "onnx-cpu")
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 OCR_WORKLOAD = "ocr page"
 
 
@@ -471,11 +487,7 @@ def _compare_worker(args: argparse.Namespace) -> None:
     backend_name, workload = args.worker.split("|", 1)
     record: dict[str, Any] = {"backend": backend_name, "workload": workload}
     record["memory_start_mb"] = _memory_mb()
-    if backend_name == "onnx-cpu":
-        backend: Any = OnnxBackend(args.run)
-    else:
-        dtype = "float16" if backend_name.endswith("float16") else "float32"
-        backend = MlxBackend(args.run, dtype, "auto", args.cache_mb)
+    backend = _make_backend(backend_name, args)
     record["name"] = backend.name
     record["memory_loaded_mb"] = _memory_mb()
     if workload == OCR_WORKLOAD:
@@ -534,8 +546,7 @@ def cmd_compare(args: argparse.Namespace) -> None:
             command = [sys.executable, str(Path(__file__).resolve()), "compare", "--run", str(args.run)]
             command += ["--worker", f"{backend}|{label}", "--image", str(image)]
             command += ["--warmup", str(args.warmup), "--samples", str(args.samples)]
-            if args.cache_mb is not None:
-                command += ["--cache-mb", str(args.cache_mb)]
+            command += ["--cache-mb", str(args.cache_mb), "--ops-per-buffer", str(args.ops_per_buffer)]
             done = subprocess.run(command, capture_output=True, text=True, check=False)
             lines = [line for line in done.stdout.splitlines() if line.startswith("COMPARE ")]
             if done.returncode != 0 or not lines:
@@ -563,12 +574,7 @@ def cmd_compare(args: argparse.Namespace) -> None:
     texts = {tuple(r["lines"]) for r in records if "lines" in r}
     if texts:
         print("OCR text identical across backends" if len(texts) == 1 else "OCR text DIFFERS between backends")
-    tag = "".join(
-        f"-{name}{value}"
-        for name, value in (("cache", args.cache_mb), ("ops", args.ops_per_buffer))
-        if value is not None
-    )
-    out = args.run / f"compare{tag}.json"
+    out = args.run / f"compare-cache{args.cache_mb}-ops{args.ops_per_buffer}.json"
     summary = {
         "samples": args.samples,
         "mlx_cache_mb": args.cache_mb,
@@ -577,6 +583,138 @@ def cmd_compare(args: argparse.Namespace) -> None:
     }
     out.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"wrote {out}")
+
+
+# --------------------------------------------------------------------------- pages
+
+
+def _make_backend(name: str, args: argparse.Namespace) -> Any:
+    if name == "onnx-cpu":
+        return OnnxBackend(args.run)
+    dtype = "float16" if name.endswith("float16") else "float32"
+    return MlxBackend(args.run, dtype, "auto", args.cache_mb)
+
+
+def _pages_worker(args: argparse.Namespace) -> None:
+    """One backend over every page, ``--passes`` times; prints one JSON line."""
+    import cv2
+
+    start = time.perf_counter()
+    backend = _make_backend(args.worker, args)
+    record: dict[str, Any] = {"backend": args.worker, "name": backend.name}
+    record["load_ms"] = (time.perf_counter() - start) * 1e3
+    characters = load_characters(_dictionary(args.run))
+    paths = sorted(path for path in args.images.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
+    images = [cv2.imread(str(path)) for path in paths]
+    shapes: list[tuple[int, ...]] = []
+    submit = backend.rec_submit
+
+    def recording_submit(batch: np.ndarray) -> Any:
+        shapes.append(tuple(batch.shape))
+        return submit(batch)
+
+    backend.rec_submit = recording_submit
+    record["passes"] = []
+    for index in range(args.passes):
+        rows = []
+        for path, image in zip(paths, images, strict=True):
+            shapes.clear()
+            start = time.perf_counter()
+            result = run_ocr(
+                backend,
+                image,
+                characters,
+                limit=args.limit,
+                batch_size=args.batch_size,
+                width_bucket=args.width_bucket,
+            )
+            row = {"page": path.name, "total_ms": (time.perf_counter() - start) * 1e3}
+            row.update(result["timings"])
+            row["det_shape"] = result["det_shape"]
+            row["rec_shapes"] = list(shapes)
+            if index == 0:
+                row["lines"] = [line["text"] for line in result["lines"]]
+            rows.append(row)
+        record["passes"].append(rows)
+    record["memory_mb"] = _memory_mb()
+    print("PAGES " + json.dumps(record, ensure_ascii=False))
+
+
+def cmd_pages(args: argparse.Namespace) -> None:
+    """Full OCR over a directory of page images: time, memory and agreement of the text.
+
+    The first pass of a backend includes everything a cold start pays; the fastest later
+    pass is the steady state. Text is compared with the first backend that is ONNX
+    Runtime, line by line; the pages and their text stay in ``--out``.
+    """
+    import difflib
+
+    if args.worker:
+        _pages_worker(args)
+        return
+    args.out.mkdir(parents=True, exist_ok=True)
+    records = {}
+    for backend in args.backends.split(","):
+        command = [sys.executable, str(Path(__file__).resolve()), "pages", "--run", str(args.run)]
+        command += ["--images", str(args.images), "--out", str(args.out), "--worker", backend]
+        command += ["--passes", str(args.passes), "--limit", str(args.limit)]
+        command += ["--batch-size", str(args.batch_size), "--width-bucket", str(args.width_bucket)]
+        command += ["--cache-mb", str(args.cache_mb), "--ops-per-buffer", str(args.ops_per_buffer)]
+        done = subprocess.run(command, capture_output=True, text=True, check=False)
+        lines = [line for line in done.stdout.splitlines() if line.startswith("PAGES ")]
+        if done.returncode != 0 or not lines:
+            raise SystemExit(f"worker failed for {backend}:\n{done.stderr[-2000:]}")
+        records[backend] = json.loads(lines[-1][len("PAGES ") :])
+        (args.out / f"pages-{backend}.json").write_text(
+            json.dumps(records[backend], ensure_ascii=False, indent=1)
+        )
+    reference = records.get("onnx-cpu")
+    summary = []
+    for backend, record in records.items():
+        first = record["passes"][0]
+        totals = [sum(row["total_ms"] for row in rows) for rows in record["passes"]]
+        steady = min(totals[1:]) if len(totals) > 1 else totals[0]
+        fastest = min(record["passes"], key=lambda rows: sum(row["total_ms"] for row in rows))
+        memory = record["memory_mb"]
+        row = {
+            "backend": backend,
+            "pages": len(first),
+            "lines": sum(len(page["lines"]) for page in first),
+            "rec_shapes": len({tuple(shape) for page in first for shape in page["rec_shapes"]}),
+            "first_pass_s": totals[0] / 1e3,
+            "steady_pass_s": steady / 1e3,
+            "det_s": sum(page["det_net_ms"] for page in fastest) / 1e3,
+            "rec_s": sum(page["rec_ms"] for page in fastest) / 1e3,
+            "peak_mb": memory.get("peak_footprint", memory["peak_rss"]),
+        }
+        if reference is not None:
+            want = [line for page in reference["passes"][0] for line in page["lines"]]
+            got = [line for page in first for line in page["lines"]]
+            same_count = len(want) == len(got)
+            row["speedup"] = (
+                min(sum(r["total_ms"] for r in rows) for rows in reference["passes"][1:] or reference["passes"])
+                / steady
+            )
+            row["lines_equal"] = sum(a == b for a, b in zip(want, got, strict=False)) / max(1, len(want))
+            row["char_similarity"] = difflib.SequenceMatcher(
+                None, "\n".join(want), "\n".join(got), autojunk=False
+            ).ratio()
+            row["same_line_count"] = same_count
+        summary.append(row)
+    print(
+        f"{'backend':12s} {'pages':>5s} {'lines':>5s} {'shapes':>6s} {'first s':>8s} {'steady s':>8s} "
+        f"{'det s':>6s} {'rec s':>6s} {'peak MB':>8s} {'speedup':>8s} {'lines =':>8s} {'chars ~':>8s}"
+    )
+    for row in summary:
+        print(
+            f"{row['backend']:12s} {row['pages']:5d} {row['lines']:5d} {row['rec_shapes']:6d} "
+            f"{row['first_pass_s']:8.2f} {row['steady_pass_s']:8.2f} {row['det_s']:6.2f} {row['rec_s']:6.2f} "
+            f"{row['peak_mb']:8.0f} {row.get('speedup', float('nan')):7.1f}x "
+            f"{row.get('lines_equal', float('nan')):8.4f} {row.get('char_similarity', float('nan')):8.5f}"
+        )
+    settings = {key: getattr(args, key) for key in ("passes", "limit", "batch_size", "width_bucket", "cache_mb", "ops_per_buffer")}
+    (args.out / "pages.json").write_text(json.dumps({"settings": settings, "summary": summary}, indent=2))
+    print(f"wrote {args.out / 'pages.json'}")
 
 
 # ----------------------------------------------------------------------------- OCR
@@ -704,6 +842,7 @@ def run_ocr(
     limit: int,
     batch_size: int,
     width_bucket: int,
+    in_flight: int = 2,
 ) -> dict[str, Any]:
     timings = {}
     start = time.perf_counter()
@@ -716,18 +855,25 @@ def run_ocr(
     boxes = db_boxes(prob, image.shape[0], image.shape[1])
     crops = [crop_box(image, box) for box in boxes]
     timings["boxes_crops_ms"] = (time.perf_counter() - start) * 1e3
-    # Each batch is queued as soon as it is built, so the device works on it while the
-    # host resizes the next one; results are read back once at the end.
+    # A batch is queued as soon as it is built, so the device works on it while the host
+    # resizes the next one. At most ``in_flight`` batches wait at a time: every queued
+    # batch holds its intermediate results, and a page of text has many batches.
     start = time.perf_counter()
-    pending = [
-        (indexes, backend.rec_submit(batch))
-        for indexes, batch in rec_batches(crops, batch_size, width_bucket)
-    ]
     texts: list[tuple[str, float]] = [("", 0.0)] * len(crops)
-    for indexes, handle in pending:
+    pending: list[tuple[list[int], Any]] = []
+
+    def collect() -> None:
+        indexes, handle = pending.pop(0)
         best, scores = backend.rec_collect(handle)
         for row, i in enumerate(indexes):
             texts[i] = ctc_decode(best[row], scores[row], characters)
+
+    for indexes, batch in rec_batches(crops, batch_size, width_bucket):
+        if len(pending) >= in_flight:
+            collect()
+        pending.append((indexes, backend.rec_submit(batch)))
+    while pending:
+        collect()
     timings["rec_ms"] = (time.perf_counter() - start) * 1e3
     lines = [
         {"text": text, "score": score, "box": box.round(1).tolist()}
@@ -786,12 +932,19 @@ def main() -> None:
         sub.set_defaults(handler=handler)
         if name != "build":
             sub.add_argument("--dtype", default="float32", choices=["float32", "float16"])
-            sub.add_argument("--cache-mb", type=int, help="limit the MLX buffer cache to this many MB")
+            sub.add_argument(
+                "--cache-mb",
+                type=int,
+                default=DEFAULT_CACHE_MB,
+                help="limit of the MLX buffer cache in MB; negative keeps MLX's unlimited cache",
+            )
             sub.add_argument(
                 "--ops-per-buffer",
                 type=int,
+                default=DEFAULT_OPS_PER_BUFFER,
                 help="commit the Metal command buffer after this many MLX operations; a small "
-                "value frees intermediate results sooner and lowers peak memory",
+                "value frees intermediate results sooner and lowers peak memory; 0 keeps "
+                "MLX's own setting",
             )
         return sub
 
@@ -821,6 +974,15 @@ def main() -> None:
     compare.add_argument("--warmup", type=int, default=3)
     compare.add_argument("--samples", type=int, default=20)
     compare.add_argument("--worker", help=argparse.SUPPRESS)
+    pages = add("pages", cmd_pages)
+    pages.add_argument("--images", type=Path, required=True, help="directory of page images")
+    pages.add_argument("--out", type=Path, required=True, help="directory for the results")
+    pages.add_argument("--backends", default="onnx-cpu,mlx,mlx-float16")
+    pages.add_argument("--passes", type=int, default=3)
+    pages.add_argument("--limit", type=int, default=960, help="longest detector input side")
+    pages.add_argument("--batch-size", type=int, default=6)
+    pages.add_argument("--width-bucket", type=int, default=32)
+    pages.add_argument("--worker", help=argparse.SUPPRESS)
     ocr = add("ocr", cmd_ocr)
     ocr.add_argument("--image", type=Path, required=True)
     ocr.add_argument("--backend", default="mlx", choices=["mlx", "onnx"])
@@ -831,7 +993,7 @@ def main() -> None:
     ocr.add_argument("--repeat", type=int, default=1, help="run this many times and report the last")
     ocr.add_argument("--json", type=Path, help="write lines, boxes and timings here")
     args = parser.parse_args()
-    if getattr(args, "ops_per_buffer", None) is not None:
+    if getattr(args, "ops_per_buffer", 0) > 0:
         # MLX reads this when it starts; it is imported later, and workers inherit it.
         os.environ["MLX_MAX_OPS_PER_BUFFER"] = str(args.ops_per_buffer)
     args.handler(args)

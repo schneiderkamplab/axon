@@ -67,6 +67,7 @@ Run from the repository root with `.venv/bin/python`. Artifacts go under `log/<r
 | `... parity --run log/<id> [--dtype float32\|float16] [--tolerance 1e-3]` | Generated MLX vs ONNX Runtime CPU on seven random inputs; exits non-zero above the tolerance | Build output; needs `onnxruntime` | stdout |
 | `... bench --run log/<id> [--providers CPUExecutionProvider,CoreMLExecutionProvider] [--samples 15] [--warmup 3]` | Median and minimum milliseconds per forward for five fixed workloads; ONNX rows only for installed providers | Build output | `bench.json`, stdout table |
 | `... compare --run log/<id> [--backends mlx,mlx-float16,onnx-cpu] [--samples 20] [--image <file>]` | Speed and peak process memory of MLX against ONNX Runtime CPU on the five `bench` workloads and the full pipeline on one page; one fresh process per backend and workload | Build output; `sample.png` in the run or `--image` for the page row | `compare.json` (`compare-cache<N>-ops<N>.json` with the options below), table on stdout |
+| `... pages --run log/<id> --images <dir> --out log/<id2> [--backends onnx-cpu,mlx,mlx-float16] [--passes 3] [--limit 960] [--batch-size 6]` | Full pipeline over a directory of page images, one fresh process per backend; first and steady pass time, detector and recognizer time, peak memory, and line and character agreement with ONNX Runtime | Build output; page images; needs `opencv-python-headless` | `pages.json` (summary), `pages-<backend>.json` (per page timings, batch shapes and the recognized text: keep internal when the pages are) |
 | `... ocr --run log/<id> --image <file> [--backend mlx\|onnx] [--repeat N] [--json out.json]` | Full pipeline with PaddleOCR-default pre/post-processing in NumPy/OpenCV; prints lines and per-stage timings | Build output; needs `opencv-python-headless` | stdout, optional JSON with text, scores, boxes, timings |
 
 MLX variants (`--variants` for `parity`/`bench`, `--variant` for `ocr`, default `auto`):
@@ -77,9 +78,10 @@ log/<id> [--rounds 3] [--samples 10]` times them for float32 and float16 and wri
 published kit `--run` defaults to the script's directory, and `parity` checks the detector
 on the kit's `sample.png`.
 
-Every command except `build` accepts `--cache-mb N` (limit of the MLX buffer cache) and
-`--ops-per-buffer N` (sets `MLX_MAX_OPS_PER_BUFFER` before MLX starts); both lower peak
-memory for some speed. `build` also writes `axon_codegen2_common.py`, which the harness
+Every command except `build` accepts `--cache-mb N` (limit of the MLX buffer cache,
+default 256, negative for MLX's unlimited cache) and `--ops-per-buffer N` (sets
+`MLX_MAX_OPS_PER_BUFFER` before MLX starts, default 2, 0 for MLX's own setting). The
+defaults are needed on real pages: without a cache limit MLX grew to 24 GB over 19 pages. `build` also writes `axon_codegen2_common.py`, which the harness
 loads in place of the `synapse` package so that MLX processes do not import PyTorch. Peak
 memory is the macOS physical footprint (`proc_pid_rusage`); elsewhere only the peak
 resident set size is reported.

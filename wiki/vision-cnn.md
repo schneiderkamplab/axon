@@ -226,7 +226,8 @@ the generated code:
 
 With these settings MLX is 2.5x to 5.2x faster at 0.6x to 1.2x the memory of ONNX Runtime
 (float16: 2.6x to 6.2x faster at 0.5x to 1.1x). The OCR text is identical in every run.
-The two options are not defaults of the harness: the best value depends on the machine.
+Superseded 2026-11-11: the harness now defaults to `--cache-mb 256 --ops-per-buffer 2`
+(see the next section); the "MLX defaults" table above is `--cache-mb -1 --ops-per-buffer 0`.
 
 **Importing the helper module cost 300 MB.** A generated MLX module imports
 `synapse.axon.codegen2_common`, which needs only the standard library, but importing it
@@ -235,8 +236,45 @@ instead of 77 MB. `build` now writes `axon_codegen2_common.py` into the run dire
 the harness loads it under the helper's name. Other hosts of generated MLX code pay this
 cost unless they do the same; the package `__init__` files are unchanged.
 
+## Real pages (2026-11-11, M1 Pro)
+
+19 page images from an internal test set: contracts and forms rendered at 150 dpi (text
+PDFs and 200-300 dpi scans), an invoice and one phone photo; 959 text lines. The set names
+real people, so pages and text stay in `log/ppocr-pages-m1pro-20261111/` and are not
+quoted here. `scripts/ppocr_mlx.py pages`: full pipeline, detector side limit 960, batches
+of 6, three passes per backend, one process per backend.
+
+| Backend | First pass s | Steady pass s | Detector s | Recognizer s | Peak MB | Speedup | Lines equal to ONNX |
+|---|---|---|---|---|---|---|---|
+| ONNX Runtime CPU | 27.88 | 27.77 | 1.99 | 25.67 | 1024 | 1.0x | reference |
+| Axon MLX float32 | 4.75 | 4.66 | 0.44 | 4.12 | 1052 | 6.0x | 959 of 959 |
+| Axon MLX float16 | 4.04 | 3.95 | 0.37 | 3.47 | 865 | 7.0x | 951 of 959 (character similarity 0.9998) |
+
+- **Real pages are a recognizer workload.** Lines are long: batch widths run from 320 to
+  2272 pixels in 55 distinct shapes, and the recognizer takes 88% of the MLX time (92% for
+  ONNX Runtime). The fixed `bench` shapes under-weight it.
+- **An unbounded MLX buffer cache does not survive real pages.** Every new batch shape adds
+  buffers that are never reused. With MLX's default the cache reached 24 GB over the 19
+  pages, the machine swapped, and a pass took between 4.7 and 52 s. Fixed-by a cache limit
+  in `MlxBackend`; the harness defaults are now `--cache-mb 256 --ops-per-buffer 2`.
+  Sweep at float32 (steady pass, peak): 512 MB and MLX's command buffers 4.64 s, 3455 MB;
+  512 MB and 2 operations 4.65 s, 1314 MB; 256 MB and 2 operations 4.66 s, 1044 MB; 256 MB
+  and 1 operation 4.77 s, 959 MB.
+- **The first pass is not slower.** Tracing 55 shapes with `mx.compile` costs about 0.1 s
+  in total; the slow first calls seen earlier were memory pressure, not tracing. The
+  uncompiled variant is 3% slower.
+- **Nothing is left in the pipeline.** Host batching takes 0.13 s and CTC decoding 0.02 s
+  of a pass; the recognizer runs at 4.8 microseconds per image column, the same rate as
+  the synthetic `bench` shapes (4.5 to 5.4). Batches of 3 or 12, a width bucket of 128 and
+  a limit on queued batches change the time by 4% or less. Further speed has to come from
+  the recognizer network itself or from float16.
+- **float16** is 15% faster with 18% less memory and changes 8 of 959 lines. Whether those
+  changes matter downstream is not judged here.
+
 ## Open
 
+- A hand-written MLX recognizer as a ceiling for the generated code, now that the
+  recognizer is known to be 88% of real-page time.
 - Timing on other Apple Silicon machines, and a CoreML baseline that is not partitioned
   (MLProgram format or a native conversion).
 - `synapse axon-benchmark` and the matrix runner cannot run these files: they are not

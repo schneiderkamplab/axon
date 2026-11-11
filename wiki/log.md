@@ -95,3 +95,20 @@ validated-by `log/ppocr-mlx-m1pro-20261110-b/`, `tests/test_axon_cnn_compiler_re
 and the passing `tests/test_axon_graph_ir.py`, `tests/test_synapse_axon_parser_roundtrip.py`
 and `tests/test_synapse_axon_optimize.py`. Confidence: high for the recorded measurements on
 this M1 Pro; the best MLX memory settings are machine-specific. Last confirmed: 2026-11-10.
+
+## 2026-11-11 — PP-OCR on real pages: MLX 6x faster than ONNX Runtime CPU, cache limit needed
+
+Ran the full pipeline over 19 real page images (959 text lines, internal test set) with the
+new `scripts/ppocr_mlx.py pages`.
+
+Observed: steady pass 4.66 s on Axon MLX float32 against 27.77 s on ONNX Runtime CPU (6.0x),
+all 959 lines identical, peak memory 1052 against 1024 MB; float16 3.95 s (7.0x), 865 MB, 8
+lines differ. The recognizer is 88% of MLX time; pipeline overhead is under 4%. With MLX's
+unbounded buffer cache the same run reached 24 GB and took up to 52 s per pass, caused-by 55
+distinct batch shapes; fixed-by a default cache limit of 256 MB and 2 operations per Metal
+command buffer in the harness. Supersedes the 2026-11-10 statement that these options are
+not harness defaults.
+
+Uses [CNN support and PP-OCR](vision-cnn.md) and [maintained scripts](scripts.md);
+validated-by `log/ppocr-pages-m1pro-20261111/` (`pages.json`). Confidence: high for this
+machine and page set; 19 pages from one source. Last confirmed: 2026-11-11.
