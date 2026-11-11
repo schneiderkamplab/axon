@@ -62,13 +62,13 @@ Run from the repository root with `.venv/bin/python`. Artifacts go under `log/<r
 
 | Script | Purpose / CLI | Inputs | Outputs |
 |---|---|---|---|
-| `python scripts/convert_ppocr_onnx.py --det <det.onnx> --rec <rec.onnx> --out <dir>` | Recover layer structure from the anonymous ONNX graphs, fold batch norm, rename parameters; raises if the graph does not match the layout fixed in the model files | PP-OCR ONNX exports; needs `onnx` | `<dir>/{det,rec}/config.json` and `model.safetensors` |
+| `python scripts/convert_ppocr_onnx.py --det <det.onnx> --rec <rec.onnx> --out <dir>` | Recover layer structure from the anonymous ONNX graphs, fold batch norm, rename parameters. Raises if the graph does not match the layout fixed in the model files | PP-OCR ONNX exports. Needs `onnx` | `<dir>/{det,rec}/config.json` and `model.safetensors` |
 | `python scripts/ppocr_mlx.py build --run log/<id> [--onnx-dir DIR \| --repo ID]` | Fetch (default `blackpen-sk/ppocrv6-small`, needs Hub access) or reuse the ONNX files, convert, and emit the optimized MLX modules | ONNX files and dictionary | `det/`, `rec/`, `ppocr_det_mlx.py`, `ppocr_rec_mlx.py`, `build.json` |
-| `... parity --run log/<id> [--dtype float32\|float16] [--tolerance 1e-3]` | Generated MLX vs ONNX Runtime CPU on seven random inputs; exits non-zero above the tolerance | Build output; needs `onnxruntime` | stdout |
-| `... bench --run log/<id> [--providers CPUExecutionProvider,CoreMLExecutionProvider] [--samples 15] [--warmup 3]` | Median and minimum milliseconds per forward for five fixed workloads; ONNX rows only for installed providers | Build output | `bench.json`, stdout table |
-| `... compare --run log/<id> [--backends mlx,mlx-float16,onnx-cpu] [--samples 20] [--image <file>]` | Speed and peak process memory of MLX against ONNX Runtime CPU on the five `bench` workloads and the full pipeline on one page; one fresh process per backend and workload | Build output; `sample.png` in the run or `--image` for the page row | `compare.json` (`compare-cache<N>-ops<N>.json` with the options below), table on stdout |
-| `... pages --run log/<id> --images <dir> --out log/<id2> [--backends onnx-cpu,mlx,mlx-float16] [--passes 3] [--limit 960] [--batch-size 6]` | Full pipeline over a directory of page images, one fresh process per backend; first and steady pass time, detector and recognizer time, peak memory, and line and character agreement with ONNX Runtime | Build output; page images; needs `opencv-python-headless` | `pages.json` (summary), `pages-<backend>.json` (per page timings, batch shapes and the recognized text: keep internal when the pages are) |
-| `... ocr --run log/<id> --image <file> [--backend mlx\|onnx] [--repeat N] [--json out.json]` | Full pipeline with PaddleOCR-default pre/post-processing in NumPy/OpenCV; prints lines and per-stage timings | Build output; needs `opencv-python-headless` | stdout, optional JSON with text, scores, boxes, timings |
+| `... parity --run log/<id> [--dtype float32\|float16] [--tolerance 1e-3]` | Generated MLX vs ONNX Runtime CPU on seven random inputs. Exits non-zero above the tolerance | Build output. Needs `onnxruntime` | stdout |
+| `... bench --run log/<id> [--providers CPUExecutionProvider,CoreMLExecutionProvider] [--samples 15] [--warmup 3]` | Median and minimum milliseconds per forward for five fixed workloads. ONNX rows only for installed providers | Build output | `bench.json`, stdout table |
+| `... compare --run log/<id> [--backends mlx,mlx-float16,onnx-cpu] [--samples 20] [--image <file>]` | Speed and peak process memory of MLX against ONNX Runtime CPU on the five `bench` workloads and the full pipeline on one page. One fresh process per backend and workload | Build output. `sample.png` in the run or `--image` for the page row | `compare.json` (`compare-cache<N>-ops<N>.json` with the options below), table on stdout |
+| `... pages --run log/<id> --images <dir> --out log/<id2> [--backends onnx-cpu,mlx,mlx-float16] [--passes 3] [--limit 960] [--batch-size 6]` | Full pipeline over a directory of page images, one fresh process per backend. First and steady pass time, detector and recognizer time, peak memory, and line and character agreement with ONNX Runtime | Build output. Page images. Needs `opencv-python-headless` | `pages.json` (summary), `pages-<backend>.json` (per page timings, batch shapes and the recognized text: keep internal when the pages are) |
+| `... ocr --run log/<id> --image <file> [--backend mlx\|onnx] [--repeat N] [--json out.json]` | Full pipeline with PaddleOCR-default pre/post-processing in NumPy/OpenCV. Prints lines and per-stage timings | Build output. Needs `opencv-python-headless` | stdout, optional JSON with text, scores, boxes, timings |
 
 MLX variants (`--variants` for `parity`/`bench`, `--variant` for `ocr`, default `auto`):
 `base`, `compiled` (`mx.compile` per input shape), `shift` (3x3 depthwise convolutions as a
@@ -83,10 +83,10 @@ default 256, negative for MLX's unlimited cache) and `--ops-per-buffer N` (sets
 `MLX_MAX_OPS_PER_BUFFER` before MLX starts, default 2, 0 for MLX's own setting). The
 defaults are needed on real pages: without a cache limit MLX grew to 24 GB over 19 pages. `build` also writes `axon_codegen2_common.py`, which the harness
 loads in place of the `synapse` package so that MLX processes do not import PyTorch. Peak
-memory is the macOS physical footprint (`proc_pid_rusage`); elsewhere only the peak
+memory is the macOS physical footprint (`proc_pid_rusage`). Elsewhere only the peak
 resident set size is reported.
 
 `bench` times what the pipeline consumes: the detector map as NumPy, and the recognizer's
 best class and probability per column (taken on the device for MLX). On CUDA builds of MLX
 set `MLX_ENABLE_TF32=0` for `parity`. Box unclipping grows the minimum-area rectangle
-directly instead of calling `pyclipper`; for rectangles the two agree.
+directly instead of calling `pyclipper`. For rectangles the two agree.
