@@ -21,6 +21,35 @@ and is deliberately thin — stdlib `ThreadingHTTPServer`, JSON in, text or SSE
 out. It adds no decode logic; `POST /v1/completions`,
 `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`.
 
+## Token classification (`/v1/classify`)
+
+A checkpoint whose metadata marks it a token classifier (`id2label` with more
+than the background label, or a `*ForTokenClassification` architecture — no
+model-family name checks) serves a fourth route instead of generation:
+`POST /v1/classify` takes `input` (string or list of strings), runs one
+forward per text over the same compiled MLX artifact, and decodes the label
+path with a constrained Viterbi decoder (`decoder: "viterbi"`, default) or
+raw argmax. The decoder is generic BIOES built from the checkpoint's own
+label scheme; optional transition biases come from
+`viterbi_calibration.json` when present. Entities are grouped into spans with
+character offsets from the tokenizer. The two kinds are mutually exclusive
+per server: a classifier rejects `/v1/completions` with a 400 naming
+`/v1/classify`, a generator rejects `/v1/classify` the other way, and the
+fleet engine rejects classifier checkpoints outright (it decodes
+autoregressively). The classifier follows the checkpoint's declared `dtype`
+rather than the engine's float16 default.
+
+The checkpoint's weight layout must match what the materialized `.axon`
+binds. When it does not (e.g. the privacy-filter `.axon` binds opf paths
+while the HF download ships raw HF names), materialize a variant checkpoint
+dir once and serve that:
+
+```bash
+python scripts/materialize_privacy_filter_opf.py          # writes models/privacy-filter/opf/
+python -m server --axon synapse/models/privacy-filter/generic-privacy-filter.axon \
+    --checkpoint models/privacy-filter/opf
+```
+
 ```bash
 python -m server --axon synapse/models/qwen3/generic-qwen3.axon \
     --checkpoint models/qwen3 --engine fleet --device mps --dtype bfloat16

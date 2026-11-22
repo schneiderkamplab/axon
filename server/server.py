@@ -14,6 +14,13 @@ Endpoints:
 - ``GET  /v1/models``            minimal model listing
 - ``POST /v1/completions``       text completion (``stream`` supported, SSE)
 - ``POST /v1/chat/completions``  chat completion (``stream`` supported, SSE)
+- ``POST /v1/classify``          token classification (classifier checkpoints)
+
+The served kind comes from the checkpoint metadata (``id2label`` marks a
+token classifier — see ``server.classify``); each kind serves its own route
+and rejects the other with a 400. Classification loads the same compiled MLX
+artifact forward-only and decodes label paths with the constrained Viterbi
+decoder (or raw argmax on request).
 
 Dynamic batching: session mode interleaves concurrent requests through a
 bounded semaphore (each request streams its own decode over shared weights);
@@ -75,12 +82,37 @@ def _params_from_body(body: dict[str, Any]) -> GenerateParams:
 
 
 class _ServeState:
-    """Shared server state: one engine, a concurrency cap, request bookkeeping."""
+    """Shared server state: one engine, a concurrency cap, request bookkeeping.
 
-    def __init__(self, session: _AnySession, model_name: str, max_concurrency: int) -> None:
+    ``kind`` is ``"generation"`` or ``"token_classification"``; the two kinds
+    are mutually exclusive per server — a classifier never populates
+    ``session`` and a generator never populates ``classify``.
+    """
+
+    _TASK_NAMES = {
+        "generation": "text-generation",
+        "token_classification": "token-classification",
+    }
+
+    def __init__(
+        self,
+        session: _AnySession | None,
+        model_name: str,
+        max_concurrency: int,
+        *,
+        kind: str = "generation",
+        classify: Any | None = None,
+    ) -> None:
         self.session = session
         self.model_name = model_name
-        self.slots = threading.BoundedSemaphore(max_concurrency)
+        self.max_concurrency = max(1, int(max_concurrency))
+        self.slots = threading.BoundedSemaphore(self.max_concurrency)
+        self.kind = kind
+        self.classify = classify
+
+    @property
+    def task(self) -> str:
+        return self._TASK_NAMES.get(self.kind, self.kind)
 
 
 def _sse_chunks(state: _ServeState, kind: str, prompt: str, body: dict[str, Any]) -> Iterator[str]:
@@ -163,13 +195,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib name
         if self.path in {"/health", "/healthz"}:
-            self._send_json({"ok": True, "model": self.state.model_name})
+            self._send_json({"ok": True, "model": self.state.model_name, "task": self.state.task})
             return
         if self.path == "/v1/models":
             self._send_json(
                 {
                     "object": "list",
-                    "data": [{"id": self.state.model_name, "object": "model", "owned_by": "axon"}],
+                    "data": [
+                        {
+                            "id": self.state.model_name,
+                            "object": "model",
+                            "owned_by": "axon",
+                            "task": self.state.task,
+                        }
+                    ],
                 }
             )
             return
@@ -188,6 +227,9 @@ class _Handler(BaseHTTPRequestHandler):
             if self.path == "/v1/chat/completions":
                 self._chat_completion(body)
                 return
+            if self.path == "/v1/classify":
+                self._classify(body)
+                return
         except Exception as error:  # noqa: BLE001 - convert to HTTP error
             self._send_error(500, f"{type(error).__name__}: {error}")
             return
@@ -196,6 +238,12 @@ class _Handler(BaseHTTPRequestHandler):
     # ── endpoint bodies ─────────────────────────────────────────────────────
 
     def _completion(self, body: dict[str, Any]) -> None:
+        if self.state.kind != "generation":
+            self._send_error(
+                400,
+                f"{self.state.model_name} is a token-classification model; use /v1/classify",
+            )
+            return
         prompt = body.get("prompt")
         if not isinstance(prompt, str):
             self._send_error(400, "'prompt' must be a string")
@@ -203,12 +251,59 @@ class _Handler(BaseHTTPRequestHandler):
         self._generate_response(prompt, body, kind="text_completion")
 
     def _chat_completion(self, body: dict[str, Any]) -> None:
+        if self.state.kind != "generation":
+            self._send_error(
+                400,
+                f"{self.state.model_name} is a token-classification model; use /v1/classify",
+            )
+            return
         messages = body.get("messages")
         if not isinstance(messages, list):
             self._send_error(400, "'messages' must be a list")
             return
         prompt = _render_chat(self.state.session, messages)
         self._generate_response(prompt, body, kind="chat")
+
+    def _classify(self, body: dict[str, Any]) -> None:
+        if self.state.kind != "token_classification":
+            self._send_error(
+                400,
+                f"{self.state.model_name} is a generation model; use /v1/completions "
+                "or /v1/chat/completions",
+            )
+            return
+        raw = body.get("input", body.get("texts", body.get("text")))
+        if isinstance(raw, str):
+            texts = [raw]
+        elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            texts = raw
+        else:
+            self._send_error(400, "'input' must be a string or a list of strings")
+            return
+        if not texts:
+            self._send_error(400, "'input' must contain at least one text")
+            return
+        decoder = body.get("decoder", "viterbi")
+        if decoder not in ("viterbi", "argmax"):
+            self._send_error(400, "'decoder' must be 'viterbi' or 'argmax'")
+            return
+        max_length = body.get("max_length")
+        if max_length is not None and not isinstance(max_length, int):
+            self._send_error(400, "'max_length' must be an integer")
+            return
+        with self.state.slots:
+            results = self.state.classify.classify(texts, decoder=decoder, max_length=max_length)
+        total = sum(int(item["usage"]["input_tokens"]) for item in results)
+        self._send_json(
+            {
+                "object": "list",
+                "model": self.state.model_name,
+                "data": [
+                    {"index": index, **result} for index, result in enumerate(results)
+                ],
+                "usage": {"input_tokens": total},
+            }
+        )
 
     def _generate_response(self, prompt: str, body: dict[str, Any], *, kind: str) -> None:
         if body.get("stream"):
@@ -343,8 +438,12 @@ def serve(
 
     ``engine="session"`` builds the per-request Session shim; ``engine="fleet"``
     builds the continuous-batching FleetSession over the paged serving
-    artifact. ``dtype`` resolution is per engine: MLX session float16, torch
-    paths float32 (CPU-safe) unless given explicitly. ``device`` places the
+    artifact. A checkpoint whose metadata marks it a token classifier
+    (``id2label``; see ``server.classify``) serves ``/v1/classify`` through the
+    session engine instead — the fleet engine rejects it, since it decodes
+    autoregressively. ``dtype`` resolution is per engine: MLX session float16,
+    torch paths float32 (CPU-safe) unless given explicitly; the classifier
+    follows the checkpoint's declared dtype. ``device`` places the
     fleet engine's torch model (default cpu); the session engine selects its
     backend — and with it the device — implicitly, so an explicit device
     there is rejected rather than silently ignored. ``max_model_len`` /
@@ -353,7 +452,21 @@ def serve(
     device's recommended memory minus the resident weights and decode runs
     the composed torch attention path.
     """
+    from .classify import ClassifySession, is_token_classifier
+    from .loading import default_checkpoint_dir, load_model_config
+
+    checkpoint = (
+        Path(checkpoint_dir).resolve() if checkpoint_dir else default_checkpoint_dir(Path(axon_path))
+    )
+    is_classifier = is_token_classifier(load_model_config(checkpoint))
+    model_name = Path(axon_path).stem
+
     if engine == "fleet":
+        if is_classifier:
+            raise ValueError(
+                "the fleet engine decodes autoregressively; token-classification "
+                "checkpoints serve through the session engine (/v1/classify)"
+            )
         session: _AnySession = _fleet_session(
             Path(axon_path),
             checkpoint_dir=checkpoint_dir,
@@ -365,6 +478,7 @@ def serve(
             pool_memory_fraction=pool_memory_fraction,
             kv_kernel=kv_kernel,
         )
+        state = _ServeState(session, model_name, max_concurrency)
     elif engine == "session":
         if device is not None:
             raise ValueError(
@@ -382,19 +496,33 @@ def serve(
                 "--pool-memory-fraction / --kv-kernel apply to the fleet engine; the session "
                 "engine keeps a per-request cache and has no pool"
             )
-        session = Session.from_axon(
-            axon_path,
-            checkpoint_dir=checkpoint_dir,
-            dtype=dtype,
-            emit_profile="inference",
-            warm_compile=warm_compile,
-        )
+        if is_classifier:
+            classifier = ClassifySession.from_axon(
+                axon_path,
+                checkpoint_dir=checkpoint,
+                dtype=dtype,
+                warm_compile=warm_compile,
+            )
+            state = _ServeState(
+                None,
+                model_name,
+                max_concurrency,
+                kind="token_classification",
+                classify=classifier,
+            )
+        else:
+            session = Session.from_axon(
+                axon_path,
+                checkpoint_dir=checkpoint_dir,
+                dtype=dtype,
+                emit_profile="inference",
+                warm_compile=warm_compile,
+            )
+            state = _ServeState(session, model_name, max_concurrency)
     else:
         raise ValueError(
             f"unknown engine {engine!r}: expected 'session' or 'fleet'"
         )
-    model_name = Path(axon_path).stem
-    state = _ServeState(session, model_name, max_concurrency=max(1, int(max_concurrency)))
 
     handler = type("_BoundHandler", (_Handler,), {"state": state})
     httpd = ThreadingHTTPServer((host, port), handler)

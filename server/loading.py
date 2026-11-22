@@ -36,8 +36,18 @@ __all__ = [
     "resolve_safetensors_paths",
 ]
 
-# Default opt-in MLX fast-path intrinsics (matches the harness default).
-MLX_INTRINSICS_SPEC = "codegen2-mlx:__mlx_sdpa,__mlx_rope"
+# Serving MLX intrinsics, named explicitly (matches the bare-grant set of the
+# pre-2026-11 harness, which this loader replaced). Serving-only intrinsics are
+# opt-in-only in the optimizer: a bare ``codegen2-mlx`` grant excludes
+# ``__mlx_rope`` (per-instance frequency-table caches + decode-offset machinery
+# are serving-only state), so the loader must name every intrinsic it wants.
+# Naming the full set reproduces the parity-proven serving artifact exactly.
+MLX_INTRINSICS_SPEC = (
+    "codegen2-mlx:__mlx_sdpa,__mlx_rope,__mlx_rmsnorm_scaled,"
+    "__mlx_swiglu_activation,__mlx_gegelu_activation,"
+    "__mlx_expert_swiglu_ffn,__mlx_expert_packed_swiglu_ffn,"
+    "__mlx_weighted_topk_sum"
+)
 
 # The serving-profile pairing (see load_torch_model): the paged kernel is an
 # explicit opt-in and is paired with emit_profile='serving' in both
