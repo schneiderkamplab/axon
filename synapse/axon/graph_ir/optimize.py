@@ -241,7 +241,7 @@ def _normalize_backend_intrinsic_name(name: str, *, target: str) -> str:
     return token
 
 
-_OPT_IN_ONLY_BACKEND_INTRINSICS = frozenset({"__torch_paged_attention"})
+_OPT_IN_ONLY_BACKEND_INTRINSICS = frozenset({"__torch_paged_attention", "__mlx_rope"})
 
 
 def _default_backend_intrinsics(target: str) -> frozenset[str]:
@@ -249,8 +249,13 @@ def _default_backend_intrinsics(target: str) -> frozenset[str]:
 
     Opt-in-only intrinsics are excluded: they change the artifact contract
     (``__torch_paged_attention`` replaces attention with the paged runtime
-    and requires the serving profile), so they are granted only when named
-    explicitly, never bundled into an "all fast-paths" selection.
+    and requires the serving profile; ``__mlx_rope`` emits per-instance
+    frequency-table caches and decode-offset machinery that are only correct
+    under serving execution), so they are granted only when named explicitly,
+    never bundled into an "all fast-paths" selection. The remaining MLX
+    intrinsics are pure function rewrites whose emitted implementations are
+    stateless, so they work identically for training and inference and stay
+    in the default grant.
     """
     intrinsics = _BACKEND_INTRINSICS_BY_TARGET[target]
     return frozenset(intrinsics - _OPT_IN_ONLY_BACKEND_INTRINSICS)

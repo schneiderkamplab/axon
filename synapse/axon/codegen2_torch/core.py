@@ -644,7 +644,10 @@ def _grouped_expert_linear_torch(
         start = 0
         for expert, end in enumerate(offsets.tolist()):
             if start != end:
-                torch.mm(x_run[start:end], grouped_weight[expert], out=y_g[start:end])
+                # Slice assignment, not out=: a traced out= records the
+                # destination buffer as a third mm input, which coremltools'
+                # frontend rejects (mm expects exactly 2 inputs).
+                y_g[start:end] = torch.mm(x_run[start:end], grouped_weight[expert])
             start = end
     y_g = y_g.to(dtype=x.dtype) if x.is_floating_point() and y_g.is_floating_point() and y_g.dtype != x.dtype else y_g
     if bias is not None:
@@ -2603,7 +2606,10 @@ class Codegen2GraphModel(nn.Module):
             return True
         if primitive == "gather":
             dim = int(args[2]) if len(args) > 2 and not self._is_null(args[2]) else -1
-            out(torch.gather(args[0], dim=dim, index=args[1]))
+            if torch.is_tensor(args[0]) and args[0].dtype == torch.bool:
+                out(torch.gather(args[0].to(dtype=torch.uint8), dim=dim, index=args[1]).to(dtype=torch.bool))
+            else:
+                out(torch.gather(args[0], dim=dim, index=args[1]))
             return True
         if primitive == "scatter":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else -1
@@ -3904,6 +3910,14 @@ class _DirectTorchEmitter:
         add(lines, 8, "index = self._move_to(index, x.device)")
         add(lines, 8, "return torch.scatter(x, dim=dim, index=index, value=src)")
         add(lines, 4, "")
+        add(lines, 4, "def _gather(self, x, index, dim):")
+        add(lines, 8, "index = self._move_to(index, x.device)")
+        add(lines, 8, "if x.dtype == torch.bool:")
+        # Core ML MIL has no gather over bool tensors; gather 0/1 as uint8
+        # and cast back — identical values, convertible output.
+        add(lines, 12, "return torch.gather(x.to(dtype=torch.uint8), dim=dim, index=index).to(dtype=torch.bool)")
+        add(lines, 8, "return torch.gather(x, dim=dim, index=index)")
+        add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "value, _ = self._linear_param(path, None, field='param')")
         add(lines, 8, "return value")
@@ -4099,7 +4113,9 @@ class _DirectTorchEmitter:
         add(lines, 12, "start = 0")
         add(lines, 12, "for expert, end in enumerate(offsets.tolist()):")
         add(lines, 16, "if start != end:")
-        add(lines, 20, "torch.mm(x_run[start:end], grouped_weight[expert], out=y_g[start:end])")
+        add(lines, 20, "# Slice assignment, not out=: traced out= becomes a third mm")
+        add(lines, 20, "# input, which coremltools' frontend rejects.")
+        add(lines, 20, "y_g[start:end] = torch.mm(x_run[start:end], grouped_weight[expert])")
         add(lines, 16, "start = end")
         add(lines, 8, "y_g = y_g.to(dtype=x.dtype) if x.is_floating_point() and y_g.is_floating_point() and y_g.dtype != x.dtype else y_g")
         add(lines, 8, "if bias_value is not None:")
@@ -4203,7 +4219,9 @@ class _DirectTorchEmitter:
         add(lines, 12, "start = 0")
         add(lines, 12, "for expert, end in enumerate(offsets.tolist()):")
         add(lines, 16, "if start != end:")
-        add(lines, 20, "torch.mm(x_run[start:end], grouped_weight[expert], out=y_g[start:end])")
+        add(lines, 20, "# Slice assignment, not out=: traced out= becomes a third mm")
+        add(lines, 20, "# input, which coremltools' frontend rejects.")
+        add(lines, 20, "y_g[start:end] = torch.mm(x_run[start:end], grouped_weight[expert])")
         add(lines, 16, "start = end")
         add(lines, 8, "y_g = y_g.to(dtype=x.dtype) if x.is_floating_point() and y_g.is_floating_point() and y_g.dtype != x.dtype else y_g")
         add(lines, 8, "if bias_value is not None:")
@@ -6325,7 +6343,11 @@ class _DirectTorchEmitter:
         if primitive == "where_indices":
             return f"torch.where({args[0]})"
         if primitive == "topk":
-            return f"torch.topk({args[0]}, {int_arg(1)}, dim={int_arg(2)}, largest={bool_arg(3)}, sorted={bool_arg(4)})"
+            # sorted=False is a torch-only perf hint; coremltools' torch
+            # frontend rejects it below iOS17. Sorted top-k has the same
+            # selected value/index pairs, which is sufficient for Axon's
+            # top-k users (same rationale as codegen2_tinygrad's _topk).
+            return f"torch.topk({args[0]}, {int_arg(1)}, dim={int_arg(2)}, largest={bool_arg(3)}, sorted=True)"
         if primitive == "concat":
             if "dim" in attrs:
                 if self.align_devices:
@@ -6368,7 +6390,7 @@ class _DirectTorchEmitter:
                 else f"torch.where({args[0]}, {args[1]}, {args[2]})"
             ),
             "require": lambda: f"self._require_value({args[0]})",
-            "gather": lambda: f"torch.gather({args[0]}, dim={int_arg(2, '-1')}, index=self._move_to({args[1]}, {args[0]}.device))",
+            "gather": lambda: f"self._gather({args[0]}, {args[1]}, {int_arg(2, '-1')})",
             "scatter": lambda: f"self._scatter({args[0]}, {args[1]}, {args[2]}, {int_arg(3, '-1')})",
             "assign_slice": lambda: f"self._assign_slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "index_add": lambda: f"torch.index_add({args[0]}, dim={int_arg(3, '0')}, index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
