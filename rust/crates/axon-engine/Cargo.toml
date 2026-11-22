@@ -1,0 +1,12 @@
+[package]
+name = "axon-engine"
+version.workspace = true
+edition.workspace = true
+description = "Session engine: decode loop, sampling, incremental detokenization"
+
+[dependencies]
+axon-backend = { workspace = true }
+mlx = { workspace = true }
+tokenizers = { workspace = true }
+half = { workspace = true }
+serde_json = { workspace = true }

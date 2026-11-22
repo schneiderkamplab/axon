@@ -1,0 +1,170 @@
+# axon Rust server
+
+A Rust implementation of the serving stack for Bifrost v0.5 (HRM-Text) on MLX,
+structurally mirroring `server/` (Python) layer-for-layer. The Python server
+stays authoritative for `.axon` artifacts and the fleet (continuous-batching)
+engine; the Rust stack serves the normalized checkpoint directly and exists to
+remove Python from the runtime path.
+
+```
+crates/mlx-c-sys   raw FFI bindings over mlx-c (C API for MLX)
+crates/mlx         safe wrapper: Array/Stream/Dtype, mx.compile over a Rust
+                   closure, custom MetalKernel, safetensors loading
+crates/axon-backend  the model path: q4 packing, the custom Metal kernels
+                   (v6/v6r/v7b/v8a gemv family + fused decode attention),
+                   the single compiled decode step (all 128 HRM slot
+                   executions unrolled, KV in fixed window buffers)
+crates/axon-engine   the decode loop: prefill + streaming generate, sampling
+                   (server/sampling.py port), incremental detokenization
+                   (server/detokenize.py port)
+crates/axon-server   OpenAI-compatible HTTP server (server/server.py port):
+                   /health, /v1/models, /v1/completions,
+                   /v1/chat/completions (JSON + SSE), stdlib-only HTTP,
+                   thread-per-connection, bounded-concurrency slots
+```
+
+## Numbers
+
+Same-window A/B on the development machine (contended desktop, M3 Max),
+greedy, window 128, `--kern` config on both sides:
+
+| engine | decode | notes |
+|---|---:|---|
+| Rust `bench_decode` | **16.9 ms/step median (59 tok/s)** | min 16.7; mean dragged by load spikes |
+| Python `bench_fast.py --kern` | 22.2 ms/step (45 tok/s) | same minutes, same machine |
+| llama.cpp fork Q4_K_M (same window) | 19.6 ms/step (51.4 ± 0.2 tok/s) | contended, minutes from the Rust runs |
+| llama.cpp fork Q4_K_M (quiet window) | 17.9 ms/step (56 tok/s) | original baseline |
+
+Same window, the Rust decode is ~14% faster than llama.cpp; full HTTP stacks
+(see `log/bifrost-mlx/RESULTS.md` § "Rust port"): Rust 43.6 tok/s per request
+vs the Python server 22.4 — that gap is also the engine, not the socket.
+
+Startup: Rust loads + packs + compiles in ~4.7 s; the Python path needs
+~46 s (13 s packing + 33 s artifact compile/load).
+
+Memory (phys_footprint after load + one 64-token request, same window):
+
+| stack | footprint |
+|---|---:|
+| **Rust server** | **1.9 GB** |
+| Python server | 11.0 GB |
+| llama.cpp Q4_K_M (`llama-bench`, RSS mid-decode) | ~1.5 GB |
+
+Rust shed 3.8 GB by dropping the bf16 source map after packing and calling
+`mlx::clear_cache` — MLX retains freed load buffers in its cache by default,
+so the load-time peak becomes the resident footprint unless released. The
+remaining gap vs llama.cpp is mostly the f16 embedding table (768 MiB, a
+gather — quantizing it saves memory, not speed; kept f16 for parity), where
+Q4_K_M quantizes it to ~180 MB. All matmul weights — gqkv, o, gate_up, down
+AND lm_head — are 4-bit (Q4_0-style, group-64 f16 scale+min) in both stacks.
+
+Run the Rust bench from `rust/` (paths are relative to it):
+
+    cargo run --release -p axon-engine --example bench_decode -- --tokens 64
+
+and the Python twin in the same window:
+
+    python3 log/bifrost-mlx/bench_fast.py --kern --tokens 64
+
+Single-run timings on a loaded desktop are worthless — interleave A/B pairs
+or use min-of-3; see `wiki/mlx-hrm-text-decode.md`.
+
+## Setup
+
+Dependencies: Xcode Metal toolchain, Python with the `mlx` wheel 0.32.2
+(only for its prebuilt libraries — the server itself is pure Rust), cmake.
+
+1. Vendor mlx-c pinned to the MLX version the wheels ship:
+
+       cd rust
+       git clone https://github.com/ml-explore/mlx-c.git vendor/mlx-c
+       cd vendor/mlx-c && git checkout v0.7.0 && cd ../..
+
+   (mlx-c v0.7.0 ↔ MLX v0.32.2 — the exact pairing with the validated
+   Python stack; do not mix versions.)
+
+2. Build the mlx-c wrappers against the wheel's prebuilt MLX (no MLX build
+   from source):
+
+       MLX_PKG=$(python3 -c "import importlib.util, os; print(os.path.dirname(importlib.util.find_spec('mlx.core').origin))")
+       cmake -S vendor/mlx-c -B vendor/mlx-c/build \
+           -DMLX_C_USE_SYSTEM_MLX=ON -DMLX_DIR="$MLX_PKG/lib/cmake/MLX" \
+           -DMLX_C_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF \
+           -DCMAKE_BUILD_TYPE=Release
+       cmake --build vendor/mlx-c/build
+
+   This produces `vendor/mlx-c/build/libmlxc.a` (the static C wrappers,
+   resolved by `crates/mlx-c-sys/build.rs`).
+
+3. Copy the wheel's runtime libraries to `rust/vendor/lib` (the workspace
+   sets an rpath there via `.cargo/config.toml`):
+
+       mkdir -p vendor/lib
+       cp "$MLX_PKG"/lib/libmlx.dylib "$MLX_PKG"/lib/libjaccl.dylib "$MLX_PKG"/lib/mlx.metallib vendor/lib/
+
+4. Build and test:
+
+       cargo test --release --workspace
+
+## Parity gates
+
+Every layer is gated bit-exact against the Python stack (tests skip with a
+message when the checkpoints/dumps are absent; dumps are generated by scripts
+in `log/bifrost-mlx/` and are gitignored):
+
+| gate | test | against |
+|---|---|---|
+| q4 packing | `axon-backend tests/kernels::pack_matches_python` | `kernel_qgemv.pack_q4_sm` vectors |
+| Metal kernels | `axon-backend tests/kernels::gemv_kernels_match_python` | v7b/v6/v6r/v8a kernel vectors |
+| fused attention | `axon-backend tests/kernels::fattn_matches_python` | fattn kernel vector |
+| full decode step | `axon-backend tests/refstep` | compiled Python step dump (`export_refstep.py`) — logits, argmax, updated KV bit-exact at pos=24 and pos=0 |
+| generation | `axon-engine tests/generate` | Python twin greedy run (`gen_ref.py`) — token ids and streamed text |
+| prompt encoding | `axon-engine tests/encode_parity` | server-path `AutoTokenizer` ids over a prompt matrix (`export_tokref.py`) |
+| chat template | `axon-server tests/chatrender` | `transformers.apply_chat_template` over a 13-case matrix (`export_chatref.py`) — byte-exact |
+| HTTP surface | `axon-server tests/http_api` | endpoint shapes as the Python server emits them |
+
+Deliberate differences from the Python engine (documented in
+`crates/axon-engine/src/lib.rs`): prefill rides the compiled decode step one
+token per step (identical semantics, zero parity risk), and seeded temperature
+sampling follows a different RNG bitstream (numpy PCG64 not reproduced; greedy
+is exact — the parity harnesses rely on greedy).
+
+## Serving
+
+    cd rust
+    cargo run --release -p axon-server -- \
+        --model ../models/hrm_text/bifrost_v05 --port 8001
+
+Endpoints mirror `server/server.py` 1:1 (same chunk shapes, same defaults:
+max_tokens 64, temperature 1.0), with `--max-concurrency` bounding concurrent
+decodes the way the Python `BoundedSemaphore` does. The chat prompt is
+rendered by the crate's own port of the checkpoint's `chat_template.jinja`
+(`crates/axon-server/src/chat_template.rs`), byte-exact vs transformers.
+
+The Rust server takes the checkpoint directory (`--model
+models/hrm_text/bifrost_v05`) rather than a `.axon` artifact — that is the
+one serving-surface difference in v1; `.axon` loading arrives behind the
+backend seam.
+
+## Notable implementation facts
+
+- The tokenizer loads through the same patch transformers applies: the
+  checkpoint's `tokenizer_config.json` sets `fix_mistral_regex: true` (and
+  `config.json` records no `transformers_version`), so `AutoTokenizer`
+  prepends its Mistral regex `Split` ahead of the tokenizer.json
+  pre-tokenizer. The raw `tokenizers` crate skips that, and the two disagree
+  on real text (`"dragon, at"` → `","`+`"▁"`+`"at"` under the patch,
+  `"▁at"` without) — enough to change every served generation. `axon-engine`
+  reproduces the patch at the JSON level, gated by `tests/encode_parity`
+  against `AutoTokenizer` dumps. A raw-crate `Tokenizer::from_file` is NOT
+  the Python server's tokenizer for this checkpoint.
+- `mlx-c` C API quirks are pinned in `crates/mlx-c-sys/src/lib.rs` docs:
+  opaque handles are by-value structs (`void* ctx`), 0 ok / 1 error / 2
+  missing, `mlx_compile` copies the closure, `mlx_array_set_data` copies.
+- Safetensors `Load` nodes have no GPU eval: tensors are loaded and cast on a
+  CPU stream (`Stream::cpu_stream()`), mirroring the Python loader.
+- MSL kernel sources are **generated** (`log/bifrost-mlx/export_msl.py` →
+  `crates/axon-backend/src/msl.rs`, byte-identical to the Python path) —
+  never hand-edit them.
+- The KV write position is `pos % window` in-graph (identical to bench_fast
+  for pos < 128, correct sliding window beyond).

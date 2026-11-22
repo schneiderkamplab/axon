@@ -1,0 +1,10 @@
+[package]
+name = "axon-server"
+version.workspace = true
+edition.workspace = true
+description = "OpenAI-compatible HTTP server over axon-engine"
+
+[dependencies]
+axon-engine = { workspace = true }
+mlx = { workspace = true }
+serde_json = { workspace = true }

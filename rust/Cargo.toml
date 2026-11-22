@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mlx-c-sys",
+    "crates/mlx",
+    "crates/axon-backend",
+    "crates/axon-engine",
+    "crates/axon-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+mlx-c-sys = { path = "crates/mlx-c-sys" }
+mlx = { path = "crates/mlx" }
+axon-backend = { path = "crates/axon-backend" }
+axon-engine = { path = "crates/axon-engine" }
+
+# Python-server parity crates (the same libraries CPython wheels are built on)
+tokenizers = "0.22"
+
+# fp16 bit handling for the q4 packing (same RNE rounding as numpy)
+half = "2"
+
+# server JSON: preserve_order keeps Python dict insertion order in responses
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+lto = "thin"

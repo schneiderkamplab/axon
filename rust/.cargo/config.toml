@@ -1,0 +1,8 @@
+# Find libmlx.dylib / libjaccl.dylib at runtime (copied into rust/vendor/lib).
+# Binaries live at rust/target/{debug,release}/, tests/examples one level
+# deeper in deps/ or examples/ — cover both depths.
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../../vendor/lib",
+    "-C", "link-arg=-Wl,-rpath,@executable_path/../../../vendor/lib",
+]

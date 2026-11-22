@@ -1,0 +1,8 @@
+[package]
+name = "mlx"
+version.workspace = true
+edition.workspace = true
+description = "Safe Rust wrapper over the MLX C API: arrays, ops, compile, custom Metal kernels"
+
+[dependencies]
+mlx-c-sys = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name = "axon-backend"
+version.workspace = true
+edition.workspace = true
+description = "Bifrost v0.5 (HRM-Text) model backend: custom Metal q4 kernels + compiled decode graph on MLX"
+
+[dependencies]
+mlx = { workspace = true }
+half = { workspace = true }

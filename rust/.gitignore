@@ -1,0 +1,5 @@
+/target
+/vendor/mlx
+/vendor/mlx-c
+/vendor/lib
+Cargo.lock

@@ -1,0 +1,9 @@
+[package]
+name = "mlx-c-sys"
+version.workspace = true
+edition.workspace = true
+links = "mlx-c"
+description = "Raw FFI bindings to the MLX C API (mlx-c), linked against Apple's MLX"
+build = "build.rs"
+
+[dependencies]
