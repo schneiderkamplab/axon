@@ -113,6 +113,7 @@ def _generate_model_code(out_path: Path, *, optimize: bool, original_codegen: bo
             optimize_graph_program,
             GraphOptimizeConfig,
         )
+        from server.loading import MLX_INTRINSICS_SPEC
 
         report = resolve_axon_program_from_path(MODEL_PATH, strict=False)
         program = report.ast
@@ -122,8 +123,11 @@ def _generate_model_code(out_path: Path, *, optimize: bool, original_codegen: bo
         program = typecheck2_flat_axon_file(program)
         graph = lower_axon_program_to_graph_ir(program)
         if optimize:
+            # Named full serving grant (see server.loading.MLX_INTRINSICS_SPEC):
+            # bare "codegen2-mlx" no longer grants __mlx_rope (opt-in-only,
+            # serving-specific state).
             graph = optimize_graph_program(
-                graph, config=GraphOptimizeConfig(backend_intrinsics="codegen2-mlx")
+                graph, config=GraphOptimizeConfig(backend_intrinsics=MLX_INTRINSICS_SPEC)
             )
         code = _emit(graph)
         out_path.write_text(code)
