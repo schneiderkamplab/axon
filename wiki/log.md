@@ -22,6 +22,12 @@ topic pages and are linked from here.
   after all three (`log/ane-spike/torch-parity-regression2.log`); the next
   blocker is a rank-6 reshape platform limit (open, Tier-2 territory,
   NO-GO-gated — details in `wiki/ane-backend.md`).
+- `log/ane-spike/` evening addition — ANE residency diagnostics: the
+  compute-plan tool verified against canary controls; mimir mlprogram
+  0/12,141 ANE ops; classic `neuralnetwork` canary 20/21 layers on the
+  ANE → the NN format is the ANE highway on this stack. Torch backend now
+  emits `F.rms_norm` (ANE-aware converter decomposition; parity unchanged).
+  Full details + next gates in `wiki/ane-backend.md`.
 
 ## 2026-11-20 — privacy-filter serving: `/v1/classify` end-to-end (python)
 
@@ -103,7 +109,10 @@ high — every claim below is gated or probe-verified today.
   config/tokenizer/calibration; the `bifrost_v05` self-contained variant-dir
   pattern) — and the server stays fully generic (no model-specific code in
   `server/`). Re-run the script after replacing the HF download.
-- **Compile-settings parity**: the loader defaults
+- **Compile-settings parity** *(superseded 2026-11-21 — see the flag-correction
+  addendum below: the ad-hoc `ClassifySession` pin was removed and the bare-grant
+  gating fixed; the loader defaults now reproduce this artifact exactly)*: the
+  loader defaults
   (`MLX_INTRINSICS_SPEC = "codegen2-mlx:__mlx_sdpa,__mlx_rope"` +
   `optimize_safe_flat_typed_axon_file`) emit a *different artifact* than the
   parity-tested harness pipeline (full `codegen2-mlx` intrinsics, no AST
@@ -129,6 +138,120 @@ high — every claim below is gated or probe-verified today.
   `_compose_path` (`@weight` used raw → KeyError). Emit-pipeline operand
   rendering gap, unrelated to today's changes; needs its own investigation.
 
+### Addendum 2026-11-21 — serving-intrinsics flag correction (supersedes the compile-settings bullet above)
+
+- User directive: intrinsics that do not work for both training and inference
+  must only be grantable through the named-spec flag, never the bare target
+  grant. Evidence gathered: `__mlx_rope` is the only serving-only MLX
+  intrinsic — its emitted code owns per-instance state
+  (`_rope_freqs`/`_rope_inv_freqs`/`_rope_cached_sin`/`_rope_cached_off`,
+  first-call table freeze) and the S==1 decode-offset machinery. The other
+  seven (`__mlx_sdpa`, `__mlx_rmsnorm_scaled`, `__mlx_swiglu_activation`,
+  `__mlx_gegelu_activation`, `__mlx_expert_swiglu_ffn`,
+  `__mlx_expert_packed_swiglu_ffn`, `__mlx_weighted_topk_sum`) are stateless
+  function rewrites (three share the torch-target rewrites verbatim) and stay
+  in the bare grant. `__jax_rope` has no lowering at all in codegen2_jax, so
+  there is no serving-only state to protect there; set membership unchanged.
+- Change: `__mlx_rope` added to `_OPT_IN_ONLY_BACKEND_INTRINSICS`
+  (`synapse/axon/graph_ir/optimize.py`) — a bare `codegen2-mlx` now grants
+  seven, and rope is granted only when named. `server/loading.py::
+  MLX_INTRINSICS_SPEC` names the full serving set (all eight) explicitly;
+  `ClassifySession.from_axon`'s ad-hoc pin
+  (`optimize_ast=False, backend_intrinsics="codegen2-mlx"`) removed — loader
+  defaults now carry the parity artifact. `scripts/stream_privacy_filter_axon.py`,
+  `bench_mlx_privacy_filter.py`, `viz_privacy_filter.py` moved off the bare
+  spec onto the named one (imported from `server.loading`, so the spec has
+  one home).
+- Evidence: `log/probe-intrinsics-grant-parity.py` — named-full+noast sha
+  `1d22937fe92f9b7a` matches the pre-change artifact byte-for-byte (the spec
+  extension is artifact-preserving); `optimize_ast` has no effect on the
+  emitted artifact for this checkpoint; post-change bare grant emits a
+  different, rope-less artifact (163,634 B vs 115,749 B — generic rope
+  lowering is far larger); the former loader two-name spec emitted 123,325 B
+  (fusions left ungranted — recorded as history).
+- Gates: new policy guard `tests/test_backend_intrinsic_grants.py` (10
+  tests); rope gate 6/6; static-binding gate 2/2; server suite 93/93; mlx
+  subset green except the pre-existing final_logits_bias failure above;
+  parity probe re-run identical (v3 4/483, same four positions); serve probe
+  end-to-end pass (argmax 0/60, 4/483, 0/12; viterbi recovers `55102`;
+  303 ms for 3 texts / 555 tokens through the loader-default path).
+
+
+## 2026-11-23 — classify fast path: gather_mm MoE routing (4.6× end-to-end)
+
+- User picked (A) classify fast path, (B) Bifrost decode kernels, (C) batched
+  prefill — sequenced A → B → C so GPU-heavy measurement campaigns don't
+  contaminate each other's timings.
+- **Profile** (`log/probe-classify-profile.py`): the classify forward was
+  97% Python-side — 28 ms fixed at S=12 (GPU only 2.5 ms), 98 ms at S=483
+  (GPU 10 ms). Root cause: the artifact is MoE (8 layers × **128 experts,
+  top-4**, hidden 640) and `_expert_linear` routed on the host: sort →
+  `mx.eval` + `.tolist()` → Python loop, i.e. **16 GPU syncs per forward**
+  plus generic per-node Python dispatch. The emitted `_compiled_fn`
+  fast-path hook was dead (never set), and `mx.compile` of the raw artifact
+  fails on the in-graph eval.
+- **Fix** (`synapse/axon/codegen2_mlx/core.py`, approved via direction
+  choice): `_expert_linear` now emits `mx.gather_mm`-based grouped GEMM —
+  pairs sorted by expert with `mx.argsort` (pure MLX), gathered as
+  `[N,1,D]×[E,D,D']` with `sorted_indices=True`, unsorted, bias gathered
+  per pair. Eval-free → compile-compatible; no host routing. Validated
+  first on-machine: bf16 gather_mm supported; unsorted reads the expert
+  weight per pair (3.2 GB ⇒ 8.1 ms at S=483) while `sorted_indices=True`
+  dedupes (2.2 ms, bit-identical to unsorted).
+- **Results** (steady, same machine): classify request totals
+  31.4/56.0/111.8 ms → **6.3/11.1/48.9 ms** (S=12/60/483) — 2.3–5×; the
+  serve probe end-to-end went 303 → **66 ms** for 3 texts/555 tokens
+  (4.6×), decomposing exactly as the per-phase profile predicts.
+  Forward dispatch is now ~1 ms; the path is GPU-bound.
+- **Parity held**: probe-pf-variants re-run — short 0/60, long 4/483 at the
+  same four near-tie positions; server suite 93/93; focused gates 18/18.
+  The probe now re-emits the v3 stream artifact when missing and skips the
+  historical v0/v1 variants whose /tmp artifacts were wiped.
+- **mx.compile after the fix: dead end, recorded** — steady ≈ uncompiled
+  (dispatch already ~1 ms), first call 0.5–3 s *per new sequence length*,
+  `shapeless=True` crashes (`Slice cannot infer output shapes`), and it
+  shifts logits by up to Δ=4.75 (near-tie parity would need re-establishing).
+  The uncompiled gather_mm artifact is the endpoint.
+- **New known bug (latent, unfixed)**: padded batch forward diverges from
+  sequential — max|Δ|=4.125 **on the row with zero padding** (batch
+  composition alone changes outputs) → the artifact's batched attention
+  path is suspect; server only sends [1,S] today so it is not
+  user-visible. Batching is also *slower* post-gather_mm (padded rows
+  multiply gather work: 125 vs 59 ms) — do not batch this path; fix the
+  attention bug only if batch classification becomes a requirement.
+
+
+## 2026-11-23 (later) — B: fattn r4 adopted in Rust (−0.95 ms/step, 63.9 tok/s)
+
+- The kernel generator already shipped alternative middle loops (`r4`
+  flash-style 4-row merge, `t2` two-pass) that were never adopted — the
+  active set everywhere was `base`, and no A/B between them was recorded.
+- Python-runner A/B, adjacent same-window runs (`bench_fast --kern --mm2d
+  --q4-nt --softmax32 --tokens 64`, 3 rounds each): base 18.1/18.1/18.3,
+  **r4 17.4/17.3/17.5** (−0.7 ms/step), t2 18.2–18.4 (neutral-to-worse).
+  Window scaling (2 rounds): w=512 base 20.7 vs r4 19.8; w=1024 base 24.4
+  vs r4 23.0 — r4's edge grows with KV length, as expected for a wider
+  per-iteration merge.
+- Adopted: `export_msl.py` now exports `FATTN_LOOP_R4`;
+  `axon-backend/src/kernels.rs` assembles `fattn_r4_so`. The bit-exact
+  port gates (`refstep`, `gen_ref`) re-anchored to r4 references
+  (`export_refstep.py`, `gen_ref.py` now build with `fattn_variant="r4"`):
+  r4 vs base differs by fp16 accumulation order (max abs 0.0078125 = one
+  ULP; greedy text unchanged on the bench prompt) so both sides must run
+  the same variant for the bit-exact port check to stay meaningful.
+- `bench_decode` no longer breaks on EOS mid-run — it keeps stepping past
+  it (feeding the id back) so variant A/Bs compare equal step counts.
+- Rust same-window adjacent A/B (128 steps, minutes apart):
+  base 16.74/16.87 ms mean (59.7 tok/s) vs **r4 15.80/15.76 (63.3 tok/s)**
+  ⇒ **−0.95 ms/step (~5.7%)**. Confirm run after restore: 15.65 ms median
+  (**63.9 tok/s**). New decode headline: ~15.7–15.8 ms/step contended,
+  vs llama.cpp same-window 19.6 ms (51.35 tok/s) ⇒ **~21% faster**; still
+  below llama.cpp's quiet 17.9 ms baseline. All Rust gates green
+  (kernels 5, refstep 1, gen 1, chatrender/http suites).
+- The remaining "middle ~32 vs ~10 µs/slot" expectation came from
+  bandwidth arithmetic at full window occupancy; r4 recovered ~5.5 µs/slot
+  of it at w=128. Deeper gains would need occupancy work (grid is
+  NH×128 threads, 4 warps/threadgroup) — parked until C is done.
 
 ## 2026-11-20 — Rust serving stack (engine + server) ported and gated
 
