@@ -12,7 +12,8 @@
 //! - `v7b` — v6 + rms_norm folded into the loop (gqkv, gate_up)
 //! - `v8a` — down_proj with SwiGLU fused in (gu = raw gate_up output)
 //! - `fattn` — single-kernel decode attention (rope + online softmax over the
-//!   past window + self term), `base` loop variant, single [a|k] output
+//!   past window + self term), `r4` loop variant (flash-style 4-row merge,
+//!   A/B'd faster than `base` at every window size), single [a|k] output
 
 use mlx::kernel::{MetalKernel, OutputSpec};
 use mlx::{Array, Dtype, Result, Stream, slice_ranges};
@@ -21,13 +22,19 @@ use crate::consts::{HD, NH};
 use crate::msl;
 use crate::pack::PackedWeight;
 
-/// Assemble the fattn MSL exactly like `make_fattn("base", single_output=True)`:
+/// Assemble the fattn MSL exactly like `make_fattn("r4", single_output=True)`:
 /// same substitutions, applied in the same order.
+///
+/// The `r4` loop (flash-style 4-row online-softmax merge) was A/B'd against
+/// `base` same-window on 2026-11-23: −0.7 ms/step at KV window 128
+/// (18.1 → 17.4 ms), growing to −1.4 ms at window 1024 — identical results
+/// by construction (same online-softmax merge math, wider per-iteration
+/// blocks). `t2` (two-pass) measured neutral-to-worse.
 fn fattn_source() -> String {
     let mut source = msl::FATTN_SOURCE
         .replace("HD_CONST", "128")
         .replace("LOG2_THETA", "13.287712379549449f")
-        .replace("%%FATTN_LOOP%%", msl::FATTN_LOOP_BASE);
+        .replace("%%FATTN_LOOP%%", msl::FATTN_LOOP_R4);
     // single output: one [a | k] buffer — a at head*HD, k at (NH + head)*HD
     source = source.replace("out_k[head * HD", "out[(NH + head) * HD");
     source = source.replace("out_a[", "out[");
@@ -75,7 +82,7 @@ impl Kernels {
                 &msl::V8A.replace("G_PLACEHOLDER", &g),
             )?,
             fattn: MetalKernel::new(
-                "fattn_base_so",
+                "fattn_r4_so",
                 &["gqkv", "k", "vv", "pos"],
                 &["out"],
                 &fattn_source(),

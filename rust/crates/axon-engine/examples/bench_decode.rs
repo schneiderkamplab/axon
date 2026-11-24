@@ -80,10 +80,8 @@ fn main() {
         next = out.next_id as i32;
         pos += 1;
         step_ms.push(t.elapsed().as_secs_f64() * 1e3);
-        if next == EOS {
-            println!("EOS at decode step {i}");
-            break;
-        }
+        // EOS only ends generation, not the timing run: keep stepping past it
+        // (feeding the EOS id back) so variant A/Bs compare equal step counts.
     }
 
     let first_id = engine.tokenizer().decode(&[next as u32], false).unwrap_or_default();

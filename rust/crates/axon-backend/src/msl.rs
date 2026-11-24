@@ -452,3 +452,60 @@ pub const FATTN_LOOP_BASE: &str = r##"
         mn = mn2;
     }
 "##;
+
+pub const FATTN_LOOP_R4: &str = r##"
+    // this simdgroup's contiguous slice of the visible rows
+    uint j0 = sg * 32;
+    uint j1 = min(vis, j0 + 32);
+    uint j = j0;
+    for (; j + 4 <= j1; j += 4) {
+        float e1 = qr0 * (float)khead[(j + 0) * HD + 0] + qr1 * (float)khead[(j + 0) * HD + 1]
+                 + qr2 * (float)khead[(j + 0) * HD + 2] + qr3 * (float)khead[(j + 0) * HD + 3];
+        float e2 = qr0 * (float)khead[(j + 1) * HD + 0] + qr1 * (float)khead[(j + 1) * HD + 1]
+                 + qr2 * (float)khead[(j + 1) * HD + 2] + qr3 * (float)khead[(j + 1) * HD + 3];
+        float e3 = qr0 * (float)khead[(j + 2) * HD + 0] + qr1 * (float)khead[(j + 2) * HD + 1]
+                 + qr2 * (float)khead[(j + 2) * HD + 2] + qr3 * (float)khead[(j + 2) * HD + 3];
+        float e4 = qr0 * (float)khead[(j + 3) * HD + 0] + qr1 * (float)khead[(j + 3) * HD + 1]
+                 + qr2 * (float)khead[(j + 3) * HD + 2] + qr3 * (float)khead[(j + 3) * HD + 3];
+        e1 = simd_sum(e1); e2 = simd_sum(e2); e3 = simd_sum(e3); e4 = simd_sum(e4);
+        float mn2 = fmax(fmax(mn, e1), fmax(fmax(e2, e3), e4));
+        float corr = (mn == -INFINITY) ? 0.0f : exp(mn - mn2);
+        float f1 = exp(e1 - mn2), f2 = exp(e2 - mn2), f3 = exp(e3 - mn2), f4 = exp(e4 - mn2);
+        float v00 = (float)vhead[(j + 0) * HD + 0], v01 = (float)vhead[(j + 0) * HD + 1];
+        float v02 = (float)vhead[(j + 0) * HD + 2], v03 = (float)vhead[(j + 0) * HD + 3];
+        float v10 = (float)vhead[(j + 1) * HD + 0], v11 = (float)vhead[(j + 1) * HD + 1];
+        float v12 = (float)vhead[(j + 1) * HD + 2], v13 = (float)vhead[(j + 1) * HD + 3];
+        float v20 = (float)vhead[(j + 2) * HD + 0], v21 = (float)vhead[(j + 2) * HD + 1];
+        float v22 = (float)vhead[(j + 2) * HD + 2], v23 = (float)vhead[(j + 2) * HD + 3];
+        float v30 = (float)vhead[(j + 3) * HD + 0], v31 = (float)vhead[(j + 3) * HD + 1];
+        float v32 = (float)vhead[(j + 3) * HD + 2], v33 = (float)vhead[(j + 3) * HD + 3];
+        a0 = a0 * corr + f1 * v00 + f2 * v10 + f3 * v20 + f4 * v30;
+        a1 = a1 * corr + f1 * v01 + f2 * v11 + f3 * v21 + f4 * v31;
+        a2 = a2 * corr + f1 * v02 + f2 * v12 + f3 * v22 + f4 * v32;
+        a3 = a3 * corr + f1 * v03 + f2 * v13 + f3 * v23 + f4 * v33;
+        ss = ss * corr + f1 + f2 + f3 + f4;
+        mn = mn2;
+    }
+    // scalar tail for the last (j1 - j0) % 4 rows
+    for (; j < j1; ++j) {
+        float kj0 = (float)khead[j * HD + 0];
+        float kj1 = (float)khead[j * HD + 1];
+        float kj2 = (float)khead[j * HD + 2];
+        float kj3 = (float)khead[j * HD + 3];
+        float sp = qr0 * kj0 + qr1 * kj1 + qr2 * kj2 + qr3 * kj3;
+        float s_ = simd_sum(sp);
+        float mn2 = fmax(mn, s_);
+        float corr = (mn == -INFINITY) ? 0.0f : exp(mn - mn2);
+        float pj = exp(s_ - mn2);
+        float vj0 = (float)vhead[j * HD + 0];
+        float vj1 = (float)vhead[j * HD + 1];
+        float vj2 = (float)vhead[j * HD + 2];
+        float vj3 = (float)vhead[j * HD + 3];
+        a0 = a0 * corr + pj * vj0;
+        a1 = a1 * corr + pj * vj1;
+        a2 = a2 * corr + pj * vj2;
+        a3 = a3 * corr + pj * vj3;
+        ss = ss * corr + pj;
+        mn = mn2;
+    }
+"##;
