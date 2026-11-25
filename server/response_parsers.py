@@ -635,6 +635,150 @@ class _Gemma4ToolMachine:
         return [ToolArgsDelta(self._index, "".join(chars))]
 
 
+# ── harmony (gpt-oss channel protocol, full stream) ──────────────────────────
+
+HARMONY_START = "\u003c|start|>"
+HARMONY_CHANNEL = "\u003c|channel|>"
+HARMONY_MESSAGE = "\u003c|message|>"
+HARMONY_END = "\u003c|end|>"
+HARMONY_RETURN = "\u003c|return|>"
+HARMONY_CALL = "\u003c|call|>"
+
+
+def _harmony_tool_name(recipient: str) -> str:
+    """``functions.NAME`` -> NAME; other namespaces keep their dotted path."""
+    prefix = "functions."
+    return recipient[len(prefix) :] if recipient.startswith(prefix) else recipient
+
+
+class _HarmonyMachine:
+    """Full-stream harmony protocol parser (gpt-oss channel protocol).
+
+    Output is a sequence of segments, each
+    ``<|start|>{role}[ to={recipient}]<|channel|>{channel}[ header]<|message|>{payload}``
+    terminated by ``<|end|>`` (segment), ``<|return|>`` (generation end), or
+    ``<|call|>`` (tool call executed). The generation prompt supplies the
+    leading ``<|start|>assistant``, so the model's first segment usually
+    starts at ``<|channel|>`` (both shapes parse). Payload classification by
+    channel: ``analysis`` streams as reasoning, ``final`` as content,
+    ``commentary`` with a ``to=`` recipient as one tool call (args = the raw
+    payload text, already JSON; harmony needs no gemma4-style converter),
+    ``commentary`` without one as content (preamble), unknown channels as
+    content. The ``to=`` recipient is looked up in the start header first
+    (current openai/gpt-oss template), then in the channel header (older
+    harmony variants); ``functions.NAME`` strips the namespace prefix.
+
+    This is a full-stream parser: the protocol classifies every character,
+    so ``route_text``/``route_flush`` are accepted for constructor uniformity
+    with tool machines but never called. Configure via
+    ``tool_call_parser: "harmony"`` with no reasoning parser (enforced in
+    ``ResponseParser.from_spec``). Known limits: payload text containing a
+    literal terminator token splits the segment (text-level ambiguity, same
+    class as the other machines).
+    """
+
+    FULL_STREAM = True
+
+    def __init__(
+        self,
+        route_text: Callable[[str], list[Event]] | None = None,
+        route_flush: Callable[[], list[Event]] | None = None,
+    ) -> None:
+        self._segmenter = MarkerSegmenter(
+            {
+                "start": HARMONY_START,
+                "channel": HARMONY_CHANNEL,
+                "message": HARMONY_MESSAGE,
+                "end": HARMONY_END,
+                "return": HARMONY_RETURN,
+                "call": HARMONY_CALL,
+            }
+        )
+        self._index = -1
+        self._state = "raw"  # raw | head | channel | payload | payload_tool
+        self._head = ""  # text after <|start|>: role [+ " to=recipient"]
+        self._channel_header = ""  # text after <|channel|>: channel [+ header]
+        self._mode = "content"  # payload classification: reasoning | content
+
+    def feed(self, text: str) -> list[Event]:
+        events: list[Event] = []
+        for segment in self._segmenter.feed(text):
+            if segment.kind == "marker":
+                events += self._on_marker(segment.value)
+            else:
+                events += self._on_text(segment.value)
+        return events
+
+    def finish(self) -> list[Event]:
+        events: list[Event] = []
+        for segment in self._segmenter.finish():
+            if segment.kind == "marker":
+                events += self._on_marker(segment.value)
+            else:
+                events += self._on_text(segment.value)
+        if self._state == "payload_tool":
+            events.append(ToolCallEnd(self._index))
+        self._state = "raw"
+        return events
+
+    def _on_marker(self, name: str) -> list[Event]:
+        if name == "start":
+            self._head = ""
+            self._state = "head"
+            return []
+        if name == "channel":
+            self._channel_header = ""
+            self._state = "channel"
+            return []
+        if name == "message":
+            return self._enter_payload()
+        if self._state == "payload_tool" and name in ("call", "end", "return"):
+            self._state = "raw"
+            return [ToolCallEnd(self._index)]
+        if self._state == "payload" and name in ("call", "end", "return"):
+            self._state = "raw"
+            return []
+        return []  # stray terminator / nested marker: ignored
+
+    def _on_text(self, text: str) -> list[Event]:
+        if self._state == "head":
+            self._head += text
+            return []
+        if self._state == "channel":
+            self._channel_header += text
+            return []
+        if self._state == "payload":
+            if not text:
+                return []
+            if self._mode == "reasoning":
+                return [ReasoningDelta(text)]
+            return [ContentDelta(text)]
+        if self._state == "payload_tool":
+            return [ToolArgsDelta(self._index, text)] if text else []
+        if text:  # raw: before/after any complete segment
+            return [ContentDelta(text)]
+        return []
+
+    def _enter_payload(self) -> list[Event]:
+        match = re.search(r"\b(analysis|commentary|final)\b", self._channel_header)
+        channel = match.group(1) if match else ""
+        recipient = None
+        for source in (self._head, self._channel_header):
+            found = re.search(r"\bto=([^\s<]+)", source)
+            if found:
+                recipient = found.group(1)
+                break
+        self._head = ""
+        self._channel_header = ""
+        if channel == "commentary" and recipient:
+            self._index += 1
+            self._state = "payload_tool"
+            return [ToolCallBegin(self._index, _harmony_tool_name(recipient))]
+        self._state = "payload"
+        self._mode = "reasoning" if channel == "analysis" else "content"
+        return []
+
+
 # ── registry + facade ────────────────────────────────────────────────────────
 
 REASONING_PARSERS: dict[str, Callable[[], Any]] = {
@@ -649,6 +793,13 @@ TOOL_PARSERS: dict[
     "gemma4_calls": _Gemma4ToolMachine,
 }
 
+# Full-stream formats: one machine owns the entire output (channel
+# classification is part of the protocol, so there is nothing left for a
+# separate reasoning parser to do). Resolved via ``tool_call_parser``.
+STREAM_PARSERS: dict[str, Any] = {
+    "harmony": _HarmonyMachine,
+}
+
 
 def resolve_reasoning_parser(name: str | None) -> Any | None:
     """Build a per-request reasoning parser, or None for raw passthrough."""
@@ -661,10 +812,10 @@ def resolve_reasoning_parser(name: str | None) -> Any | None:
 
 
 def resolve_tool_machine(name: str | None) -> Any | None:
-    """Tool state-machine class for a format name, or None for no tool parsing."""
+    """Tool or full-stream state-machine class, or None for no tool parsing."""
     if not name or name == "none":
         return None
-    factory = TOOL_PARSERS.get(name)
+    factory = TOOL_PARSERS.get(name) or STREAM_PARSERS.get(name)
     if factory is None:
         raise ValueError(f"unknown tool parser: {name!r}")
     return factory
@@ -691,9 +842,12 @@ class ResponseParser:
     With a tool parser configured, the tool machine owns the stream: it
     routes body text to the reasoning parser (or straight through as
     content) and turns tool markers into tool events, all in stream order.
-    Without one, text flows to the reasoning parser alone; with neither, it
-    passes through as content events so the HTTP mapping code has exactly one
-    shape to handle.
+    Full-stream machines (``harmony``) instead classify every character
+    themselves and ignore the route callbacks; configuring one together
+    with a reasoning parser is a specification error. Without a tool
+    parser, text flows to the reasoning parser alone; with neither, it
+    passes through as content events so the HTTP mapping code has exactly
+    one shape to handle.
     """
 
     def __init__(self, reasoning: Any | None = None, tool_machine: Any | None = None) -> None:
@@ -705,10 +859,15 @@ class ResponseParser:
 
     @classmethod
     def from_spec(cls, reasoning: str | None, tools: str | None) -> "ResponseParser":
-        return cls(
-            reasoning=resolve_reasoning_parser(reasoning),
-            tool_machine=resolve_tool_machine(tools),
-        )
+        reasoning_parser = resolve_reasoning_parser(reasoning)
+        machine_cls = resolve_tool_machine(tools)
+        if machine_cls is not None and getattr(machine_cls, "FULL_STREAM", False):
+            if reasoning_parser is not None:
+                raise ValueError(
+                    f"tool parser {tools!r} is a full-stream format and owns channel"
+                    " classification; set reasoning_parser to none"
+                )
+        return cls(reasoning=reasoning_parser, tool_machine=machine_cls)
 
     def _route_text(self, text: str) -> list[Event]:
         if self._reasoning is not None:

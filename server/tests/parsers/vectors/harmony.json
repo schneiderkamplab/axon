@@ -1,0 +1,87 @@
+{
+  "tool_call_parser": "harmony",
+  "note": "gpt-oss harmony protocol (full stream): segments <|start|>{role}[ to=recipient]<|channel|>{channel}[ header]<|message|>{payload} terminated by <|end|>/<|return|>/<|call|>. analysis=reasoning, final=content, commentary with to= = tool call (args raw, already JSON), commentary without = content preamble. First segment usually starts at <|channel|> (the generation prompt supplies <|start|>assistant).",
+  "cases": [
+    {
+      "name": "analysis_then_final",
+      "chunks": [
+        "<|channel|>anal",
+        "ysis<|message|>Let me compute.<|end|><|start|>assistant<|channel|>final<|message|>",
+        "The answer is 42.<|return|>"
+      ],
+      "events": [
+        ["reasoning_delta", "Let me compute."],
+        ["content_delta", "The answer is 42."]
+      ]
+    },
+    {
+      "name": "tool_call",
+      "chunks": [
+        "<|channel|>analysis<|message|>Need weather.<|end|>",
+        "<|start|>assistant to=func",
+        "tions.get_weather<|channel|>commentary json<|message|>",
+        "{\"city\": \"Oslo\"}",
+        "<|call|>"
+      ],
+      "events": [
+        ["reasoning_delta", "Need weather."],
+        ["tool_call_begin", 0, "get_weather"],
+        ["tool_args_delta", 0, "{\"city\": \"Oslo\"}"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "final_only",
+      "chunks": ["<|channel|>final<|message|>Hel", "lo!<|return|>"],
+      "events": [["content_delta", "Hel"], ["content_delta", "lo!"]]
+    },
+    {
+      "name": "token_split_channel_and_message",
+      "chunks": ["<|chan", "nel|>analysis<|mess", "age|>hi<|end|>"],
+      "events": [["reasoning_delta", "hi"]]
+    },
+    {
+      "name": "two_calls",
+      "chunks": [
+        "<|channel|>analysis<|message|>think<|end|><|start|>assistant to=functions.a<|channel|>commentary json<|message|>{\"x\": 1}<|call|><|start|>assistant to=functions.b<|channel|>commentary json<|message|>{\"y\": 2}<|call|>"
+      ],
+      "events": [
+        ["reasoning_delta", "think"],
+        ["tool_call_begin", 0, "a"],
+        ["tool_args_delta", 0, "{\"x\": 1}"],
+        ["tool_call_end", 0],
+        ["tool_call_begin", 1, "b"],
+        ["tool_args_delta", 1, "{\"y\": 2}"],
+        ["tool_call_end", 1]
+      ]
+    },
+    {
+      "name": "preamble_commentary_no_recipient",
+      "chunks": [
+        "<|start|>assistant<|channel|>commentary<|message|>Let me check.<|end|><|start|>assistant<|channel|>final<|message|>Done.<|return|>"
+      ],
+      "events": [["content_delta", "Let me check."], ["content_delta", "Done."]]
+    },
+    {
+      "name": "unclosed_call_at_eos",
+      "chunks": [
+        "<|start|>assistant to=functions.f<|channel|>commentary json<|message|>{\"a\": 1"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "f"],
+        ["tool_args_delta", 0, "{\"a\": 1"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "plain_text_no_markers",
+      "chunks": ["Just", " answer."],
+      "events": [["content_delta", "Just"], ["content_delta", " answer."]]
+    },
+    {
+      "name": "empty_analysis",
+      "chunks": ["<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>ok<|return|>"],
+      "events": [["content_delta", "ok"]]
+    }
+  ]
+}

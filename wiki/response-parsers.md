@@ -2,13 +2,14 @@
 
 Design for parsing model output into OpenAI-compatible `reasoning_content`
 and `tool_calls`, working across all models the serving layer can host.
-Status: design agreed 2026-11-25; Step 1 (think parser + vectors + chat
-surface wiring) and Step 2 (tool parsers `hermes` + `gemma4_calls`,
-reasoning parser `gemma4_thought`, combo wiring, template round-trip gate)
-landed the same day — `server/response_parsers.py`, vectors in
-`server/tests/parsers/vectors/`, CLI `--reasoning-parser` /
-`--tool-call-parser` (default off; config.json key resolution lands at
-Step 4).
+Status: design agreed 2026-11-25; Steps 1–3 landed the same day — Step 1
+(think parser + vectors + chat surface wiring), Step 2 (tool parsers
+`hermes` + `gemma4_calls`, reasoning parser `gemma4_thought`, combo wiring,
+gemma-4 template round-trip gate), Step 3 (full-stream `harmony` protocol
+parser, official gpt-oss template as ground truth). All in
+`server/response_parsers.py`, vectors in `server/tests/parsers/vectors/`,
+CLI `--reasoning-parser` / `--tool-call-parser` (default off; config.json
+key resolution lands at Step 4).
 
 ## Decisions (user, 2026-11-25)
 
@@ -87,7 +88,7 @@ machine per combo, built from one reasoning parser + one tool machine.
 |---|---|---|---|
 | `think` | HTML-style think open/close tags (&lt;think&gt; … &lt;/think&gt;) | — | the **open tag classifies reasoning**; no markers ⇒ all content (Qwen3 non-thinking); open-without-close at EOS ⇒ all reasoning (truncated think); close-without-open is stripped, not reclassified — bare-reasoning-then-close (DeepSeek-R1) is a separate `deepseek` format, deferred until such a checkpoint is hosted |
 | `hermes` | — | XML-style tool-call tags (&lt;tool_call&gt;{json}&lt;/tool_call&gt;) | JSON body `{"name","arguments"}`; multiple blocks per turn |
-| `harmony` | analysis channel | commentary channel w/ `to=functions.name` recipient | gpt-oss `<|start|>/<|channel|>/<|message|>/<|end|>/<|return|>` protocol; final channel = content |
+| `harmony` | analysis channel | commentary channel w/ `to=functions.name` recipient | gpt-oss `<|start|>/<|channel|>/<|message|>/<|end|>/<|return|>` protocol; final channel = content; **full-stream parser** (owns channel classification, `tool_call_parser` key, no reasoning parser alongside) |
 | `gemma4_thought` | `<|channel>thought ... <channel|>` | — | Bifrost/HRM-Mimir; plain-text markers |
 | `gemma4_calls` | — | `<|tool_call>call:NAME{args}<tool_call|>` | gemma-style `key:<|"|>value<|"|>` serialization; template renders the matching history side (`<|tool_response>`) |
 
@@ -99,7 +100,9 @@ parser still matches text after the marker-preserving detokenizer renders
 them — uniform code path, and the detokenizer's resolve-at-load step maps
 each marker to ids when they exist as single tokens.
 
-## Implementation notes (Step 2, 2026-11-25)
+## Implementation notes (Steps 2–3, 2026-11-25)
+
+### Step 2: tool parsers + gemma-4 pair
 
 - **gemma-4 thought framing.** The template renders history as
   `'<|channel>thought\n' + text + '\n<channel|>'` (chat_template.jinja:240).
@@ -135,6 +138,37 @@ each marker to ids when they exist as single tokens.
   gemma-4 output and re-renders the parsed message through
   `apply_chat_template` — byte-exact on both the string (inner body) and
   mapping (dict) paths, including the thought framing.
+
+### Step 3: harmony (full-stream protocol)
+
+- **Ground truth**: the official openai/gpt-oss chat template
+  (`https://huggingface.co/openai/gpt-oss-20b/raw/main/chat_template.jinja`,
+  fetched 2026-11-25; no gpt-oss checkpoint is hosted locally, so there is
+  no harmony round-trip probe yet — the vectors pin the parse contract
+  until one is hosted).
+- **Segment shape**: `<|start|>{role}[ to={recipient}]<|channel|>{channel}[ header]<|message|>{payload}` terminated by `<|end|>` / `<|return|>` / `<|call|>`. The
+  generation prompt supplies the leading `<|start|>assistant`, so the
+  model's first segment usually starts at `<|channel|>` — both shapes
+  parse. The template puts the tool recipient in the **start header**
+  (`<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>`); the parser also accepts `to=` in the channel header
+  (older harmony variants), start header first.
+- **Full-stream registry**: harmony is one protocol, so it does not
+  decompose into reasoning-parser + tool-machine composition — a third
+  registry (`STREAM_PARSERS`) holds full-stream machines, resolved via the
+  same `tool_call_parser` key; `from_spec` rejects a co-configured
+  reasoning parser (the route callbacks are never called).
+- **Classification**: `analysis` → reasoning, `final` → content,
+  `commentary` with recipient → tool call (Begin at `<|message|>` time —
+  the name is known from the header; args stream raw, already JSON, so no
+  gemma4-style converter), `commentary` without recipient → content
+  (preamble), unknown channels → content (defensive). `<|return|>` ends
+  generation but is not a hard stop (a malformed trailing call still
+  parses). Pre/post-segment text outside any segment is content — plain
+  non-harmony output degrades to passthrough.
+- **Why it is simpler than hermes/gemma4 tools**: terminators are explicit
+  markers, so args need no brace counting — the segmenter finds the end.
+  Same text-level limit as the other machines: a payload containing a
+  literal terminator token splits the segment.
 
 ## Multi-turn contract (discovered from the Bifrost template)
 

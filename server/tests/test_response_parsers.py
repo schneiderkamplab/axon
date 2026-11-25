@@ -87,6 +87,16 @@ def test_unknown_reasoning_parser_raises() -> None:
         ResponseParser.from_spec("nope", None)
 
 
+def test_full_stream_parser_rejects_reasoning_parser() -> None:
+    """harmony classifies channels itself; a reasoning parser has nothing to do."""
+    with pytest.raises(ValueError, match="full-stream"):
+        ResponseParser.from_spec("think", "harmony")
+    # Alone it builds and parses the full protocol.
+    parser = ResponseParser.from_spec(None, "harmony")
+    events = parser.feed("\u003c|channel|>analysis\u003c|message|>r\u003c|end|>")
+    assert [event_to_json(event) for event in events] == [["reasoning_delta", "r"]]
+
+
 def test_stream_delta_mapping() -> None:
     deltas = events_to_stream_deltas([ReasoningDelta("a"), ContentDelta("b")])
     assert deltas == [{"reasoning_content": "a"}, {"content": "b"}]

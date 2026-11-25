@@ -348,6 +348,23 @@ high — every claim below is gated or probe-verified today.
   Template-facts consequence: converting parsed gemma args to a dict is
   required for multi-turn re-render AND for OpenAI JSON arguments — same
   converter, queued after the parser steps.
+- **Step 3 landed (same day)**: `harmony`, the gpt-oss channel protocol,
+  as a **full-stream parser** — the protocol classifies every character
+  (analysis → reasoning, final → content, commentary + `to=` recipient →
+  tool call, commentary without → content preamble), so it does not fit
+  the composition model; new `STREAM_PARSERS` registry resolved via the
+  same `tool_call_parser` key, `from_spec` rejects a co-configured
+  reasoning parser. Ground truth: the official openai/gpt-oss chat
+  template fetched from HuggingFace (no local checkpoint — vectors pin
+  the contract; round-trip probe deferred until a checkpoint is hosted).
+  Template fact that mattered: the recipient lives in the **start header**
+  (`<|start|>assistant to=functions.NAME<|channel|>commentary
+  json<|message|>`), not the channel header; parser accepts both, start
+  first. Args terminators are explicit markers (`<|call|>`), so no brace
+  counting and no args converter (already JSON — unlike gemma4).
+  `harmony.json` 9 cases incl. hostile marker splits, two calls,
+  unclosed call at EOS, no-marker passthrough; 112/112 server tests,
+  ruff clean.
 
 ## 2026-11-23 (later) — B: fattn r4 adopted in Rust (−0.95 ms/step, 63.9 tok/s)
 
