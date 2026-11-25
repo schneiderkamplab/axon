@@ -1,0 +1,99 @@
+{
+  "note": "Response-parser vectors are the cross-implementation contract (wiki/response-parsers.md): the Python reference and the later Rust port must both satisfy these exactly. Marker strings use \\u003c JSON escapes for '<' so the exact marker bytes are unambiguous in source. Expected events are [kind, args...] as produced by response_parsers.event_to_json; the list is the concatenation of feed(chunk) outputs for every chunk in order plus finish(). Chunk boundaries deliberately split markers at hostile positions.",
+  "reasoning_parser": "think",
+  "cases": [
+    {
+      "name": "thinking-then-content-token-split",
+      "chunks": ["\u003c", "thi", "nk\u003e", "Let me work ", "through", " this.", "\u003c/thi", "nk\u003e\n\n", "The answer is 4."],
+      "events": [
+        ["reasoning_delta", "Let me work "],
+        ["reasoning_delta", "through"],
+        ["reasoning_delta", " this."],
+        ["content_delta", "\n\n"],
+        ["content_delta", "The answer is 4."]
+      ]
+    },
+    {
+      "name": "no-markers-non-thinking",
+      "chunks": ["Hello", " world", "!"],
+      "events": [
+        ["content_delta", "Hello"],
+        ["content_delta", " world"],
+        ["content_delta", "!"]
+      ]
+    },
+    {
+      "name": "open-without-close-eos",
+      "chunks": ["\u003cthink\u003eRea", "soning ", "fore", "ver"],
+      "events": [
+        ["reasoning_delta", "Rea"],
+        ["reasoning_delta", "soning "],
+        ["reasoning_delta", "fore"],
+        ["reasoning_delta", "ver"]
+      ]
+    },
+    {
+      "name": "close-without-open-stripped",
+      "chunks": ["Sure.", "\u003c/think\u003e", " Done"],
+      "events": [
+        ["content_delta", "Sure."],
+        ["content_delta", " Done"]
+      ]
+    },
+    {
+      "name": "leading-split-open",
+      "chunks": [" ", "\u003cthink", ">\n", "hmm"],
+      "events": [
+        ["content_delta", " "],
+        ["reasoning_delta", "\n"],
+        ["reasoning_delta", "hmm"]
+      ]
+    },
+    {
+      "name": "marker-split-every-char",
+      "chunks": ["\u003c", "t", "h", "i", "n", "k", ">", "a", "b"],
+      "events": [
+        ["reasoning_delta", "a"],
+        ["reasoning_delta", "b"]
+      ]
+    },
+    {
+      "name": "empty-input",
+      "chunks": [],
+      "events": []
+    },
+    {
+      "name": "open-after-content-started",
+      "chunks": ["Answer: 42. ", "\u003cthink\u003e", "wait"],
+      "events": [
+        ["content_delta", "Answer: 42. "],
+        ["reasoning_delta", "wait"]
+      ]
+    },
+    {
+      "name": "second-close-in-content-stripped",
+      "chunks": ["\u003cthink\u003ethink", "\u003c/think\u003e", "ans ", "\u003c/think\u003e", "more"],
+      "events": [
+        ["reasoning_delta", "think"],
+        ["content_delta", "ans "],
+        ["content_delta", "more"]
+      ]
+    },
+    {
+      "name": "unicode-reasoning",
+      "chunks": ["\u003cthink\u003e", "æøå ", "\u003c/think\u003e", "svar"],
+      "events": [
+        ["reasoning_delta", "æøå "],
+        ["content_delta", "svar"]
+      ]
+    },
+    {
+      "name": "holdback-flush-at-eos",
+      "chunks": ["\u003cthink\u003eabc\u003cthin"],
+      "events": [
+        ["reasoning_delta", "abc"],
+        ["reasoning_delta", "\u003cthin"]
+      ]
+    }
+  ]
+}

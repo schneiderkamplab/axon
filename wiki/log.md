@@ -212,14 +212,142 @@ high — every claim below is gated or probe-verified today.
   `shapeless=True` crashes (`Slice cannot infer output shapes`), and it
   shifts logits by up to Δ=4.75 (near-tie parity would need re-establishing).
   The uncompiled gather_mm artifact is the endpoint.
-- **New known bug (latent, unfixed)**: padded batch forward diverges from
-  sequential — max|Δ|=4.125 **on the row with zero padding** (batch
-  composition alone changes outputs) → the artifact's batched attention
-  path is suspect; server only sends [1,S] today so it is not
-  user-visible. Batching is also *slower* post-gather_mm (padded rows
-  multiply gather work: 125 vs 59 ms) — do not batch this path; fix the
-  attention bug only if batch classification becomes a requirement.
+- **RESOLVED 2026-11-24 — not a bug: shape-dependent kernel numerics.**
+  `probe-batch-shape-parity.py` discriminator matrix: same-shape rerun B=1
+  is bit-exact (0.000000); B=3 of the *same text, zero padding* reproduces
+  max|Δ|=4.125 exactly (B=2 gives 4.250 — not monotonic in B); identical
+  rows within one batch are bit-exact. The artifact's S>1 attention builds
+  masks from positions only (`banded_mask_for_input` is dead code), which is
+  mathematically safe for pad-right batching — the delta is MLX GEMM
+  tiling/accumulation order changing with the M dimension (B·S), amplified
+  through 8 bf16 layers onto logits (scale ~28). Label impact measured
+  (`probe-batch-label-impact.py`): argmax and Viterbi paths identical on
+  all three probe rows — batching is numerically safe for classify labels.
+  We still serve [1,S] because batching is *slower* post-gather_mm (125 vs
+  59 ms). Same mechanism explains the Bifrost fp16 stepwise-vs-batched
+  prefill flips (11/24): execution-shape contract, not a KV-dtype bug.
 
+
+## 2026-11-24 — batch divergence root-caused; C = order-preserving batched prefill
+
+- **Batch divergence root cause (supersedes "latent bug" framing):** pure
+  shape-dependent kernel numerics. Discriminator matrix
+  (`probe-batch-shape-parity.py`): same-shape rerun bit-exact; B=3 same-text
+  zero-padding reproduces Δ=4.125 exactly (B=2 → 4.250, not monotonic);
+  identical rows within a batch bit-exact. MLX GEMM tiling changes with the
+  M dimension; bf16 rounding diffs amplify through depth. Label impact zero
+  (`probe-batch-label-impact.py`: argmax + Viterbi identical on all rows).
+  The artifact's S>1 masks are position-based and pad-right-safe;
+  `banded_mask_for_input` is dead code.
+- **Deeper finding:** the server's batched prefill (`backend.forward`,
+  plain MLX ops incl. SDPA) is a *different op set* than the engine/reference
+  step (q4 gemv family + fattn r4) — the 11/24 `probe_prefill_parity.py`
+  flips are server-vs-engine op-set differences, not a KV-dtype issue.
+- **Decision (user direction: keep the compiler fully general):** C proceeds
+  as **order-preserving batched prefill** — no reference re-anchor. Build
+  M=S prefill kernels whose per-output accumulation order matches the M=1
+  decode kernels exactly (q4 GEMM mirroring the gemv group-loop; attention
+  reuses fattn r4 per query row, which is bitwise-identical given written
+  KV; elementwise/rope/norm are order-free). Then batched ≡ stepwise
+  bitwise *by construction*: `gen_ref.py` and `tests/generate` stay valid
+  unchanged, and the engine gains ~0.47 s/request (prefill stops paying
+  full decode-step cost per prompt token; 28 tokens × ~16.7 ms today).
+  New Rust self-consistency gate: batched-prefill KV + last logits ==
+  stepwise-prefill KV + last logits, bitwise.
+- First milestone: Python-side prototype of the M=S q4 GEMM in
+  `kernel_qgemv.py` style, bitwise A/B vs the gemv kernels on Bifrost
+  shapes, before any Rust port.
+
+## 2026-11-25 — Phase 1 gate PASS: order-preserving M=S q4 GEMM
+
+- `log/bifrost-mlx/kernel_qgemm.py`: v6/v6r/v7b/v8a M=S siblings derived
+  MECHANICALLY from the `_V*_SOURCE` strings by counted string surgery
+  (insert `mrow` from grid.y + row-base offsets; assert every replacement
+  count). `probe_qgemm_order.py`: on real Bifrost packs (gqkv 6144×1536,
+  o 1536×1536, down 1536×4096, lm_head 262144×1536), batched output is
+  **bitwise identical** to the per-row M=1 kernel loop at every
+  M ∈ {1, 2, 28, 128, 512} — all variants PASS. Steady-state timing favors
+  batched throughout (o_proj M=512: 20.7 → 2.6 ms; gqkv: 14.1 → 7.6 ms;
+  first-call rows are kernel-compile artifacts).
+- **The v7b `x_shape[0]` quirk**: the fused-rms gemv reads its row length
+  from x's shape — harmless for 1D decode inputs, silently wrong for 2D
+  batched inputs (denominator becomes M). The derivation rewrites it to
+  `x_shape[1]` with a counted assert. This is the exact failure class the
+  mechanical-derivation + bitwise-gate approach exists to catch — a hand
+  Rust port could have shipped it invisibly.
+
+## 2026-11-25 — Cross-model response parsers: design agreed
+
+- User decisions (via decision page): **explicit config keys** for the
+  parser spec (`config.json` → `reasoning_parser` / `tool_call_parser`,
+  absent = raw passthrough, no auto-detection); first pass covers
+  `think`, `hermes`, `harmony` **plus the gemma-4 pair** (user note:
+  HRM-Mimir and Bifrost need the gemma-4 chat template, so serving them
+  with thinking/tools needs `gemma4_thought` + `gemma4_calls` from day
+  one). Design page: `wiki/response-parsers.md`.
+- Facts established while writing the design:
+  - Bifrost's `tokenizer_config.json` declares **zero special tokens** —
+    every marker (`<|turn>`, `<|channel>thought`, `<|tool_call>call:`) is
+    plain text split arbitrarily across BPE tokens. Parsing must therefore
+    be text-based with holdback; no token-id dispatch exists for this
+    family (harmony's single-token specials still go through the same
+    text matcher for uniformity).
+  - The current `rust/.../chat_template.rs` is a hand-port of the gemma-4
+    template (`models/hrm_text/bifrost_v05/chat_template.jinja`) — this is
+    what "needs gemma 4 chattemplate" refers to; minijinja at R1 makes it
+    generic, gemma-4 family first.
+  - The gemma-4 template's `strip_thinking` + `reasoning`/`reasoning_content`
+    re-injection defines the multi-turn contract the parser must keep
+    round-trip-consistent (vector-tested).
+- Server today: raw text deltas only — no `reasoning_content`, no
+  `tool_calls` anywhere in `server/`. The parser layer is new surface;
+  Python reference first (`server/response_parsers.py` + shared JSON
+  vectors), Rust port second with a parity gate.
+- **Step 1 landed (same day)**: `server/response_parsers.py` —
+  `MarkerSegmenter` (earliest-match + longest-suffix holdback), event
+  dataclasses, OpenAI mapping helpers, `ParserSpec`; `ThinkReasoningParser`
+  on top. Vectors: `server/tests/parsers/vectors/think.json`, 11 cases with
+  markers split at hostile boundaries (`\u003c` JSON escapes keep the
+  marker bytes exact) plus a chunking-invariance property test. Wired into
+  the chat surface default-off: SSE deltas and the non-stream message route
+  through the parser when `--reasoning-parser` is set; `/v1/completions`
+  keeps raw completion semantics. 103/103 server tests pass. One contract
+  refinement fell out of implementation: think requires the OPEN tag to
+  classify reasoning — text streamed before a close-without-open cannot be
+  retroactively reclassified, so R1-style bare reasoning needs its own
+  `deepseek` format (deferred).
+- **Step 2 landed (same day)**: tool parsers + the gemma-4 pair + combo
+  wiring. `server/response_parsers.py` now has a generalized
+  `_ToggleReasoningParser` (think + `gemma4_thought` subclasses; gemma-4
+  open stays bare, framing newlines consumed by close marker
+  `\n<channel|>` + one-shot leading-newline trim), and two tool machines,
+  each owning its own marker segmenter and routing body text to the
+  reasoning parser (combo = composition in stream order, not two parsers
+  racing): `_HermesToolMachine` (head buffered until the `"arguments"` key
+  + colon completes so the name is extractable; args streamed by
+  string/escape-aware brace counting; scalar fallback) and
+  `_Gemma4ToolMachine` (template-exact `<|tool_call>call:NAME{args}`; args
+  streamed raw incl. outer braces; the `<|"|>` quote token toggles string
+  state so braces inside quoted values stay literal). Vectors:
+  `hermes.json` (8 cases), `combo_think_hermes.json` (2), `gemma4.json`
+  (7) — 109/109 server tests, ruff clean.
+- The gemma4 vector caught a real design bug before it shipped: when the
+  tool machine removes a block from the text stream, the reasoning
+  parser's held marker-prefix never resolves (its continuation became
+  block interior), so a held `\n` that could open `\n<channel|>` would
+  merge across the removed block. Fix: block-boundary flush —
+  `MarkerSegmenter.flush_text()` + reasoning `.flush()`, invoked by the
+  tool machine at every tool-open (the raw stream continuing with a tool
+  marker proves the held suffix is not a reasoning marker).
+- Round-trip gate `log/parsers/probe_gemma4_roundtrip.py` (probe, not
+  pytest — loads the real bifrost_v05 tokenizer/template): parsed gemma-4
+  output re-renders through `apply_chat_template` byte-identically on both
+  the args-string path (template expects the INNER body — it adds the
+  braces itself at lines 246/257) and the args-mapping path
+  (`dictsort` + `format_argument`: strings quoted `<|"|>`, numbers bare).
+  Template-facts consequence: converting parsed gemma args to a dict is
+  required for multi-turn re-render AND for OpenAI JSON arguments — same
+  converter, queued after the parser steps.
 
 ## 2026-11-23 (later) — B: fattn r4 adopted in Rust (−0.95 ms/step, 63.9 tok/s)
 

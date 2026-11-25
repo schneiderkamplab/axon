@@ -1,0 +1,37 @@
+{
+  "reasoning_parser": "think",
+  "tool_call_parser": "hermes",
+  "note": "Qwen3-style combo: think tags classify reasoning, hermes blocks emit tool calls; the tool machine routes body text to the reasoning parser in stream order.",
+  "cases": [
+    {
+      "name": "think_then_call",
+      "chunks": [
+        "\u003cthink\u003eI should call",
+        " the tool\u003c/think\u003e",
+        "\u003ctool_call\u003e{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Oslo\"}}\u003c/tool_call\u003e",
+        "Done"
+      ],
+      "events": [
+        ["reasoning_delta", "I should call"],
+        ["reasoning_delta", " the tool"],
+        ["tool_call_begin", 0, "get_weather"],
+        ["tool_args_delta", 0, "{\"city\": \"Oslo\"}"],
+        ["tool_call_end", 0],
+        ["content_delta", "Done"]
+      ]
+    },
+    {
+      "name": "no_think_markers_with_call",
+      "chunks": [
+        "Answer: ",
+        "\u003ctool_call\u003e{\"name\": \"f\", \"arguments\": {}}\u003c/tool_call\u003e"
+      ],
+      "events": [
+        ["content_delta", "Answer: "],
+        ["tool_call_begin", 0, "f"],
+        ["tool_args_delta", 0, "{}"],
+        ["tool_call_end", 0]
+      ]
+    }
+  ]
+}

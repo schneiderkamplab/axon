@@ -1,0 +1,80 @@
+{
+  "reasoning_parser": "gemma4_thought",
+  "tool_call_parser": "gemma4_calls",
+  "note": "Bifrost/gemma-4 combo: <|channel\u003ethought blocks with template framing newlines consumed (close marker \\n<channel|\u003e plus one-shot leading-newline trim), tool calls as <|tool_call\u003ecall:NAME{args}<tool_call| with gemma-style quoted args.",
+  "cases": [
+    {
+      "name": "thought_then_call",
+      "chunks": [
+        "\u003c|channel\u003ethought\nStep one: add.\n\u003cchannel|\u003e",
+        "\n\u003c|tool_call\u003ecall:add{a:1,b:2}\u003ctool_call|\u003e = 3"
+      ],
+      "events": [
+        ["reasoning_delta", "Step one: add."],
+        ["content_delta", "\n"],
+        ["tool_call_begin", 0, "add"],
+        ["tool_args_delta", 0, "{a:1,b:2}"],
+        ["tool_call_end", 0],
+        ["content_delta", " = 3"]
+      ]
+    },
+    {
+      "name": "call_only",
+      "chunks": ["\u003c|tool_call\u003ecall:ping{}\u003ctool_call|\u003e"],
+      "events": [
+        ["tool_call_begin", 0, "ping"],
+        ["tool_args_delta", 0, "{}"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "token_split",
+      "chunks": [
+        "\u003c|tool_",
+        "call\u003ecall:ad",
+        "d{a:",
+        "1,b:2}\u003ctool",
+        "_call|\u003e"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "add"],
+        ["tool_args_delta", 0, "{a:"],
+        ["tool_args_delta", 0, "1,b:2}"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "quoted_value_with_braces",
+      "chunks": ["\u003c|tool_call\u003ecall:echo{t:\u003c|\"|\u003e{}\u003c|\"|\u003e}\u003ctool_call|\u003e"],
+      "events": [
+        ["tool_call_begin", 0, "echo"],
+        ["tool_args_delta", 0, "{t:\u003c|\"|>{}\u003c|\"|>}"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "thought_unclosed_at_eos",
+      "chunks": ["\u003c|channel\u003ethought", " still going"],
+      "events": [["reasoning_delta", " still going"]]
+    },
+    {
+      "name": "empty_thought",
+      "chunks": ["\u003c|channel\u003ethought\n\n\u003cchannel|\u003e"],
+      "events": []
+    },
+    {
+      "name": "two_calls",
+      "chunks": [
+        "\u003c|tool_call\u003ecall:a{a:1}\u003ctool_call|\u003e\u003c|tool_call\u003ecall:b{b:2}\u003ctool_call|\u003e"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "a"],
+        ["tool_args_delta", 0, "{a:1}"],
+        ["tool_call_end", 0],
+        ["tool_call_begin", 1, "b"],
+        ["tool_args_delta", 1, "{b:2}"],
+        ["tool_call_end", 1]
+      ]
+    }
+  ]
+}

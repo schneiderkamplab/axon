@@ -1,0 +1,110 @@
+{
+  "tool_call_parser": "hermes",
+  "note": "Hermes tool-call blocks: <tool_call\\u003e around one JSON object each; head buffered until the arguments key completes, args streamed by JSON-aware brace counting.",
+  "cases": [
+    {
+      "name": "simple_call",
+      "chunks": [
+        "\u003ctool_call\u003e\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Oslo\"}}\n\u003c/tool_call\u003e",
+        " Done"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "get_weather"],
+        ["tool_args_delta", 0, "{\"city\": \"Oslo\"}"],
+        ["tool_call_end", 0],
+        ["content_delta", " Done"]
+      ]
+    },
+    {
+      "name": "token_split_everywhere",
+      "chunks": [
+        "\u003ctoo",
+        "l_call\u003e\n{\"na",
+        "me\": \"get",
+        "_weather\", \"argu",
+        "ments\": {\"ci",
+        "ty\": \"Osl",
+        "o\"}}\n\u003c/tool",
+        "_call\u003e",
+        " Done"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "get_weather"],
+        ["tool_args_delta", 0, "{\"ci"],
+        ["tool_args_delta", 0, "ty\": \"Osl"],
+        ["tool_args_delta", 0, "o\"}"],
+        ["tool_call_end", 0],
+        ["content_delta", " Done"]
+      ]
+    },
+    {
+      "name": "plain_text_no_blocks",
+      "chunks": ["Just", " answer."],
+      "events": [["content_delta", "Just"], ["content_delta", " answer."]]
+    },
+    {
+      "name": "two_calls",
+      "chunks": [
+        "\u003ctool_call\u003e{\"name\": \"a\", \"arguments\": {\"x\": 1}}\u003c/tool_call\u003e",
+        "\u003ctool_call\u003e{\"name\": \"b\", \"arguments\": {}}\u003c/tool_call\u003e",
+        "!"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "a"],
+        ["tool_args_delta", 0, "{\"x\": 1}"],
+        ["tool_call_end", 0],
+        ["tool_call_begin", 1, "b"],
+        ["tool_args_delta", 1, "{}"],
+        ["tool_call_end", 1],
+        ["content_delta", "!"]
+      ]
+    },
+    {
+      "name": "empty_arguments",
+      "chunks": [
+        "\u003ctool_call\u003e",
+        "\n{\"name\": \"ping\", \"arguments\": {}\n",
+        "\u003c/tool_call\u003e"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "ping"],
+        ["tool_args_delta", 0, "{}"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "unclosed_block_at_eos",
+      "chunks": [
+        "\u003ctool_call\u003e",
+        "{\"name\": \"f\", \"arguments\": {\"a\": 1"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "f"],
+        ["tool_args_delta", 0, "{\"a\": 1"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "scalar_arguments_fallback",
+      "chunks": [
+        "\u003ctool_call\u003e{\"name\": \"f\", \"arguments\": 42}\u003c/tool_call\u003e"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "f"],
+        ["tool_args_delta", 0, "42}"],
+        ["tool_call_end", 0]
+      ]
+    },
+    {
+      "name": "escaped_name",
+      "chunks": [
+        "\u003ctool_call\u003e\n{\"name\": \"wea\\\"ther\", \"arguments\": {}}\n\u003c/tool_call\u003e"
+      ],
+      "events": [
+        ["tool_call_begin", 0, "wea\"ther"],
+        ["tool_args_delta", 0, "{}"],
+        ["tool_call_end", 0]
+      ]
+    }
+  ]
+}

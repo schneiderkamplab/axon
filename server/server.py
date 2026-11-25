@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
 from .engine import GenerateParams, Session
+from .response_parsers import ParserSpec, chat_stream_events, parse_full_text
 
 if TYPE_CHECKING:
     from .fleet.session import FleetSession
@@ -102,6 +103,7 @@ class _ServeState:
         *,
         kind: str = "generation",
         classify: Any | None = None,
+        parsers: ParserSpec | None = None,
     ) -> None:
         self.session = session
         self.model_name = model_name
@@ -109,6 +111,7 @@ class _ServeState:
         self.slots = threading.BoundedSemaphore(self.max_concurrency)
         self.kind = kind
         self.classify = classify
+        self.parsers = parsers
 
     @property
     def task(self) -> str:
@@ -135,9 +138,16 @@ def _sse_chunks(state: _ServeState, kind: str, prompt: str, body: dict[str, Any]
         return f"data: {json.dumps(payload)}\n\n"
 
     stats: dict[str, Any] = {}
+    # Response parsers apply to the chat surface only; /v1/completions keeps
+    # raw completion semantics. parser=None → plain {"content": ...} deltas,
+    # byte-identical to the pre-parser behavior.
+    parser = state.parsers.build() if kind == "chat" and state.parsers else None
     yield chunk({"role": "assistant"} if kind == "chat" else {})
     for text in state.session.generate(prompt, params, stats):
-        yield chunk({"content": text})
+        for delta in chat_stream_events(parser, text):
+            yield chunk(delta)
+    for delta in chat_stream_events(parser, "", finish=True):
+        yield chunk(delta)
     yield chunk({}, finish_reason=stats.get("finish_reason", "stop"))
     if include_usage:
         prompt_tokens = int(stats.get("prompt_tokens", 0))
@@ -313,6 +323,9 @@ class _Handler(BaseHTTPRequestHandler):
             payload = _full_completion(self.state, prompt, body)
         if kind == "chat":
             text = payload["choices"][0]["text"]
+            message: dict[str, Any] = {"role": "assistant", "content": text}
+            if self.state.parsers:
+                message = parse_full_text(self.state.parsers.build(), text)
             payload = {
                 "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
                 "object": "chat.completion",
@@ -320,7 +333,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": text},
+                        "message": message,
                         "finish_reason": payload["choices"][0]["finish_reason"],
                     }
                 ],
@@ -433,6 +446,8 @@ def serve(
     num_kvcache_blocks: int | None = None,
     pool_memory_fraction: float | None = None,
     kv_kernel: str | None = None,
+    reasoning_parser: str | None = None,
+    tool_call_parser: str | None = None,
 ) -> None:
     """Load the model and block serving requests (Ctrl+C to stop).
 
@@ -460,6 +475,11 @@ def serve(
     )
     is_classifier = is_token_classifier(load_model_config(checkpoint))
     model_name = Path(axon_path).stem
+    parsers = (
+        ParserSpec(reasoning_parser, tool_call_parser)
+        if reasoning_parser or tool_call_parser
+        else None
+    )
 
     if engine == "fleet":
         if is_classifier:
@@ -478,7 +498,7 @@ def serve(
             pool_memory_fraction=pool_memory_fraction,
             kv_kernel=kv_kernel,
         )
-        state = _ServeState(session, model_name, max_concurrency)
+        state = _ServeState(session, model_name, max_concurrency, parsers=parsers)
     elif engine == "session":
         if device is not None:
             raise ValueError(
@@ -518,7 +538,7 @@ def serve(
                 emit_profile="inference",
                 warm_compile=warm_compile,
             )
-            state = _ServeState(session, model_name, max_concurrency)
+            state = _ServeState(session, model_name, max_concurrency, parsers=parsers)
     else:
         raise ValueError(
             f"unknown engine {engine!r}: expected 'session' or 'fleet'"
@@ -558,6 +578,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--num-kvcache-blocks", type=int, default=None, help="fleet: KV pool blocks (default: sized from device memory minus weights)")
     parser.add_argument("--pool-memory-fraction", type=float, default=None, help="fleet: fraction of the device's recommended memory for weights + KV pool (default 0.6)")
     parser.add_argument("--kv-kernel", choices=["torch", "metal"], default=None, help="fleet: decode-attention kernel over the paged pool (default torch; metal = fused Metal kernel, mps + bf16/f32 pools + power-of-two block size)")
+    parser.add_argument("--reasoning-parser", default=None, help="reasoning output format to parse (e.g. think); default: none (raw text)")
+    parser.add_argument("--tool-call-parser", default=None, help="tool-call output format to parse (e.g. hermes); default: none (raw text)")
     parser.add_argument("--no-warm-compile", action="store_true")
     args = parser.parse_args(argv)
     serve(
@@ -575,6 +597,8 @@ def main(argv: list[str] | None = None) -> None:
         num_kvcache_blocks=args.num_kvcache_blocks,
         pool_memory_fraction=args.pool_memory_fraction,
         kv_kernel=args.kv_kernel,
+        reasoning_parser=args.reasoning_parser,
+        tool_call_parser=args.tool_call_parser,
     )
 
 
