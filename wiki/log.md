@@ -523,3 +523,23 @@ high — every claim below is gated or probe-verified today.
 - New probe: `log/bifrost-mlx/probe_prefill_parity.py` — quantifies
   batched-vs-stepwise prefill divergence: 11/24 prompts diverge at greedy,
   flips also mid-generation (batched prefill writes different fp16 KV).
+
+## 2026-11-26 — remote GPU serving gates online (python server, torch/CUDA)
+
+- SDU UCloud box (RTX PRO 6000 Blackwell 96 GB) aligned to `feat/axon-server`
+  via worktree `/work/dfm/jacobwashere/axon-gates`; suite green there after
+  three portability fixes (lazy mlx import in classify; two Mac-assumptive
+  tests). Runbook + quirks in `wiki/remote-gates.md` (new topic page).
+- Offline gate (canonical axon-benchmark, cuda:0, float32, max_len 256): 8/8
+  checkpoint pairs parity-green across five families (smollm2-135m,
+  llama3.2-1b, gemma3-1b, olmo2-1b, qwen2.5-0.5b); Axon within 4–11% of HF
+  eager generate. Evidence: `log/remote-small-20261126/` on the box.
+- Online gate reached: fleet engine + paged attention served Qwen2.5-0.5B over
+  HTTP on cuda:0 — solo 39 tok/s vs 40.95 offline standalone (≈5% serving
+  tax), 4-concurrent 153 tok/s aggregate. First family gated end-to-end
+  offline+online outside Apple Silicon.
+- Three serving-generalization fixes landed to get there (paged KV trace
+  through specialized repeat clones; vacuous full-capacity mask window
+  dropped; qwen2 artifact moved to the config-driven qwen3 style so the block
+  module survives optimize), plus the fleet KV-pool dtype binding. Details and
+  follow-up list in `wiki/remote-gates.md`.
