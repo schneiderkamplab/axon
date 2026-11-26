@@ -42,7 +42,11 @@ def _device_memory_budget(device: torch.device) -> int:
     if device.type == "mps":
         return int(torch.mps.recommended_max_memory())
     if device.type == "cuda":
-        return int(torch.cuda.get_device_properties(device).total_memory)
+        # Available, not total: a co-tenant (a stale server, a notebook) can
+        # hold most of the device — budgeting total then OOMs at pool
+        # creation. mem_get_info's free bytes are the honest ceiling.
+        free, _total = torch.cuda.mem_get_info(device)
+        return int(free)
     if device.type == "cpu":
         page_size = os.sysconf("SC_PAGE_SIZE")
         page_count = os.sysconf("SC_PHYS_PAGES")
