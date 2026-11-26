@@ -26,7 +26,7 @@ import torch
 
 from ..config import Config
 from ..layers.sampler import Sampler
-from ..utils.context import get_context, reset_context, set_context
+from ..utils.context import reset_context, set_context
 from .sequence import Sequence
 
 __all__ = ["ModelRunner"]
@@ -89,6 +89,11 @@ class ModelRunner:
                 hf_config.num_hidden_layers, num_kv_heads, head_dim
             )
         assert config.num_kvcache_blocks > 0
+        # The pool must match the model's actual dtype: hf_config.dtype is the
+        # checkpoint's declared torch_dtype, but the server may have loaded the
+        # weights with an explicit --dtype override — a float32 model against a
+        # bfloat16 pool fails SDPA with a dtype mismatch at the first prefill.
+        model_dtype = next((p.dtype for p in self.model.parameters()), hf_config.dtype)
         self.kv_cache = torch.empty(
             2,
             hf_config.num_hidden_layers,
@@ -96,7 +101,7 @@ class ModelRunner:
             self.block_size,
             num_kv_heads,
             head_dim,
-            dtype=hf_config.dtype,
+            dtype=model_dtype,
             device=self.device,
         )
         bound = 0
@@ -138,7 +143,7 @@ class ModelRunner:
         """
         bytes_per_block = (
             num_layers * 2 * num_kv_heads * head_dim * self.block_size
-            * self.config.hf_config.dtype.itemsize
+            * next((p.dtype for p in self.model.parameters()), self.config.hf_config.dtype).itemsize
         )
         fraction = self.config.pool_memory_fraction
         budget = _device_memory_budget(self.device)
