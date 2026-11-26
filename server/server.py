@@ -452,6 +452,7 @@ def serve(
     num_kvcache_blocks: int | None = None,
     pool_memory_fraction: float | None = None,
     kv_kernel: str | None = None,
+    backend: str = "mlx",
     reasoning_parser: str | None = None,
     tool_call_parser: str | None = None,
 ) -> None:
@@ -466,8 +467,9 @@ def serve(
     torch paths float32 (CPU-safe) unless given explicitly; the classifier
     follows the checkpoint's declared dtype. ``device`` places the
     fleet engine's torch model (default cpu); the session engine selects its
-    backend — and with it the device — implicitly, so an explicit device
-    there is rejected rather than silently ignored. ``max_model_len`` /
+    backend implicitly (``backend="mlx"``), so an explicit device there is
+    rejected rather than silently ignored — ``backend="torch"`` accepts and
+    requires one. ``max_model_len`` /
     ``max_num_seqs`` / ``num_kvcache_blocks`` / ``pool_memory_fraction`` /
     ``kv_kernel`` are fleet-only; left unset the pool sizes itself from the
     device's recommended memory minus the resident weights and decode runs
@@ -506,11 +508,16 @@ def serve(
         )
         state = _ServeState(session, model_name, max_concurrency, parsers=parsers)
     elif engine == "session":
-        if device is not None:
+        if device is not None and backend != "torch":
             raise ValueError(
                 "--device applies to the fleet engine; the session engine picks "
-                "its backend (and device) implicitly"
+                "its backend (and device) implicitly — pass --backend torch to "
+                "place a torch session explicitly"
             )
+        if backend != "mlx" and backend != "torch":
+            raise ValueError(f"unknown session backend {backend!r}: expected 'mlx' or 'torch'")
+        if backend == "torch" and device is None:
+            raise ValueError("--backend torch requires --device (e.g. --device cuda:0)")
         fleet_only = (
             max_model_len is not None or max_num_seqs is not None
             or num_kvcache_blocks is not None or pool_memory_fraction is not None
@@ -540,9 +547,11 @@ def serve(
             session = Session.from_axon(
                 axon_path,
                 checkpoint_dir=checkpoint_dir,
+                backend=backend,
                 dtype=dtype,
                 emit_profile="inference",
                 warm_compile=warm_compile,
+                device=device or "cpu",
             )
             state = _ServeState(session, model_name, max_concurrency, parsers=parsers)
     else:
@@ -581,6 +590,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-concurrency", type=int, default=2)
     parser.add_argument("--dtype", default=None, help="float16 on MLX, float32 on torch by default")
+    parser.add_argument("--backend", choices=["mlx", "torch"], default="mlx", help="session engine backend (default mlx; torch requires --device)")
     parser.add_argument("--device", default=None, help="torch device for the fleet engine (default cpu)")
     parser.add_argument("--max-model-len", type=int, default=None, help="fleet: maximum sequence length (default: 4096, capped by the checkpoint)")
     parser.add_argument("--max-num-seqs", type=int, default=None, help="fleet: maximum concurrent sequences in the engine (default 512)")
@@ -601,6 +611,7 @@ def main(argv: list[str] | None = None) -> None:
         dtype=args.dtype,
         warm_compile=not args.no_warm_compile,
         device=args.device,
+        backend=args.backend,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
         num_kvcache_blocks=args.num_kvcache_blocks,
