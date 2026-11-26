@@ -57,6 +57,25 @@ def _device_memory_budget(device: torch.device) -> int:
     )
 
 
+def _model_weight_dtype(model: Any, fallback: torch.dtype) -> torch.dtype:
+    """The dtype the model actually computes in.
+
+    Serving artifacts hold weights as plain tensors in ``state_dict_tensors``
+    (not ``nn.Parameters``), so check parameters first, then the state-dict
+    tensors, then buffers; ``fallback`` (the checkpoint's declared
+    torch_dtype) only when the model exposes no weights at all.
+    """
+    for parameter in model.parameters():
+        return parameter.dtype
+    state = getattr(model, "state_dict_tensors", None) or {}
+    for tensor in state.values():
+        if torch.is_tensor(tensor):
+            return tensor.dtype
+    for buffer in model.buffers():
+        return buffer.dtype
+    return fallback
+
+
 class ModelRunner:
 
     def __init__(self, config: Config, model: Any) -> None:
@@ -93,7 +112,9 @@ class ModelRunner:
         # checkpoint's declared torch_dtype, but the server may have loaded the
         # weights with an explicit --dtype override — a float32 model against a
         # bfloat16 pool fails SDPA with a dtype mismatch at the first prefill.
-        model_dtype = next((p.dtype for p in self.model.parameters()), hf_config.dtype)
+        # Serving artifacts hold weights as plain tensors in state_dict_tensors
+        # (not nn.Parameters), so check both.
+        model_dtype = _model_weight_dtype(self.model, hf_config.dtype)
         self.kv_cache = torch.empty(
             2,
             hf_config.num_hidden_layers,
@@ -143,7 +164,7 @@ class ModelRunner:
         """
         bytes_per_block = (
             num_layers * 2 * num_kv_heads * head_dim * self.block_size
-            * next((p.dtype for p in self.model.parameters()), self.config.hf_config.dtype).itemsize
+            * _model_weight_dtype(self.model, self.config.hf_config.dtype).itemsize
         )
         fraction = self.config.pool_memory_fraction
         budget = _device_memory_budget(self.device)
