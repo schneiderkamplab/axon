@@ -130,12 +130,16 @@ def test_unknown_accelerator_raises():
         # on CPU/MPS-only hosts it must be rejected loudly.
         with pytest.raises(ValueError, match="unknown PagedAttention accelerator"):
             PagedAttention(HQ, HKV, D, accelerator="cuda")
-    with pytest.raises(ValueError, match="unknown paged-attention accelerator"):
-        paged_attention(
-            torch.zeros(1, HQ, D), torch.zeros(1, HKV, D), torch.zeros(1, HKV, D),
-            torch.zeros(2, BS, HKV, D), torch.zeros(2, BS, HKV, D),
-            num_heads=HQ, num_kv_heads=HKV, head_dim=D, accelerator="mteal",
-        )
+    set_context(False)  # decode: dispatch reaches the accelerator check even
+    try:  # if an earlier test leaked a prefill context into the global state
+        with pytest.raises(ValueError, match="unknown paged-attention accelerator"):
+            paged_attention(
+                torch.zeros(1, HQ, D), torch.zeros(1, HKV, D), torch.zeros(1, HKV, D),
+                torch.zeros(2, BS, HKV, D), torch.zeros(2, BS, HKV, D),
+                num_heads=HQ, num_kv_heads=HKV, head_dim=D, accelerator="mteal",
+            )
+    finally:
+        reset_context()
 
 
 @_requires_mps
