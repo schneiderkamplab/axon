@@ -24,36 +24,36 @@ import NN
 
 import Tensor
 
-MODEL_DIM <- ((2048 :: Dim) :: Dim)
+MODEL_DIM <- ((Config.dim@@hidden_size default=2048) :: Dim)
 
-VOCAB_SIZE <- ((128256 :: Dim) :: Dim)
+VOCAB_SIZE <- ((Config.dim@@vocab_size default=128256) :: Dim)
 
-NUM_LAYERS <- ((16 :: Dim) :: Dim)
+NUM_LAYERS <- ((Config.dim@@num_hidden_layers default=16) :: Dim)
 
-NUM_HEADS <- ((32 :: Dim) :: Dim)
+NUM_HEADS <- ((Config.dim@@num_attention_heads default=32) :: Dim)
 
-KVH <- ((8 :: Dim) :: Dim)
+KVH <- ((Config.dim@@num_key_value_heads default=8) :: Dim)
 
-MODEL_HEAD_DIM <- (true ? (64 :: Dim) : ((MODEL_DIM / NUM_HEADS) :: Dim))
+MODEL_HEAD_DIM <- ((Config.dim@@head_dim default=64) :: Dim)
 
 KVD <- do
   return ((KVH * MODEL_HEAD_DIM) :: Dim)
 
-FFN <- ((8192 :: Dim) :: Dim)
+FFN <- ((Config.dim@@intermediate_size default=8192) :: Dim)
 
-EPS <- (1e-05)
+EPS <- (Config.float@@rms_norm_eps default=1e-05)
 
-THETA <- (500000.0)
+THETA <- (Config.float@@rope_theta default=500000.0)
 
-MAX_POSITIONS <- ((131072 :: Dim) :: Dim)
+MAX_POSITIONS <- ((Config.dim@@max_position_embeddings default=131072) :: Dim)
 
-ROPE_SCALE <- (32.0)
+ROPE_SCALE <- Config.float @@'rope_scaling.factor' default=32.0
 
-ROPE_LOW_FREQ <- (1.0)
+ROPE_LOW_FREQ <- Config.float @@'rope_scaling.low_freq_factor' default=1.0
 
-ROPE_HIGH_FREQ <- (4.0)
+ROPE_HIGH_FREQ <- Config.float @@'rope_scaling.high_freq_factor' default=4.0
 
-ROPE_CONTEXT <- ((8192 :: Dim) :: Dim)
+ROPE_CONTEXT <- Config.int @@'rope_scaling.original_max_position_embeddings' default=8192
 
 HAS_LM_HEAD <- do
   return has_root "lm_head"
@@ -90,7 +90,7 @@ llama3 input_ids attn_mask past_kv use_cache = do
   rope_ref <- Tensor.zeros input_ids shape=[B, 1, S, MODEL_HEAD_DIM] dtype="float32"
   rope_sin, rope_cos <- rope_freq_scale_factors rope_ref pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
   key_len <- mask_length_for_input input_ids attn_mask past_length
-  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
   x <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM
   work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
   read_kv <- Cache.read past_kv work_kv

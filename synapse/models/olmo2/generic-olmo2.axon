@@ -4,7 +4,7 @@
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
-import Math (mul, sqrt)
+import Math (mul)
 import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
 import Cache
 import Config
@@ -24,7 +24,6 @@ MAX_POSITIONS <- Config.int @@max_position_embeddings default=4096
 EPS <- Config.float @@rms_norm_eps default=1e-06
 THETA <- Config.float @@rope_theta default=500000.0
 ROPE_SCALE <- Config.float @@'rope_scaling.factor' default=1.0
-ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
@@ -39,7 +38,7 @@ olmo2_block x rope_sin rope_cos mask past_kv = do
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a
@@ -57,7 +56,7 @@ olmo2 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA scale_factor=ROPE_SCALE) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
   key_len <- mask_length_for_input input_ids attn_mask past_length
-  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
   work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
   read_kv <- Cache.read past_kv work_kv
   x, work_kv <- scope@model do
