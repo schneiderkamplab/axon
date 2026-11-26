@@ -532,14 +532,26 @@ high — every claim below is gated or probe-verified today.
   tests). Runbook + quirks in `wiki/remote-gates.md` (new topic page).
 - Offline gate (canonical axon-benchmark, cuda:0, float32, max_len 256): 8/8
   checkpoint pairs parity-green across five families (smollm2-135m,
-  llama3.2-1b, gemma3-1b, olmo2-1b, qwen2.5-0.5b); Axon within 4–11% of HF
-  eager generate. Evidence: `log/remote-small-20261126/` on the box.
+  llama3.2-1b, gemma3-1b, olmo2-1b, qwen2.5-0.5b); Axon 0.90–0.96× HF eager
+  generate. Evidence: `log/remote-small-20261126/` on the box.
 - Online gate reached: fleet engine + paged attention served Qwen2.5-0.5B over
-  HTTP on cuda:0 — solo 39 tok/s vs 40.95 offline standalone (≈5% serving
-  tax), 4-concurrent 153 tok/s aggregate. First family gated end-to-end
+  HTTP on cuda:0 — solo 39 tok/s (offline standalone generate: 40.95 tok/s),
+  4-concurrent 153 tok/s aggregate. First family gated end-to-end
   offline+online outside Apple Silicon.
 - Three serving-generalization fixes landed to get there (paged KV trace
   through specialized repeat clones; vacuous full-capacity mask window
   dropped; qwen2 artifact moved to the config-driven qwen3 style so the block
   module survives optimize), plus the fleet KV-pool dtype binding. Details and
   follow-up list in `wiki/remote-gates.md`.
+- Concurrency sweep on the clean fleet server (256-tok completions, 1→128
+  streams): near-linear to 16 streams (542 tok/s aggregate, 13.6× solo),
+  2507 tok/s at 128 streams (63× the 40 tok/s solo / 40.95 offline
+  standalone); zero connection errors after the backlog fix. Two more
+  serving fixes landed: HTTP listen backlog 5→256 (`753d77a`), KV-pool
+  budget from available CUDA memory (`96f838c`). Reporting preference set
+  with the user: plain tok/s + batching speedup only (OpenChamber note).
+- During stale-process cleanup a co-tenant training job (`study.py`,
+  gemma3-270m ternary run, ~12 min in) was killed by mistake alongside the
+  stale server. Lesson recorded in `wiki/remote-gates.md`: the box GPU is
+  shared — read `nvidia-smi --query-compute-apps` output before killing,
+  and never combine ps+kill in one command.

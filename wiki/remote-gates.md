@@ -22,6 +22,13 @@
   - `pkill -f "python3 -m server"` kills the calling ssh shell too (the pattern
     matches the remote shell's own cmdline); use `pkill -f "[p]ython3 -m server"`.
   - Batch jobs must fully detach: `nohup ... > log 2>&1 < /dev/null &`.
+  - Relaunch shells complete LATE: a lingering nohup ssh can start a server
+    after you already moved on, leaving stale GPU processes. Before
+    benchmarking, list `nvidia-smi --query-compute-apps` and READ it — the GPU
+    is shared with other jobs (`study.py` training runs under
+    /work/dfm/brainsurgery). Never combine `ps` and `kill` in one command:
+    on 2026-11-26 a co-tenant training run was killed this way alongside a
+    stale server; check first, kill in a separate step.
 
 ## Per-family gate (the Bifrost gate pattern, generalized)
 
@@ -65,10 +72,20 @@ Offline (axon-benchmark, generate leg, per checkpoint):
 | OLMo-2-0425-1B | 58.72 | 53.38 | 0.91 | True | 2.2e-5 |
 | Qwen2.5-0.5B | 45.12 | 40.95 | 0.91 | True | 2.9e-5 |
 
-Online (fleet + HTTP, Qwen2.5-0.5B, same GPU/precision): solo **39 tok/s**
-(≈ offline 40.95, serving tax ≈ 5%); 4 concurrent **153 tok/s** aggregate
-(256-tok probe; 111 tok/s on the 32-tok probe). Server suite on the box:
-107 passed / 5 MPS-skips. Single-run figures, same-day quiet window.
+Online (fleet + HTTP, Qwen2.5-0.5B, same GPU/precision), clean server
+(single process, backlog-fixed, pool from available memory):
+
+| streams (256-tok completions) | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|---|---|
+| aggregate tok/s | 40 | 78 | 152 | 289 | 542 | 906 | 1643 | 2507 |
+| per-stream tok/s | 40 | 39 | 38 | 36 | 34 | 28 | 26 | 20 |
+
+Solo 40 tok/s (offline standalone generate: 40.95); near-linear to 16
+streams (542 tok/s, 13.6× solo), 2507 tok/s at 128 streams (63× solo),
+zero connection errors. Pool autosized to 39.93 GiB from 69.6 GiB
+available. Server suite on the box: 107 passed / 5 MPS-skips.
+Single-run figures, same-day quiet window. Reporting preference (user):
+plain tok/s + batching speedup only — no serving-tax / %-of-HF figures.
 
 ## Serving-generalization fixes landed (evidence-dated 2026-11-26)
 
@@ -97,6 +114,13 @@ Online (fleet + HTTP, Qwen2.5-0.5B, same GPU/precision): solo **39 tok/s**
   failed SDPA at first prefill. Pool (and autosize math) now read the loaded
   model's dtype (parameters → state_dict_tensors → buffers; serving artifacts
   keep weights in state_dict_tensors, not nn.Parameters).
+- `753d77a` server: the HTTP listener used socketserver's default listen
+  backlog of 5 — bursts of >=64 simultaneous connections were reset by the
+  kernel instead of queued (seen in the concurrency sweep). Now 256, as a
+  class attribute (TCPServer consumes it inside `__init__`).
+- `96f838c` fleet: KV-pool autosize budgeted the device's TOTAL memory; with
+  a co-tenant holding most of the GPU the pool OOM'd at startup. Now budgets
+  `torch.cuda.mem_get_info` free bytes (identical on an empty device).
 
 ## Known follow-ups
 
