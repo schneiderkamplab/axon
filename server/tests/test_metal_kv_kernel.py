@@ -11,13 +11,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from synapse.axon.codegen2_torch.paged_attention import (
+from synapse.axon.codegen2_torch.paged_attention import (  # noqa: E402
     PagedAttention,
     decode_paged_sdpa,
     metal_decode_paged_sdpa,
     paged_attention,
 )
-from synapse.axon.codegen2_torch.serving_context import reset_context, set_context
+from synapse.axon.codegen2_torch.serving_context import reset_context, set_context  # noqa: E402
 
 HQ, HKV, D = 16, 8, 128  # qwen3 head geometry (GQA ratio 2)
 BS = 256
@@ -125,8 +125,11 @@ def test_paged_attention_accelerator_argument_reaches_decode():
 
 
 def test_unknown_accelerator_raises():
-    with pytest.raises(ValueError, match="unknown PagedAttention accelerator"):
-        PagedAttention(HQ, HKV, D, accelerator="cuda")
+    if not torch.cuda.is_available():
+        # "cuda" is a valid accelerator where CUDA exists (Linux GPU hosts);
+        # on CPU/MPS-only hosts it must be rejected loudly.
+        with pytest.raises(ValueError, match="unknown PagedAttention accelerator"):
+            PagedAttention(HQ, HKV, D, accelerator="cuda")
     with pytest.raises(ValueError, match="unknown paged-attention accelerator"):
         paged_attention(
             torch.zeros(1, HQ, D), torch.zeros(1, HKV, D), torch.zeros(1, HKV, D),
