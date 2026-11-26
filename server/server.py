@@ -42,6 +42,12 @@ from typing import TYPE_CHECKING, Any, Iterator
 from .engine import GenerateParams, Session
 from .response_parsers import ParserSpec, chat_stream_events, parse_full_text
 
+
+class _BacklogHTTPServer(ThreadingHTTPServer):
+    # `request_queue_size` is consumed inside TCPServer.__init__ (socket.listen),
+    # so it must be a class attribute — setting it on the instance is too late.
+    request_queue_size = 256
+
 if TYPE_CHECKING:
     from .fleet.session import FleetSession
 
@@ -545,7 +551,10 @@ def serve(
         )
 
     handler = type("_BoundHandler", (_Handler,), {"state": state})
-    httpd = ThreadingHTTPServer((host, port), handler)
+    # socketserver's default listen backlog is 5: burst arrivals beyond that
+    # get connection-reset instead of queueing. A concurrency sweep against
+    # the fleet engine resets connections at >=64 simultaneous connects.
+    httpd = _BacklogHTTPServer((host, port), handler)
     print(
         f"axon-serve: {model_name} on http://{host}:{port} "
         f"(engine={engine}, max_concurrency={max_concurrency})"
