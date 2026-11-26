@@ -456,21 +456,37 @@ def _rebuild_layer_repeat(
     )
 
 
-def _find_positions_select(main: GraphModule) -> GraphNode:
-    """The select whose branches compute the temporal position ids."""
-    matches = []
+def _select_calls_position_ids(select: Any) -> bool:
+    """Whether a 3-input core.select (node or inline expr) computes position ids."""
+    return len(select.inputs) == 3 and any(
+        _operand_calls_module(branch, _POSITION_IDS_BUILTIN_PREFIX)
+        for branch in select.inputs[1:3]
+    )
+
+
+def _find_positions_select(main: GraphModule) -> tuple[GraphNode | None, GraphNode | None, int, GraphExpr | None]:
+    """The select whose branches compute the temporal position ids.
+
+    Returns ``(select_node, None, -1, None)`` when the select is a main-module
+    node, or ``(None, owner_node, input_index, select_expr)`` when definition
+    specialization single-use-inlined it into another node's operand (the
+    positions value then exists only as that inline expr, e.g. as an argument
+    of the rope builtin call). Raises when neither shape is present.
+    """
     for node in main.nodes:
-        if node.op.name != "core.select" or len(node.inputs) != 3:
-            continue
-        branches = node.inputs[1:3]
-        if any(_operand_calls_module(branch, _POSITION_IDS_BUILTIN_PREFIX) for branch in branches):
-            matches.append(node)
-    if len(matches) != 1:
-        raise ValueError(
-            "serving profile expects exactly one Positions.position_ids computation in the "
-            f"main module; found {len(matches)}"
-        )
-    return matches[0]
+        if node.op.name == "core.select" and _select_calls_position_ids(node):
+            return node, None, -1, None
+        for index, operand in enumerate(node.inputs):
+            if (
+                isinstance(operand, GraphExpr)
+                and operand.op.name == "core.select"
+                and _select_calls_position_ids(operand)
+            ):
+                return None, node, index, operand
+    raise ValueError(
+        "serving profile expects exactly one Positions.position_ids computation in the "
+        "main module; found 0"
+    )
 
 
 def _find_head_node(main: GraphModule) -> tuple[GraphNode, str, Any]:
@@ -568,23 +584,35 @@ def lower_graph_for_serving(program: GraphProgram) -> tuple[GraphProgram, dict[s
     )
 
     # 3. Main module: positions input, loop rebuild, head split.
-    positions_select = _find_positions_select(main)
-    pos_output = positions_select.outputs[0]
-    positions_ref = GraphValueRef(name="positions", type_expr=pos_output.type_expr)
-    ref_map = {pos_output.name: positions_ref}
+    positions_select, inline_owner, inline_index, inline_expr = _find_positions_select(main)
+    if positions_select is not None:
+        positions_type = positions_select.outputs[0].type_expr
+        ref_map = {positions_select.outputs[0].name: GraphValueRef(name="positions", type_expr=positions_type)}
+        select_id: str | None = positions_select.id
+    else:
+        # The select was single-use-inlined into another node's operand; its
+        # result has no name other nodes can reference, so the operand itself
+        # is replaced by the positions input ref below.
+        positions_type = inline_expr.type_expr
+        ref_map = {}
+        select_id = None
+    positions_ref = GraphValueRef(name="positions", type_expr=positions_type)
     head_node, hidden_name, hidden_type = _find_head_node(main)
 
     new_main_nodes: list[GraphNode] = []
     for node in main.nodes:
-        if node.id == positions_select.id or node.id == head_node.id:
+        if (select_id is not None and node.id == select_id) or node.id == head_node.id:
             continue
         if node.op.name == "core.repeat":
             new_main_nodes.append(new_repeat)
             continue
+        inputs = list(node.inputs)
+        if inline_owner is not None and node.id == inline_owner.id:
+            inputs[inline_index] = positions_ref
         new_main_nodes.append(
             dc_replace(
                 node,
-                inputs=tuple(_rewrite_refs(item, ref_map) for item in node.inputs),
+                inputs=tuple(_rewrite_refs(item, ref_map) for item in inputs),
                 attrs={
                     key: _rewrite_refs(value, ref_map) for key, value in node.attrs.items()
                 },
@@ -600,7 +628,7 @@ def lower_graph_for_serving(program: GraphProgram) -> tuple[GraphProgram, dict[s
         new_main,
         inputs=(
             *new_main.inputs[:1],
-            GraphValue(name="positions", type_expr=pos_output.type_expr),
+            GraphValue(name="positions", type_expr=positions_type),
             *new_main.inputs[1:],
         ),
     )
