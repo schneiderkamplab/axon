@@ -570,3 +570,14 @@ high — every claim below is gated or probe-verified today.
   header config-driven incl. dotted rope-scaling paths; both artifacts'
   vacuous windows dropped; olmo2 attention scale dropped (equals the
   runtime default).
+
+### 2026-11-26 — device→host sync audit of generation paths
+
+Swept codegen2_{torch,common,jax} + serving runtime for `.tolist/.item/.cpu/.numpy/.nonzero`.
+Fleet serving: one sync per step by design (sampler token materialization); everything
+host-known travels via `cu_seqlens_*_host` / `context_lens_max`, device tensors in `*_host`
+fields are TypeError-rejected. Emitted greedy loop: per-step `finished.all().item()` stop
+check = the standard eager pattern (HF pays the same). MoE `offsets.tolist()` only in the
+non-CUDA fallback (grouped_mm takes device `offs=`). Details: `wiki/remote-gates.md`
+"Device→host sync audit"; guard added in `server/tests/test_sync_hygiene.py` (`2dd3200`).
+Local suite 115/115.

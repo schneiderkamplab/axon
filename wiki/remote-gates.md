@@ -193,3 +193,39 @@ on hosts without mlx).
   not define the family yet.
 - bf16 serving on CUDA (pool + weights) is the obvious next throughput step;
   kept float32 for the first parity-matched comparison.
+
+## Device→host sync audit (2026-11-26)
+
+Swept all codegen emitters + the serving runtime for `.tolist()` / `.item()` /
+`.cpu()` / `.numpy()` / `.nonzero()` / `masked_select` — anything that drains
+the pipeline into Python. Findings, classified:
+
+- **Fleet serving hot path: exactly one sync per step, by design.**
+  `model_runner.py` sampler `token_ids = ...tolist()` — continuous batching
+  needs token ids on host for bookkeeping/detokenization/finish. Everything
+  else is carried host-side: `cu_seqlens_*_host` (Python lists captured before
+  the step's H2D copies) and `context_lens_max` (host max). The paged kernels'
+  tensor-extraction lines (`paged_attention.py:179-181,287`) are *fallbacks*
+  taken only when the host fields are absent, and a device tensor passed
+  through a `*_host` field is rejected with TypeError (a smuggled tensor
+  degrades into per-layer element extractions that bypass `.item()`-style
+  instrumentation — this bug happened once and hid from the sync counters
+  until an aten-level profiler ran). `layer_idx` is a Python int (loop index,
+  `TypeInt`), so `paged_attention.py:758` never syncs.
+- **Emitted eager generate loop: one sync per step, standard.**
+  `bool(finished.all().item())` as the early-stop condition
+  (`codegen2_torch/core.py` ~4642/4669/4705). Tokens stay on device; the ids
+  tensor is returned whole. HF's generate while-condition syncs identically;
+  removing it requires run-to-max+trim (wastes compute on early EOS) or
+  batched stop checks (changes output) — not worth it at eager step times.
+  `pad = int(eos[0].item())` runs once per generation, before the loop.
+- **MoE `offsets.tolist()`: CUDA-safe.** Only in the fallback branch for
+  CPU/older torch; on CUDA the `grouped_mm` path consumes `offsets` as a
+  device tensor (`offs=`), zero syncs.
+- **Load-time only:** JAX `.numpy()` calls are state-dict conversion at load;
+  `core.py:2975` constant `.item()` is weight prep. `codegen2_common` has zero
+  hits; no `.nonzero(`/`masked_select` anywhere in codegen2_torch.
+
+Guarded by `server/tests/test_sync_hygiene.py` (`2dd3200`): static check that
+the fleet package keeps its single sanctioned sync site, plus runtime tests
+that `varlen_paged_sdpa` rejects device tensors in `*_host` fields.
