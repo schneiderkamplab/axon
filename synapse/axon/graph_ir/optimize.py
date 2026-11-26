@@ -6219,8 +6219,19 @@ def _is_torch_paged_cache_update_call(node: GraphNode) -> bool:
 
 
 def _torch_paged_repeat_source_operand(node: GraphNode) -> GraphOperand | None:
-    """Source operand of a KV-head repeat (primitive or Tensor.repeat call)."""
-    if node.op.name in {"_repeat", "Tensor.repeat"} and len(node.inputs) >= 2:
+    """Source operand of a KV-head repeat (primitive or Tensor.repeat call).
+
+    Matches specialized variants too (``Tensor.repeat__spec_N``): inlined
+    loop bodies specialize the repeat callee, and constant repeat-count
+    arguments may be pruned from the clone's signature — so only the name
+    gates here; the source must still trace to a cache update for the
+    rewrite to apply.  Same recognition style as
+    :func:`_is_torch_paged_cache_update_call`.
+    """
+    if any(
+        node.op.name == name or node.op.name.startswith(f"{name}__")
+        for name in ("_repeat", "Tensor.repeat")
+    ) and node.inputs:
         return node.inputs[0]
     return None
 
