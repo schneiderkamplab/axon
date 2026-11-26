@@ -555,3 +555,18 @@ high — every claim below is gated or probe-verified today.
   stale server. Lesson recorded in `wiki/remote-gates.md`: the box GPU is
   shared — read `nvidia-smi --query-compute-apps` output before killing,
   and never combine ps+kill in one command.
+- Online gate extended to Llama-3.2-1B (+Instruct) and OLMo-2-0425-1B:
+  offline re-gates green after the artifact modernization (57.61 / 56.68 /
+  52.87 tok/s standalone vs HF 64.16 / 63.65 / 58.25); fleet serving solo
+  56 / 58 tok/s — at or above the standalone scripts — and 2489 / 2481
+  tok/s aggregate at 128 streams (44× / 43× solo). All three gated
+  families converge to ~2500 tok/s at 128 streams in float32 — the decode
+  ceiling of this GPU at that batch depth. Evidence:
+  `log/remote-gate4-20261126/` on the box.
+- Two more generic serving-transform fixes landed for that
+  (`a9323f2` positions select found when specialization inlined it into a
+  call operand; `8f59bd1` head split accepts inline linear branches with
+  shared dim refs and unconditional heads). Artifact changes: llama3
+  header config-driven incl. dotted rope-scaling paths; both artifacts'
+  vacuous windows dropped; olmo2 attention scale dropped (equals the
+  runtime default).

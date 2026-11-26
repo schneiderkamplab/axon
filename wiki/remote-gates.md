@@ -31,7 +31,11 @@
     stale server; check first, then kill the exact PID in a separate step.
     (`pkill -f "python3 -m server"` also misses `-u` launches — pattern is
     `"[p]ython3 -u\? -m server"` — and matching variants bite; PID kill is
-    the reliable form.)
+    the reliable form.) `pgrep -f` has the same trap in reverse: launcher
+    shells whose cmdline embeds the launch text match too, and killing them
+    takes down your own ssh mid-command (2026-11-26). The reliable cycle:
+    read `nvidia-smi --query-compute-apps`, then `kill <that pid>` in a
+    separate step.
 
 ## Per-family gate (the Bifrost gate pattern, generalized)
 
@@ -68,11 +72,14 @@ Offline (axon-benchmark, generate leg, per checkpoint):
 |---|---|---|---|---|---|
 | SmolLM2-135M | 36.79 | 34.57 | 0.94 | True | 1.0e-4 |
 | SmolLM2-135M-Instruct | 36.75 | 34.92 | 0.95 | True | 4.3e-5 |
-| Llama-3.2-1B | 64.56 | 58.31 | 0.90 | True | 1.5e-5 |
-| Llama-3.2-1B-Instruct | 64.55 | 57.96 | 0.90 | True | 1.2e-5 |
+| Llama-3.2-1B | 64.16 | 57.61 | 0.90 | True | 1.5e-5 |
+| Llama-3.2-1B-Instruct | 63.65 | 56.68 | 0.89 | True | 1.2e-5 |
 | gemma-3-1b-pt | 27.80 | 26.55 | 0.96 | True | 3.2e-5 |
 | gemma-3-1b-it | 27.81 | 26.82 | 0.96 | True | 6.7e-5 |
-| OLMo-2-0425-1B | 58.72 | 53.38 | 0.91 | True | 2.2e-5 |
+| OLMo-2-0425-1B | 58.25 | 52.87 | 0.91 | True | 2.2e-5 |
+
+(llama3 and olmo2 rows re-gated 2026-11-26 after the artifact
+modernization below; values unchanged within noise from the first run.)
 | Qwen2.5-0.5B | 45.12 | 40.95 | 0.91 | True | 2.9e-5 |
 
 Online (fleet + HTTP, Qwen2.5-0.5B, same GPU/precision), clean server
@@ -89,6 +96,20 @@ zero connection errors. Pool autosized to 39.93 GiB from 69.6 GiB
 available. Server suite on the box: 107 passed / 5 MPS-skips.
 Single-run figures, same-day quiet window. Reporting preference (user):
 plain tok/s + batching speedup only — no serving-tax / %-of-HF figures.
+
+Online sweeps, further families (same conditions, clean GPU; aggregate
+tok/s at 1/4/16/64/128 streams):
+
+| family | 1 | 4 | 16 | 64 | 128 | solo vs standalone |
+|---|---|---|---|---|---|---|
+| Qwen2.5-0.5B | 40 | 152 | 542 | 1643 | 2507 | 40 vs 40.95 |
+| Llama-3.2-1B | 56 | 217 | 731 | 2052 | 2489 | 56 vs 57.61 |
+| OLMo-2-0425-1B | 58 | 229 | 762 | 2109 | 2481 | 58 vs 52.87 |
+
+Zero connection errors at every level; per-stream at 128: 19–20 tok/s.
+All three families converge to ~2500 tok/s aggregate at 128 streams in
+float32 — the decode ceiling of this GPU at that batch depth, independent
+of model size across 0.5–1B. Evidence: `log/remote-gate4-20261126/`.
 
 ## Serving-generalization fixes landed (evidence-dated 2026-11-26)
 
@@ -124,6 +145,23 @@ plain tok/s + batching speedup only — no serving-tax / %-of-HF figures.
 - `96f838c` fleet: KV-pool autosize budgeted the device's TOTAL memory; with
   a co-tenant holding most of the GPU the pool OOM'd at startup. Now budgets
   `torch.cuda.mem_get_info` free bytes (identical on an empty device).
+- `0d0d1b9` llama3 + olmo2 artifacts: config-driven geometry (llama3 also
+  takes dotted rope-scaling paths, the olmo2 style); both drop the vacuous
+  `window=MAX_POSITIONS`; olmo2 drops its explicit attention scale
+  (`1/sqrt(head_dim)` equals the runtime default). Parity re-gated green.
+- `a9323f2` serving: the positions-computing select may be single-use-inlined
+  into another node's operand by definition specialization (llama3: into the
+  rope builtin call's input; olmo2: into the `position_ids_scale` clone's
+  input), leaving no main-level select node. The finder now accepts the
+  inlined shape and substitutes the operand with the runner-supplied
+  positions ref; the new input's type comes from the expr.
+- `8f59bd1` serving: head split generalized. Branch refs are filtered to
+  tensor-typed values defined in the module (Config-resolved dim refs such
+  as VOCAB_SIZE no longer count as hidden operands) and INTERSECTED across
+  branches; and an unconditional head — the tied/untied select folded away
+  by specialization — is accepted as a plain NN.linear/NN.embedding head
+  node consuming exactly one tensor operand. qwen2's helper-module branch
+  shape is unchanged.
 
 ## Known follow-ups
 
