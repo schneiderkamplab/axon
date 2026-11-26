@@ -21,8 +21,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
 import numpy as np
+
+try:  # MLX is Apple-Silicon-only; the classify session needs it, the rest of
+    import mlx.core as mx  # the server (generation on torch/CUDA) does not.
+except ImportError:  # Guarded here so Linux hosts can import the server and
+    mx = None  # run the generation path; classify fails fast at load.
 
 __all__ = [
     "is_token_classifier",
@@ -284,6 +288,11 @@ class ClassifySession:
     ) -> "ClassifySession":
         from .loading import default_checkpoint_dir, load_mlx_model, load_model_config
 
+        if mx is None:
+            raise RuntimeError(
+                "the /v1/classify path requires mlx (Apple Silicon);"
+                " this host has no MLX, so token classification cannot load here"
+            )
         path = Path(axon_path)
         checkpoint = (
             Path(checkpoint_dir).resolve() if checkpoint_dir else default_checkpoint_dir(path)
