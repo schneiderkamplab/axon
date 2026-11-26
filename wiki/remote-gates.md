@@ -111,6 +111,16 @@ All three families converge to ~2500 tok/s aggregate at 128 streams in
 float32 — the decode ceiling of this GPU at that batch depth, independent
 of model size across 0.5–1B. Evidence: `log/remote-gate4-20261126/`.
 
+Session engine (plain inference-profile artifact, no paged pool, one
+shared session; Llama-3.2-1B, torch/cuda, `--backend torch --device
+cuda:0`): solo **66 tok/s** — the fastest single-stream decode measured
+on this box — but no batching: 4 concurrent streams complete at
+62 tok/s *aggregate* (~15.5/stream; aggregate never exceeds solo). The
+fleet engine pays ~15% at solo for the paged pool and buys the entire
+batching curve. Requires `--backend torch` (landed `82754ee`; the
+session engine previously hardcoded the mlx backend and could not serve
+on hosts without mlx).
+
 ## Serving-generalization fixes landed (evidence-dated 2026-11-26)
 
 - `e96a526` `server/classify.py` imported mlx.core at module top — Linux hosts
@@ -162,6 +172,11 @@ of model size across 0.5–1B. Evidence: `log/remote-gate4-20261126/`.
   by specialization — is accepted as a plain NN.linear/NN.embedding head
   node consuming exactly one tensor operand. qwen2's helper-module branch
   shape is unchanged.
+- `82754ee` server: `--backend` flag for the session engine (mlx|torch).
+  The session engine hardcoded the mlx backend and crashed on hosts
+  without mlx; `--backend torch --device cuda:0` now serves the plain
+  inference-profile artifact there, enabling the session-vs-fleet
+  comparison above.
 
 ## Known follow-ups
 
