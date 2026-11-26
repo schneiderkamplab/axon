@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import replace as dc_replace
 from typing import Any
 
-from ..ast import TypeInt, TypePath, TypeTuple
+from ..ast import TypeDim, TypeInt, TypePath, TypeTuple
 from ..graph_ir import (
     GraphExpr,
     GraphLiteral,
@@ -489,8 +489,34 @@ def _find_positions_select(main: GraphModule) -> tuple[GraphNode | None, GraphNo
     )
 
 
+def _tensor_operand_refs(module: GraphModule, operand: GraphOperand) -> set[str]:
+    """Tensor value refs in an operand tree (dim symbols and globals excluded).
+
+    Only tensor-typed values defined in ``module`` can be the hidden operand a
+    head module receives; dim symbols (e.g. a Config-resolved VOCAB_SIZE in
+    both tied and untied branches) and values defined outside the module are
+    not tensor inputs.
+    """
+    refs: set[str] = set()
+    for name in _operand_value_ref_names(operand):
+        try:
+            type_expr = _value_ref_type_in_module(module, name)
+        except ValueError:
+            continue
+        if isinstance(type_expr, TypeDim):
+            continue
+        refs.add(name)
+    return refs
+
+
 def _find_head_node(main: GraphModule) -> tuple[GraphNode, str, Any]:
-    """Extract (head select node, hidden value name, hidden type) from main."""
+    """Extract (head node, hidden value name, hidden type) from main.
+
+    The head is either the tied/untied select over the logits computation, or
+    — when definition specialization folded that select away (a checkpoint
+    with a known tie state, or an artifact with a single unconditional head) —
+    the logits-producing linear/embedding node itself.
+    """
     first_output = main.outputs[0]
     if not isinstance(first_output, GraphValueRef):
         raise ValueError("serving profile expects the main module's first output to be a value ref")
@@ -498,29 +524,43 @@ def _find_head_node(main: GraphModule) -> tuple[GraphNode, str, Any]:
         output.name: node for node in main.nodes for output in node.outputs
     }
     head = producers.get(first_output.name)
-    if head is None or head.op.name != "core.select" or len(head.inputs) != 3:
+    if head is None:
         raise ValueError(
             "serving profile expects the main module's logits to come from a tied/untied "
             "select; adjust the head split for this artifact shape"
         )
-    branch_refs: list[str] = []
-    for branch in head.inputs[1:3]:
-        refs = _operand_value_ref_names(branch)
-        if not refs:
+    if head.op.name == "core.select" and len(head.inputs) == 3:
+        per_branch = [_tensor_operand_refs(main, branch) for branch in head.inputs[1:3]]
+        if any(not refs for refs in per_branch):
             raise ValueError(
                 f"head select {head.id!r} has a branch without tensor operands; the head "
                 "split cannot infer the hidden value"
             )
-        branch_refs.extend(refs)
-    common = set(branch_refs)
-    if len(common) != 1:
-        raise ValueError(
-            f"head select {head.id!r} branches do not share exactly one hidden operand "
-            f"({sorted(common)})"
-        )
-    hidden_name = common.pop()
-    hidden_type = _value_ref_type_in_module(main, hidden_name)
-    return head, hidden_name, hidden_type
+        common = set.intersection(*per_branch)
+        if len(common) != 1:
+            raise ValueError(
+                f"head select {head.id!r} branches do not share exactly one hidden operand "
+                f"({sorted(common)})"
+            )
+        hidden_name = common.pop()
+        hidden_type = _value_ref_type_in_module(main, hidden_name)
+        return head, hidden_name, hidden_type
+    if head.op.name.startswith("NN.linear") or head.op.name.startswith("NN.embedding"):
+        refs: set[str] = set()
+        for operand in head.inputs:
+            refs |= _tensor_operand_refs(main, operand)
+        if len(refs) != 1:
+            raise ValueError(
+                f"head node {head.id!r} ({head.op.name}) does not consume exactly one "
+                f"tensor operand ({sorted(refs)}); the head split cannot infer the hidden value"
+            )
+        hidden_name = refs.pop()
+        hidden_type = _value_ref_type_in_module(main, hidden_name)
+        return head, hidden_name, hidden_type
+    raise ValueError(
+        "serving profile expects the main module's logits to come from a tied/untied "
+        "select; adjust the head split for this artifact shape"
+    )
 
 
 def _value_ref_type_in_module(module: GraphModule, name: str) -> Any:
