@@ -28,7 +28,10 @@
     is shared with other jobs (`study.py` training runs under
     /work/dfm/brainsurgery). Never combine `ps` and `kill` in one command:
     on 2026-11-26 a co-tenant training run was killed this way alongside a
-    stale server; check first, kill in a separate step.
+    stale server; check first, then kill the exact PID in a separate step.
+    (`pkill -f "python3 -m server"` also misses `-u` launches — pattern is
+    `"[p]ython3 -u\? -m server"` — and matching variants bite; PID kill is
+    the reliable form.)
 
 ## Per-family gate (the Bifrost gate pattern, generalized)
 
